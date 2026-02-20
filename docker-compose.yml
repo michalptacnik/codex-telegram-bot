@@ -1,0 +1,11 @@
+services:
+  codex-telegram-bot:
+    build: .
+    container_name: codex-telegram-bot
+    environment:
+      - LOG_LEVEL=INFO
+    volumes:
+      - ~/.config/codex-telegram-bot:/root/.config/codex-telegram-bot
+      # Mount host codex CLI into container if available
+      - /usr/local/bin/codex:/usr/local/bin/codex:ro
+    command: ["--config-dir", "/root/.config/codex-telegram-bot"]

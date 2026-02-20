@@ -1,0 +1,13 @@
+[Unit]
+Description=Codex Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory={{WORKDIR}}
+ExecStart={{ENTRYPOINT}} --config-dir {{CONFIG_DIR}}
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=default.target
