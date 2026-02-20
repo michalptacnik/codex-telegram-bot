@@ -2,12 +2,12 @@
 
 A Telegram bot that forwards user messages to the local `codex` CLI and returns the response back in chat.
 
-It is designed for private/self-hosted use, with optional allowlist controls to prevent unauthorized usage.
+Designed for private/self-hosted use, with an optional allowlist to prevent unauthorized usage.
 
 ## Features
 
 - Runs as a local polling Telegram bot
-- Forwards text prompts to `codex exec`
+- Forwards text prompts to `codex exec` (non-interactive)
 - Streams back long output in multiple Telegram messages
 - Built-in onboarding flow for token + allowlist
 - Safety guardrails:
@@ -35,45 +35,84 @@ The bot is stateless by default. It executes each incoming message as an indepen
 - `codex` CLI installed and accessible in `PATH`
 - Telegram bot token from `@BotFather`
 
-## Quick Start
+## Install
+
+Dev install:
 
 ```bash
-git clone git@github.com:<your-username>/codex-telegram-bot.git
-cd codex-telegram-bot
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python bot.py
+pip install -e .
 ```
 
-On first run, the bot will prompt you for:
+Local install:
+
+```bash
+pip install .
+```
+
+## Run
+
+```bash
+codex-telegram-bot
+```
+
+## Config
+
+By default, config is stored in:
+
+```
+~/.config/codex-telegram-bot/.env
+```
+
+You can override it with:
+
+```bash
+codex-telegram-bot --config-dir /path/to/config
+```
+
+On first run, the bot prompts you for:
 
 - `TELEGRAM_BOT_TOKEN`
 - `ALLOWLIST` (comma-separated Telegram user IDs)
 
-It writes values into `.env` in the project directory.
+If `ALLOWLIST` is blank, the bot will warn and require you to type `YES` to continue.
 
-## Configuration
-
-You can configure using environment variables or `.env` file.
+Environment variables override `.env`:
 
 - `TELEGRAM_BOT_TOKEN` (required)
-- `ALLOWLIST` (optional): comma-separated numeric Telegram user IDs
+- `ALLOWLIST` (optional)
+- `LOG_LEVEL` (default: INFO)
 
-If `ALLOWLIST` is empty, anyone who can message the bot can use it.
+Print active config summary (never prints token):
 
-## Security Notes
+```bash
+codex-telegram-bot --print-config
+```
 
-- Prefer setting `ALLOWLIST` to your own Telegram user ID(s).
-- Keep `.env` private and never commit it.
-- This bot executes local CLI calls; run it only on machines you trust.
-- Consider running it under a restricted Unix user.
+## Service (systemd)
 
-## Operational Notes
+Recommended (user service):
 
-- Max incoming prompt length: `6000` chars
-- Reply chunk size: `3800` chars per Telegram message
-- Codex timeout: `60s`
+```bash
+./scripts/install_service.sh --user --workdir /path/to/repo
+systemctl --user enable --now codex-telegram-bot
+```
+
+System-wide:
+
+```bash
+sudo ./scripts/install_service.sh --system --workdir /opt/codex-telegram-bot
+sudo systemctl enable --now codex-telegram-bot
+```
+
+## Docker (optional)
+
+The container expects `codex` to be available. The simplest approach is to mount the host binary into the container.
+
+```bash
+docker compose up --build
+```
+
+If your `codex` binary is in a different location, update the volume in `docker-compose.yml`.
 
 ## Admin Commands
 
@@ -81,25 +120,6 @@ If `ALLOWLIST` is empty, anyone who can message the bot can use it.
 - `/reinstall`: clears stored token and restarts for onboarding
 - `/purge`: removes `.env` and restarts
 - `/restart`: immediate process restart
-
-## Run as a Service (systemd example)
-
-```ini
-[Unit]
-Description=Codex Telegram Bot
-After=network.target
-
-[Service]
-Type=simple
-User=<linux-user>
-WorkingDirectory=/opt/codex-telegram-bot
-ExecStart=/opt/codex-telegram-bot/.venv/bin/python /opt/codex-telegram-bot/bot.py
-Restart=always
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
 
 ## Troubleshooting
 
