@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-telegram-bot"
+version = "0.1.0"
+description = "Telegram bot that forwards messages to local codex CLI"
+readme = "README.md"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+authors = [
+  {name = "Michal Ptacnik"}
+]
+keywords = ["telegram", "codex", "bot"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: MIT License",
+]
+dependencies = [
+  "python-telegram-bot>=20.0",
+]
+
+[project.scripts]
+codex-telegram-bot = "codex_telegram_bot.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
