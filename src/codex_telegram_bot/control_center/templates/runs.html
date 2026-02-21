@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Runs</h1>
+    <p class="subtitle">Execution history</p>
+  </div>
+</div>
+
+<section class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Completed</th>
+        <th>Preview</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if runs %}
+      {% for run in runs %}
+      <tr>
+        <td><a class="link mono" href="/runs/{{ run.run_id }}">{{ run.run_id[:8] }}</a></td>
+        <td><span class="pill {{ run.status }}">{{ run.status }}</span></td>
+        <td class="dim">{{ run.created_at[:19] | replace("T", " ") }}</td>
+        <td class="dim">
+          {% if run.completed_at %}{{ run.completed_at[:19] | replace("T", " ") }}{% else %}-{% endif %}
+        </td>
+        <td>{{ (run.output or run.error or run.prompt)[:110] }}</td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="5" class="dim">No runs yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+

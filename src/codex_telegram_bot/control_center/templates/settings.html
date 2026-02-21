@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Settings</h1>
+    <p class="subtitle">Runtime diagnostics and provider baseline</p>
+  </div>
+</div>
+
+<section class="cards">
+  <article class="card">
+    <div class="k">Provider Version</div>
+    <div class="v" style="font-size: 20px;">{{ provider_version }}</div>
+  </article>
+  <article class="card">
+    <div class="k">Execution Mode</div>
+    <div class="v" style="font-size: 20px;">Local Shell</div>
+  </article>
+  <article class="card">
+    <div class="k">State Storage</div>
+    <div class="v" style="font-size: 20px;">SQLite</div>
+  </article>
+  <article class="card">
+    <div class="k">Next</div>
+    <div class="v" style="font-size: 20px;">Policies + Auth</div>
+  </article>
+</section>
+
+<section class="card table-card">
+  <div class="k">Provider Health</div>
+  <pre class="output">{{ provider_health | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

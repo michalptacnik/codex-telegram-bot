@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Dashboard</h1>
+    <p class="subtitle">Local run telemetry and recent activity</p>
+  </div>
+  <div class="badge">State DB-backed</div>
+</div>
+
+<section class="cards">
+  <article class="card"><div class="k">Total Runs</div><div class="v">{{ metrics.total }}</div></article>
+  <article class="card"><div class="k">Running</div><div class="v">{{ metrics.running }}</div></article>
+  <article class="card"><div class="k">Completed</div><div class="v">{{ metrics.completed }}</div></article>
+  <article class="card"><div class="k">Failed</div><div class="v">{{ metrics.failed }}</div></article>
+</section>
+
+<section class="card table-card">
+  <div class="k" style="margin-bottom: 8px;">Recent Runs</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Run</th>
+        <th>Status</th>
+        <th>Created</th>
+        <th>Preview</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if runs %}
+      {% for run in runs %}
+      <tr>
+        <td><a class="link mono" href="/runs/{{ run.run_id }}">{{ run.run_id[:8] }}</a></td>
+        <td><span class="pill {{ run.status }}">{{ run.status }}</span></td>
+        <td class="dim">{{ run.created_at[:19] | replace("T", " ") }}</td>
+        <td>{{ (run.output or run.error or run.prompt)[:100] }}</td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="4" class="dim">No runs yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+

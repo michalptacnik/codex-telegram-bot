@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Run Detail</h1>
+    <p class="subtitle mono">{{ run.run_id }}</p>
+  </div>
+  <div><span class="pill {{ run.status }}">{{ run.status }}</span></div>
+</div>
+
+<section class="cards">
+  <article class="card"><div class="k">Created</div><div class="v" style="font-size: 16px;">{{ run.created_at[:19] | replace("T", " ") }}</div></article>
+  <article class="card"><div class="k">Started</div><div class="v" style="font-size: 16px;">{% if run.started_at %}{{ run.started_at[:19] | replace("T", " ") }}{% else %}-{% endif %}</div></article>
+  <article class="card"><div class="k">Completed</div><div class="v" style="font-size: 16px;">{% if run.completed_at %}{{ run.completed_at[:19] | replace("T", " ") }}{% else %}-{% endif %}</div></article>
+  <article class="card"><div class="k">Back</div><div class="v" style="font-size: 16px;"><a class="link" href="/runs">All runs</a></div></article>
+</section>
+
+<section class="card table-card">
+  <div class="k">Prompt</div>
+  <pre class="output">{{ run.prompt or "" }}</pre>
+</section>
+
+<section class="card table-card">
+  <div class="k">Output</div>
+  <pre class="output">{{ run.output or "" }}</pre>
+</section>
+
+{% if run.error %}
+<section class="card table-card">
+  <div class="k">Error</div>
+  <pre class="output">{{ run.error }}</pre>
+</section>
+{% endif %}
+
+<section class="card table-card">
+  <div class="k">Live Timeline</div>
+  <div class="toolbar">
+    <label class="dim">Type
+      <select id="eventType">
+        <option value="">All</option>
+        <option value="run.started">run.started</option>
+        <option value="run.completed">run.completed</option>
+        <option value="run.failed">run.failed</option>
+      </select>
+    </label>
+    <label class="dim">Search
+      <input id="searchText" type="text" placeholder="Filter payload..." />
+    </label>
+    <label class="dim">
+      <input id="pauseLive" type="checkbox" />
+      Pause live updates
+    </label>
+    <label class="dim">
+      <input id="autoScroll" type="checkbox" checked />
+      Autoscroll
+    </label>
+    <a class="btn" href="/api/runs/{{ run.run_id }}/artifact.txt">Download artifact</a>
+  </div>
+  <ul class="timeline" id="timeline">
+    {% if events %}
+    {% for e in events %}
+    <li>
+      <div><span class="pill">{{ e.event_type }}</span></div>
+      <div class="dim">{{ e.created_at[:19] | replace("T", " ") }}</div>
+      <div>{{ e.payload }}</div>
+    </li>
+    {% endfor %}
+    {% else %}
+    <li><div class="dim">No events yet.</div></li>
+    {% endif %}
+  </ul>
+</section>
+
+<script>
+  (function () {
+    const runId = "{{ run.run_id }}";
+    let rawEvents = [];
+    const timelineEl = document.getElementById("timeline");
+    const typeEl = document.getElementById("eventType");
+    const searchEl = document.getElementById("searchText");
+    const pauseEl = document.getElementById("pauseLive");
+    const autoScrollEl = document.getElementById("autoScroll");
+
+    function esc(s) {
+      return String(s || "").replace(/[&<>"']/g, function (m) {
+        if (m === "&") return "&amp;";
+        if (m === "<") return "&lt;";
+        if (m === ">") return "&gt;";
+        if (m === '"') return "&quot;";
+        return "&#39;";
+      });
+    }
+    function renderTimeline() {
+      const typeFilter = typeEl.value;
+      const searchFilter = (searchEl.value || "").toLowerCase().trim();
+      const filtered = rawEvents.filter(function (e) {
+        if (typeFilter && e.event_type !== typeFilter) return false;
+        if (!searchFilter) return true;
+        return String(e.payload || "").toLowerCase().indexOf(searchFilter) >= 0;
+      });
+      const items = filtered.map(function (e) {
+        return "<li>" +
+          "<div><span class='pill'>" + esc(e.event_type) + "</span></div>" +
+          "<div class='dim'>" + esc((e.created_at || "").replace("T", " ").slice(0, 19)) + "</div>" +
+          "<div>" + esc(e.payload || "") + "</div>" +
+          "</li>";
+      }).join("");
+      timelineEl.innerHTML = items || "<li><div class='dim'>No matching events.</div></li>";
+      if (autoScrollEl.checked) {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+      }
+    }
+    async function refreshEvents() {
+      if (pauseEl.checked) return;
+      const res = await fetch("/api/runs/" + runId + "/events?limit=200");
+      if (!res.ok) return;
+      rawEvents = await res.json();
+      renderTimeline();
+    }
+    typeEl.addEventListener("change", renderTimeline);
+    searchEl.addEventListener("input", renderTimeline);
+    rawEvents = [
+      {% for e in events %}
+      {"event_type": "{{ e.event_type }}", "created_at": "{{ e.created_at }}", "payload": {{ e.payload | tojson }}},
+      {% endfor %}
+    ];
+    renderTimeline();
+    setInterval(refreshEvents, 2000);
+  })();
+</script>
+{% endblock %}

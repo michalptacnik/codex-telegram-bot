@@ -4,6 +4,7 @@ import os
 import sys
 from pathlib import Path
 
+from codex_telegram_bot.app_container import build_agent_service
 from .config import (
     DEFAULT_CONFIG_DIR,
     load_config,
@@ -57,6 +58,13 @@ def main() -> None:
     parser.add_argument("--reinstall", action="store_true", help="Clear token and re-onboard")
     parser.add_argument("--purge", action="store_true", help="Delete .env and re-onboard")
     parser.add_argument("--restart", action="store_true", help="Restart the bot process")
+    parser.add_argument(
+        "--control-center",
+        action="store_true",
+        help="Run local Control Center web UI instead of Telegram polling mode",
+    )
+    parser.add_argument("--host", default="127.0.0.1", help="Control Center bind host")
+    parser.add_argument("--port", type=int, default=8765, help="Control Center bind port")
     parser.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
 
     args = parser.parse_args()
@@ -90,7 +98,23 @@ def main() -> None:
         "restart_callback": _restart_self,
     }
 
-    app = build_application(config.token, config.allowlist, callbacks)
+    state_db_path = config.config_dir / "state.db"
+    agent_service = build_agent_service(state_db_path=state_db_path)
+
+    if args.control_center:
+        from codex_telegram_bot.control_center.app import create_app
+        import uvicorn
+
+        app = create_app(agent_service)
+        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
+        return
+
+    app = build_application(
+        config.token,
+        config.allowlist,
+        callbacks,
+        agent_service=agent_service,
+    )
     app.run_polling(close_loop=False)
 
 

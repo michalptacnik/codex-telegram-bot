@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Agents</h1>
+    <p class="subtitle">Registry and profile management</p>
+  </div>
+</div>
+
+{% if error %}
+<section class="card table-card">
+  <div class="k">Validation Error</div>
+  <pre class="output">{{ error }}</pre>
+</section>
+{% endif %}
+
+<section class="card table-card">
+  <div class="k">Create or Update Agent</div>
+  <form class="toolbar" method="post" action="/agents">
+    <input type="text" name="agent_id" placeholder="agent_id (e.g. planner)" required />
+    <input type="text" name="name" placeholder="Agent Name" required />
+    <select name="provider">
+      <option value="codex_cli">codex_cli</option>
+    </select>
+    <select name="policy_profile">
+      <option value="strict">strict</option>
+      <option value="balanced" selected>balanced</option>
+      <option value="trusted">trusted</option>
+    </select>
+    <input type="number" name="max_concurrency" min="1" max="10" value="1" />
+    <select name="enabled">
+      <option value="true" selected>enabled</option>
+      <option value="false">disabled</option>
+    </select>
+    <button type="submit">Save</button>
+  </form>
+</section>
+
+<section class="card table-card">
+  <div class="k">Registered Agents</div>
+  <table>
+    <thead>
+      <tr>
+        <th>Agent ID</th>
+        <th>Name</th>
+        <th>Provider</th>
+        <th>Policy</th>
+        <th>Max Concurrency</th>
+        <th>Enabled</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in agents %}
+      <tr>
+        <td class="mono">{{ a.agent_id }}</td>
+        <td>{{ a.name }}</td>
+        <td>{{ a.provider }}</td>
+        <td>{{ a.policy_profile }}</td>
+        <td>{{ a.max_concurrency }}</td>
+        <td>{{ a.enabled }}</td>
+        <td>
+          {% if a.agent_id != "default" %}
+          <form method="post" action="/agents/{{ a.agent_id }}/delete">
+            <button type="submit">Delete</button>
+          </form>
+          {% else %}
+          <span class="dim">Protected</span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

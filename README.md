@@ -25,9 +25,17 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
 
 ## Architecture
 
-`Telegram -> python-telegram-bot handlers -> local codex subprocess -> Telegram reply`
+`Telegram -> handlers -> AgentService -> ProviderAdapter -> ExecutionRunner -> codex CLI`
 
-The bot is stateless by default. It executes each incoming message as an independent `codex exec` call.
+Current module boundaries:
+
+- `telegram_bot.py`: Telegram handlers and command wiring
+- `services/agent_service.py`: app service boundary for agent actions
+- `providers/codex_cli.py`: OpenAI/Codex provider adapter (CLI-backed)
+- `execution/local_shell.py`: local subprocess execution boundary
+- `domain/contracts.py`: shared contracts for providers/execution
+
+The bot remains stateless by default. Each incoming message is executed as an independent `codex exec` call through these layers.
 
 ## Requirements
 
@@ -55,12 +63,24 @@ pip install .
 codex-telegram-bot
 ```
 
+Run Control Center web UI (local dashboard):
+
+```bash
+codex-telegram-bot --control-center --host 127.0.0.1 --port 8765
+```
+
 ## Config
 
 By default, config is stored in:
 
 ```
 ~/.config/codex-telegram-bot/.env
+```
+
+Run lifecycle state is persisted in:
+
+```
+~/.config/codex-telegram-bot/state.db
 ```
 
 You can override it with:
@@ -81,6 +101,10 @@ Environment variables override `.env`:
 - `TELEGRAM_BOT_TOKEN` (required)
 - `ALLOWLIST` (optional)
 - `LOG_LEVEL` (default: INFO)
+- `PROVIDER_RETRY_ATTEMPTS` (default: `1`)
+- `PROVIDER_FAILURE_THRESHOLD` (default: `2`)
+- `PROVIDER_RECOVERY_SEC` (default: `30`)
+- `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
 
 Print active config summary (never prints token):
 
@@ -120,6 +144,75 @@ If your `codex` binary is in a different location, update the volume in `docker-
 - `/reinstall`: clears stored token and restarts for onboarding
 - `/purge`: removes `.env` and restarts
 - `/restart`: immediate process restart
+
+## Control Center Endpoints
+
+- `GET /` dashboard
+- `GET /runs`
+- `GET /runs/{run_id}`
+- `GET /agents`
+- `GET /settings`
+- `GET /health`
+- `GET /api/metrics`
+- `GET /api/runs?limit=20`
+- `GET /api/runs/{run_id}`
+- `GET /api/runs/{run_id}/events`
+- `GET /api/runs/{run_id}/artifact.txt`
+- `GET /api/agents`
+- `POST /api/jobs/{job_id}/cancel`
+- `POST /api/handoffs`
+- `POST /agents` (create/update)
+- `POST /agents/{agent_id}/delete`
+
+## Logging
+
+Runtime lifecycle logs now include structured JSON lines with run correlation IDs for:
+
+- run start/failure/completion events
+- provider execution start/finish/error events
+
+Provider router behavior:
+
+- Retries failed primary executions up to configured attempts
+- Opens circuit after configured consecutive failures
+- Uses fallback provider when circuit is open (if enabled)
+
+## Agent Registry
+
+Agent profiles are persisted in SQLite and seeded with:
+
+- `default` agent (`provider=codex_cli`, `policy_profile=balanced`)
+
+Supported policy profiles:
+
+- `strict`
+- `balanced`
+- `trusted`
+
+Agent concurrency:
+
+- Each agent has `max_concurrency` (1-10)
+- Scheduler enforces per-agent concurrency limits
+- Queued jobs support cancellation by `job_id`
+
+## Handoff Protocol
+
+Cross-agent handoff uses an explicit envelope payload:
+
+- `version`
+- `from_agent_id`
+- `to_agent_id`
+- `parent_run_id`
+- `created_at`
+- `prompt_preview`
+
+Handoff lifecycle events (attached to `parent_run_id` timeline when provided):
+
+- `handoff.requested`
+- `handoff.accepted`
+- `handoff.recovered` (fallback to `default` agent if target unavailable)
+- `handoff.completed`
+- `handoff.failed`
 
 ## Troubleshooting
 

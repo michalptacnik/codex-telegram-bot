@@ -7,7 +7,8 @@ from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .runner import get_codex_version, run_codex
+from codex_telegram_bot.app_container import build_agent_service
+from codex_telegram_bot.services.agent_service import AgentService
 from .util import chunk_text
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,8 @@ async def handle_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
-        version = await get_codex_version()
+        agent_service = context.bot_data.get("agent_service")
+        version = await agent_service.provider_version()
         cwd = os.getcwd()
         allowlist_active = "yes" if context.bot_data.get("allowlist") else "no"
         msg = f"Codex version: {version}\nCWD: {cwd}\nAllowlist active: {allowlist_active}"
@@ -62,7 +64,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
-        output = await run_codex(text)
+        agent_service = context.bot_data.get("agent_service")
+        output = await agent_service.run_prompt(text)
         output = output.strip() if output else ""
         if not output:
             output = "(no output)"
@@ -121,9 +124,17 @@ async def handle_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> No
         pass
 
 
-def build_application(token: str, allowlist: Optional[List[int]], callbacks: dict):
+def build_application(
+    token: str,
+    allowlist: Optional[List[int]],
+    callbacks: dict,
+    agent_service: Optional[AgentService] = None,
+):
+    if agent_service is None:
+        agent_service = build_agent_service()
     app = ApplicationBuilder().token(token).build()
     app.bot_data["allowlist"] = allowlist
+    app.bot_data["agent_service"] = agent_service
     app.bot_data.update(callbacks)
 
     app.add_handler(CommandHandler("ping", handle_ping))
