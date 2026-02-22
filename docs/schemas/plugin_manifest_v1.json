@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://codex-telegram-bot.local/schemas/plugin_manifest_v1.json",
+  "title": "Plugin Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "plugin_id",
+    "name",
+    "version",
+    "entrypoint",
+    "capabilities"
+  ],
+  "properties": {
+    "manifest_version": {
+      "type": "string",
+      "const": "1.0"
+    },
+    "plugin_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{3,64}$"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 500
+    },
+    "requires_api_version": {
+      "type": "string",
+      "const": "v1"
+    },
+    "security_acknowledged": {
+      "type": "boolean",
+      "default": false
+    },
+    "entrypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "argv"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "command"
+        },
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "runs:read",
+          "jobs:read",
+          "jobs:cancel",
+          "prompts:queue",
+          "meta:read",
+          "retrieval:read",
+          "workspace:read",
+          "workspace:write",
+          "network:http"
+        ]
+      }
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["resource", "actions"],
+        "properties": {
+          "resource": {
+            "type": "string",
+            "enum": [
+              "runs",
+              "jobs",
+              "prompts",
+              "meta",
+              "retrieval",
+              "workspace",
+              "network"
+            ]
+          },
+          "actions": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": ["read", "write", "queue", "cancel", "request"]
+            }
+          }
+        }
+      }
+    }
+  }
+}

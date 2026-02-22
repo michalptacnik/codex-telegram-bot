@@ -187,6 +187,7 @@ Versioning and provenance details:
 - `docs/reliability_ops.md`
 - `docs/upgrade_rollback_runbook.md`
 - `docs/local_api_v1.md`
+- `docs/plugin_manifest.md`
 
 Bootstrap behavior:
 
