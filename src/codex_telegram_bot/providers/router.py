@@ -32,8 +32,24 @@ class ProviderRouter(ProviderAdapter):
         correlation_id: str = "",
         policy_profile: str = "balanced",
     ) -> str:
+        requirements = _required_capabilities(prompt=prompt, policy_profile=policy_profile)
+        primary_caps = _provider_capabilities(self._primary)
+        fallback_caps = _provider_capabilities(self._fallback)
+
+        if not _supports_requirements(primary_caps, requirements):
+            if self._fallback and _supports_requirements(fallback_caps, requirements):
+                self._active_provider = "fallback"
+                return await self._fallback.execute(
+                    prompt,
+                    correlation_id=correlation_id,
+                    policy_profile=policy_profile,
+                )
+            return _capability_mismatch_message(requirements=requirements, provider="primary")
+
         if self._circuit_is_open():
             if self._fallback:
+                if not _supports_requirements(fallback_caps, requirements):
+                    return _capability_mismatch_message(requirements=requirements, provider="fallback")
                 self._active_provider = "fallback"
                 return await self._fallback.execute(
                     prompt,
@@ -60,6 +76,8 @@ class ProviderRouter(ProviderAdapter):
                 break
 
         if self._fallback:
+            if not _supports_requirements(fallback_caps, requirements):
+                return _capability_mismatch_message(requirements=requirements, provider="fallback")
             self._active_provider = "fallback"
             return await self._fallback.execute(
                 prompt,
@@ -89,6 +107,38 @@ class ProviderRouter(ProviderAdapter):
             },
             "primary": primary_health,
             "fallback": fallback_health,
+            "capabilities": self.capabilities(),
+        }
+
+    def capabilities(self) -> Dict[str, Any]:
+        primary_caps = _provider_capabilities(self._primary)
+        fallback_caps = _provider_capabilities(self._fallback)
+        max_context = max(
+            int(primary_caps.get("max_context_chars", 0) or 0),
+            int(fallback_caps.get("max_context_chars", 0) or 0),
+        )
+        return {
+            "provider": "router",
+            "supports_tool_calls": bool(primary_caps.get("supports_tool_calls")) or bool(
+                fallback_caps.get("supports_tool_calls")
+            ),
+            "supports_streaming": bool(primary_caps.get("supports_streaming")) or bool(
+                fallback_caps.get("supports_streaming")
+            ),
+            "max_context_chars": max_context,
+            "supported_policy_profiles": sorted(
+                set(_supported_profiles(primary_caps)) | set(_supported_profiles(fallback_caps))
+            ),
+            "route_policy": {
+                "fallback_enabled": self._fallback is not None,
+                "retry_attempts": self._cfg.retry_attempts,
+                "failure_threshold": self._cfg.failure_threshold,
+                "recovery_sec": self._cfg.recovery_sec,
+            },
+            "providers": {
+                "primary": primary_caps,
+                "fallback": fallback_caps,
+            },
         }
 
     def _on_success(self) -> None:
@@ -111,3 +161,59 @@ class ProviderRouter(ProviderAdapter):
 
 def _is_error_output(output: str) -> bool:
     return (output or "").startswith("Error:")
+
+
+def _provider_capabilities(provider: Optional[ProviderAdapter]) -> Dict[str, Any]:
+    if provider is None:
+        return {}
+    getter = getattr(provider, "capabilities", None)
+    if callable(getter):
+        try:
+            caps = getter()
+        except Exception:
+            return {}
+        if isinstance(caps, dict):
+            return caps
+    return {}
+
+
+def _required_capabilities(prompt: str, policy_profile: str) -> Dict[str, Any]:
+    text = prompt or ""
+    tool_requested = any(line.strip().startswith(("!exec ", "!loop ")) for line in text.splitlines())
+    return {
+        "requires_tool_calls": tool_requested,
+        "min_context_chars": len(text),
+        "policy_profile": (policy_profile or "balanced").strip().lower(),
+    }
+
+
+def _supports_requirements(capabilities: Dict[str, Any], requirements: Dict[str, Any]) -> bool:
+    if not capabilities:
+        return True
+    if requirements.get("requires_tool_calls") and not capabilities.get("supports_tool_calls", False):
+        return False
+    max_context = int(capabilities.get("max_context_chars", 0) or 0)
+    if max_context and int(requirements.get("min_context_chars", 0) or 0) > max_context:
+        return False
+    allowed_profiles = _supported_profiles(capabilities)
+    policy_profile = str(requirements.get("policy_profile") or "balanced")
+    if allowed_profiles and policy_profile not in allowed_profiles:
+        return False
+    return True
+
+
+def _supported_profiles(capabilities: Dict[str, Any]) -> list[str]:
+    raw = capabilities.get("supported_policy_profiles")
+    if not isinstance(raw, list):
+        return []
+    return [str(v).strip().lower() for v in raw if str(v).strip()]
+
+
+def _capability_mismatch_message(requirements: Dict[str, Any], provider: str) -> str:
+    bits = [
+        f"provider={provider}",
+        f"policy={requirements.get('policy_profile', 'balanced')}",
+        f"min_context={requirements.get('min_context_chars', 0)}",
+        f"tool_calls={'yes' if requirements.get('requires_tool_calls') else 'no'}",
+    ]
+    return "Error: provider capability mismatch. " + ", ".join(bits)

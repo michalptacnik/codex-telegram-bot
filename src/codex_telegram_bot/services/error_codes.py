@@ -80,6 +80,16 @@ ERROR_CATALOG: List[ErrorCatalogEntry] = [
         ],
     ),
     ErrorCatalogEntry(
+        code="ERR_PROVIDER_CAPABILITY_MISMATCH",
+        title="Provider capability mismatch",
+        user_message="No configured provider can satisfy requested policy/capability requirements.",
+        triggers=["Error: provider capability mismatch."],
+        actions=[
+            RecoveryAction("open_settings", "Open settings", "Inspect provider capabilities and routing policy."),
+            RecoveryAction("retry_default_agent", "Retry on default agent", "Retry with baseline request profile."),
+        ],
+    ),
+    ErrorCatalogEntry(
         code="ERR_RUN_CANCELLED",
         title="Run cancelled",
         user_message="Scheduled job was cancelled before completion.",

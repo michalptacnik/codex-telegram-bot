@@ -110,6 +110,7 @@ class CodexCliProvider(ProviderAdapter):
                 "provider": "codex_cli",
                 "status": "unhealthy",
                 "reason": "version_check_exception",
+                "capabilities": self.capabilities(),
             }
         if result.returncode != 0:
             return {
@@ -117,9 +118,21 @@ class CodexCliProvider(ProviderAdapter):
                 "status": "unhealthy",
                 "reason": "version_check_nonzero",
                 "returncode": result.returncode,
+                "capabilities": self.capabilities(),
             }
         return {
             "provider": "codex_cli",
             "status": "healthy",
             "version": redact((result.stdout.strip() or "unknown")),
+            "capabilities": self.capabilities(),
+        }
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "provider": "codex_cli",
+            "supports_tool_calls": True,
+            "supports_streaming": False,
+            "max_context_chars": 120_000,
+            "supported_policy_profiles": ["strict", "balanced", "trusted"],
+            "reliability_tier": "primary",
         }

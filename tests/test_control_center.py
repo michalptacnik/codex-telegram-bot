@@ -105,6 +105,8 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         dashboard = client.get("/")
         self.assertEqual(dashboard.status_code, 200)
         self.assertIn("Dashboard", dashboard.text)
+        self.assertIn("Skip to content", dashboard.text)
+        self.assertIn('aria-current="page"', dashboard.text)
 
         runs_page = client.get("/runs")
         self.assertEqual(runs_page.status_code, 200)
@@ -114,6 +116,8 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         detail_page = client.get(f"/runs/{run_id}")
         self.assertEqual(detail_page.status_code, 200)
         self.assertIn(run_id, detail_page.text)
+        self.assertIn("run.provider.selected", detail_page.text)
+        self.assertIn('role="status"', detail_page.text)
 
         settings = client.get("/settings")
         self.assertEqual(settings.status_code, 200)

@@ -153,10 +153,16 @@ class AgentService:
         if self._run_store and self._event_bus:
             run_id = self._run_store.create_run(prompt)
             self._run_store.mark_running(run_id)
+            provider_label_before = self._provider_label()
             self._event_bus.publish(
                 run_id=run_id,
                 event_type="run.started",
                 payload=f"Prompt accepted (agent={agent_id}, policy={policy_profile}, job={correlation_id})",
+            )
+            self._event_bus.publish(
+                run_id=run_id,
+                event_type="run.provider.selected",
+                payload=f"provider={provider_label_before}",
             )
             self._event_bus.publish(
                 run_id=run_id,
@@ -179,6 +185,12 @@ class AgentService:
         )
 
         if self._run_store and self._event_bus and run_id:
+            provider_label_after = self._provider_label()
+            self._event_bus.publish(
+                run_id=run_id,
+                event_type="run.provider.used",
+                payload=f"provider={provider_label_after}",
+            )
             if output.startswith("Error:"):
                 self._run_store.mark_failed(run_id, output)
                 self._event_bus.publish(run_id=run_id, event_type="run.failed", payload=output)
@@ -782,6 +794,7 @@ class AgentService:
             "latency_p95_sec": round(p95, 4),
             "recovery_events": recovery_events,
             "alerts_enabled": self._alert_dispatcher.enabled,
+            "alerts": self._alert_dispatcher.state(),
         }
 
     def list_agents(self) -> List[AgentRecord]:
@@ -988,6 +1001,22 @@ class AgentService:
         ok = self._alert_dispatcher.send(category=category, severity=severity, message=message, **fields)
         if not ok:
             logger.warning("alert dispatch failed: category=%s", category)
+
+    def _provider_label(self) -> str:
+        active = getattr(self._provider, "_active_provider", "")
+        if isinstance(active, str) and active.strip():
+            return active.strip()
+        getter = getattr(self._provider, "capabilities", None)
+        if callable(getter):
+            try:
+                caps = getter()
+            except Exception:
+                caps = {}
+            if isinstance(caps, dict):
+                value = str(caps.get("provider") or "").strip()
+                if value:
+                    return value
+        return self._provider.__class__.__name__.lower()
 
 
 def _extract_loop_actions(prompt: str) -> tuple[List[List[str]], str, str]:

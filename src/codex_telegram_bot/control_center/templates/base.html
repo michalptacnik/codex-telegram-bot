@@ -7,21 +7,22 @@
   <link rel="stylesheet" href="/static/control_center.css" />
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <div class="layout">
-    <aside class="sidebar">
+    <aside class="sidebar" aria-label="Primary">
       <div class="brand">Control Center</div>
       <div class="tagline">Codex Telegram Bot</div>
-      <nav class="nav">
-        <a href="/" class="{% if nav == 'dashboard' %}active{% endif %}">Dashboard</a>
-        <a href="/onboarding" class="{% if nav == 'onboarding' %}active{% endif %}">Onboarding</a>
-        <a href="/runs" class="{% if nav == 'runs' %}active{% endif %}">Runs</a>
-        <a href="/sessions" class="{% if nav == 'sessions' %}active{% endif %}">Sessions</a>
-        <a href="/approvals" class="{% if nav == 'approvals' %}active{% endif %}">Approvals</a>
-        <a href="/agents" class="{% if nav == 'agents' %}active{% endif %}">Agents</a>
-        <a href="/settings" class="{% if nav == 'settings' %}active{% endif %}">Settings</a>
+      <nav class="nav" aria-label="Sections">
+        <a href="/" class="{% if nav == 'dashboard' %}active{% endif %}" {% if nav == 'dashboard' %}aria-current="page"{% endif %}>Dashboard</a>
+        <a href="/onboarding" class="{% if nav == 'onboarding' %}active{% endif %}" {% if nav == 'onboarding' %}aria-current="page"{% endif %}>Onboarding</a>
+        <a href="/runs" class="{% if nav == 'runs' %}active{% endif %}" {% if nav == 'runs' %}aria-current="page"{% endif %}>Runs</a>
+        <a href="/sessions" class="{% if nav == 'sessions' %}active{% endif %}" {% if nav == 'sessions' %}aria-current="page"{% endif %}>Sessions</a>
+        <a href="/approvals" class="{% if nav == 'approvals' %}active{% endif %}" {% if nav == 'approvals' %}aria-current="page"{% endif %}>Approvals</a>
+        <a href="/agents" class="{% if nav == 'agents' %}active{% endif %}" {% if nav == 'agents' %}aria-current="page"{% endif %}>Agents</a>
+        <a href="/settings" class="{% if nav == 'settings' %}active{% endif %}" {% if nav == 'settings' %}aria-current="page"{% endif %}>Settings</a>
       </nav>
     </aside>
-    <main class="main">
+    <main class="main" id="main-content">
       {% block content %}{% endblock %}
     </main>
   </div>

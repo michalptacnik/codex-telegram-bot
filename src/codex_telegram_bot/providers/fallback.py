@@ -28,4 +28,15 @@ class EchoFallbackProvider(ProviderAdapter):
             "provider": "fallback_echo",
             "status": "healthy",
             "degraded_mode": True,
+            "capabilities": self.capabilities(),
+        }
+
+    def capabilities(self) -> Dict[str, Any]:
+        return {
+            "provider": "fallback_echo",
+            "supports_tool_calls": False,
+            "supports_streaming": False,
+            "max_context_chars": 4_000,
+            "supported_policy_profiles": ["strict", "balanced"],
+            "reliability_tier": "degraded",
         }

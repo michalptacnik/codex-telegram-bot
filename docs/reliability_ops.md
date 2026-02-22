@@ -16,6 +16,7 @@ Key fields:
 - `latency_p95_sec`
 - `recovery_events`
 - `alerts_enabled`
+- `alerts` (threshold/dedup/dead-letter counters)
 
 ## Alert Hook Configuration
 
@@ -23,6 +24,10 @@ Environment variables:
 
 - `ALERT_WEBHOOK_URL` (optional HTTPS endpoint)
 - `ALERT_WEBHOOK_TIMEOUT_SEC` (default `3`)
+- `ALERT_MIN_SEVERITY` (`low|medium|high|critical`, default `medium`)
+- `ALERT_DEDUP_WINDOW_SEC` (default `90`)
+- `ALERT_RETRY_COUNT` (default `2`)
+- `ALERT_DEAD_LETTER_MAX` (default `200`)
 
 Alert categories currently emitted:
 

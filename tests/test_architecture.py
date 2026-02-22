@@ -1,10 +1,12 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from codex_telegram_bot.domain.contracts import CommandResult
 from codex_telegram_bot.providers.fallback import EchoFallbackProvider
 from codex_telegram_bot.events.event_bus import EventBus
+from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterConfig
@@ -109,10 +111,12 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recent[0].status, "completed")
             self.assertEqual(recent[0].output, "done")
             events = service.list_run_events(recent[0].run_id, limit=10)
-            self.assertEqual(len(events), 3)
+            event_types = [e.event_type for e in events]
             self.assertEqual(events[0].event_type, "run.started")
-            self.assertEqual(events[1].event_type, "run.policy.applied")
-            self.assertEqual(events[2].event_type, "run.completed")
+            self.assertIn("run.provider.selected", event_types)
+            self.assertIn("run.policy.applied", event_types)
+            self.assertIn("run.provider.used", event_types)
+            self.assertIn("run.completed", event_types)
 
     async def test_service_marks_failed_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -767,3 +771,51 @@ class TestProviderRouter(unittest.IsolatedAsyncioTestCase):
         health = await router.health()
         self.assertTrue(health["circuit_open"])
         self.assertEqual(health["active_provider"], "fallback")
+
+    async def test_capability_mismatch_returns_explicit_error(self):
+        runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+        primary = CodexCliProvider(runner=runner)
+        fallback = EchoFallbackProvider()
+        router = ProviderRouter(
+            primary=primary,
+            fallback=fallback,
+            config=ProviderRouterConfig(retry_attempts=1, failure_threshold=1, recovery_sec=10),
+        )
+
+        prompt = "!exec echo hi\n" + ("x" * 130000)
+        out = await router.execute(prompt, policy_profile="trusted")
+
+        self.assertIn("Error: provider capability mismatch.", out)
+        self.assertIn("provider=primary", out)
+
+
+class TestAlertDispatcher(unittest.TestCase):
+    def test_threshold_and_dedup_and_dead_letter(self):
+        dispatcher = AlertDispatcher(webhook_url="https://example.com/hook", timeout_sec=1)
+        dispatcher._min_severity = "high"
+        dispatcher._dedup_window_sec = 300
+
+        with patch("urllib.request.urlopen", side_effect=RuntimeError("down")) as mocked:
+            self.assertTrue(dispatcher.send("run.failed", "medium", "skip me", run_id="r1"))
+            self.assertEqual(mocked.call_count, 0)
+
+            ok = dispatcher.send("run.failed", "critical", "primary down", run_id="r1")
+            self.assertFalse(ok)
+            self.assertEqual(len(dispatcher._dead_letters), 1)
+
+            ok2 = dispatcher.send("run.failed", "critical", "primary down", run_id="r1")
+            self.assertTrue(ok2)
+            self.assertEqual(dispatcher.state()["dropped_by_dedup"], 1)
+
+        with patch("urllib.request.urlopen") as mocked_ok:
+            class _Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb):
+                    return False
+
+            mocked_ok.return_value = _Resp()
+            delivered = dispatcher.flush_dead_letters()
+            self.assertEqual(delivered, 1)
+            self.assertEqual(len(dispatcher._dead_letters), 0)

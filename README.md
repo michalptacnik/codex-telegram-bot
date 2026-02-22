@@ -135,6 +135,10 @@ Environment variables override `.env`:
 - `REPO_INDEX_AUTO_REFRESH_SEC` (default: `30`)
 - `ALERT_WEBHOOK_URL` (optional HTTPS endpoint for alerts)
 - `ALERT_WEBHOOK_TIMEOUT_SEC` (default: `3`)
+- `ALERT_MIN_SEVERITY` (`low|medium|high|critical`, default: `medium`)
+- `ALERT_DEDUP_WINDOW_SEC` (default: `90`)
+- `ALERT_RETRY_COUNT` (default: `2`)
+- `ALERT_DEAD_LETTER_MAX` (default: `200`)
 
 Print active config summary (never prints token):
 

@@ -57,7 +57,7 @@
     </div>
     {% endfor %}
   </div>
-  <div id="recoveryStatus" class="dim"></div>
+  <div id="recoveryStatus" class="dim" role="status" aria-live="polite"></div>
 </section>
 {% endif %}
 
@@ -68,6 +68,8 @@
       <select id="eventType">
         <option value="">All</option>
         <option value="run.started">run.started</option>
+        <option value="run.provider.selected">run.provider.selected</option>
+        <option value="run.provider.used">run.provider.used</option>
         <option value="run.policy.applied">run.policy.applied</option>
         <option value="run.completed">run.completed</option>
         <option value="run.failed">run.failed</option>
@@ -91,7 +93,7 @@
     </label>
     <a class="btn" href="/api/runs/{{ run.run_id }}/artifact.txt">Download artifact</a>
   </div>
-  <ul class="timeline" id="timeline">
+  <ul class="timeline" id="timeline" aria-live="polite" aria-label="Run event timeline">
     {% if events %}
     {% for e in events %}
     <li>
