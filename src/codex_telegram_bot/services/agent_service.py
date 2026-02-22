@@ -23,6 +23,10 @@ from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
 ALLOWED_POLICY_PROFILES = {"strict", "balanced", "trusted"}
+CONTEXT_BUDGET_TOTAL_CHARS = 12000
+CONTEXT_HISTORY_BUDGET_CHARS = 6500
+CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
+CONTEXT_SUMMARY_BUDGET_CHARS = 1200
 
 
 class AgentService:
@@ -56,6 +60,7 @@ class AgentService:
         root = session_workspaces_root or (Path.cwd() / ".session_workspaces")
         self._session_workspaces_root = root.expanduser().resolve()
         self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
+        self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -226,6 +231,11 @@ class AgentService:
             return None
         return self._run_store.get_active_session(chat_id=chat_id, user_id=user_id)
 
+    def get_session(self, session_id: str) -> Optional[TelegramSessionRecord]:
+        if not self._run_store:
+            return None
+        return self._run_store.get_session(session_id=session_id)
+
     def list_recent_sessions(self, limit: int = 50) -> List[TelegramSessionRecord]:
         if not self._run_store:
             return []
@@ -255,39 +265,86 @@ class AgentService:
         return root
 
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
-        context_lines = self.build_retrieval_context(user_prompt=user_prompt, limit=4)
+        retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
+        planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         if not self._run_store:
-            if context_lines:
-                return "\n".join(context_lines + [user_prompt])
+            prefix = planning_lines + retrieval_lines
+            if prefix:
+                return "\n".join(prefix + [user_prompt])
             return user_prompt
+        session = self._run_store.get_session(session_id=session_id)
+        summary = (session.summary or "").strip() if session else ""
         history = self._run_store.list_session_messages(session_id=session_id, limit=max_turns * 2)
         if not history:
-            if context_lines:
-                return "\n".join(context_lines + [user_prompt])
+            prefix = planning_lines + retrieval_lines
+            if summary:
+                prefix = [f"Session memory summary:\n{summary[:CONTEXT_SUMMARY_BUDGET_CHARS]}"] + prefix
+            if prefix:
+                self._session_context_diagnostics[session_id] = {
+                    "summary_chars": min(len(summary), CONTEXT_SUMMARY_BUDGET_CHARS) if summary else 0,
+                    "history_chars": 0,
+                    "retrieval_chars": sum(len(x) for x in retrieval_lines),
+                    "retrieval_confidence": retrieval_meta.get("confidence", "none"),
+                    "retrieval_top_score": retrieval_meta.get("top_score", 0),
+                    "budget_total_chars": CONTEXT_BUDGET_TOTAL_CHARS,
+                }
+                return "\n".join(prefix + [user_prompt])
             return user_prompt
         lines = [
             "Conversation context (most recent first-order preserved):",
         ]
-        if context_lines:
-            lines.extend(context_lines)
+        used_summary = ""
+        if summary:
+            used_summary = summary[:CONTEXT_SUMMARY_BUDGET_CHARS]
+            lines.append("Session memory summary:")
+            lines.append(used_summary)
+        if planning_lines:
+            lines.extend(planning_lines)
+        if retrieval_lines:
+            lines.extend(_trim_lines_to_budget(retrieval_lines, CONTEXT_RETRIEVAL_BUDGET_CHARS))
+        history_lines: List[str] = []
         for msg in history:
             if msg.role not in {"user", "assistant"}:
                 continue
-            lines.append(f"{msg.role}: {msg.content}")
+            history_lines.append(f"{msg.role}: {msg.content}")
+        history_lines = _trim_lines_from_end(history_lines, CONTEXT_HISTORY_BUDGET_CHARS)
+        lines.extend(history_lines)
         lines.append("user: " + user_prompt)
-        return "\n".join(lines)
+        prompt = "\n".join(lines)
+        if len(prompt) > CONTEXT_BUDGET_TOTAL_CHARS:
+            lines = _trim_lines_from_end(lines, CONTEXT_BUDGET_TOTAL_CHARS)
+            prompt = "\n".join(lines)
+        self._session_context_diagnostics[session_id] = {
+            "summary_chars": len(used_summary),
+            "history_chars": sum(len(x) for x in history_lines),
+            "retrieval_chars": sum(len(x) for x in retrieval_lines),
+            "retrieval_confidence": retrieval_meta.get("confidence", "none"),
+            "retrieval_top_score": retrieval_meta.get("top_score", 0),
+            "budget_total_chars": CONTEXT_BUDGET_TOTAL_CHARS,
+            "prompt_chars": len(prompt),
+        }
+        return prompt
 
     def build_retrieval_context(self, user_prompt: str, limit: int = 4) -> List[str]:
+        lines, _ = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=limit)
+        return lines
+
+    def _build_retrieval_context_with_meta(self, user_prompt: str, limit: int = 4) -> tuple[List[str], Dict[str, Any]]:
         if not self._repo_retriever:
-            return []
+            return [], {"confidence": "none", "top_score": 0}
         snippets = self._repo_retriever.retrieve(query=user_prompt, limit=limit)
         if not snippets:
-            return []
-        lines = ["Relevant repository snippets:"]
+            return ["Retrieval confidence: low (no direct repository matches)."], {"confidence": "low", "top_score": 0}
+        top_score = int(snippets[0].score)
+        confidence = "high" if top_score >= 35 else ("medium" if top_score >= 18 else "low")
+        lines = [f"Retrieval confidence: {confidence} (top_score={top_score})", "Relevant repository snippets:"]
         for s in snippets:
             lines.append(f"[{s.path} score={s.score}]")
             lines.append(s.snippet)
-        return lines
+        return lines, {"confidence": confidence, "top_score": top_score}
+
+    def session_context_diagnostics(self, session_id: str) -> Dict[str, Any]:
+        return dict(self._session_context_diagnostics.get(session_id, {}))
 
     def retrieval_stats(self) -> Dict[str, Any]:
         if not self._repo_retriever:
@@ -491,6 +548,9 @@ class AgentService:
                 },
             )
             decision = self._policy_engine.evaluate(argv=argv, policy_profile=policy_profile)
+            override_requires_approval = _requires_manual_approval_override(argv=argv)
+            if override_requires_approval and decision.risk_tier == "low":
+                decision = decision.__class__(allowed=True, risk_tier="high", reason="Manual approval required for mutating command.")
             if not decision.allowed:
                 msg = (
                     f"Error: tool action blocked ({action_id}) risk={decision.risk_tier}. "
@@ -620,6 +680,11 @@ class AgentService:
                 f"stdout:\n{(result.stdout or '').strip()[:1000]}\n"
                 f"stderr:\n{(result.stderr or '').strip()[:400]}"
             )
+            if result.returncode != 0 and _looks_like_patch_command(argv):
+                observations.append(
+                    "patch.safeguard: patch command failed. Provide a deterministic fallback with: "
+                    "1) failed hunk summary, 2) exact file references, 3) smallest recoverable next patch."
+                )
             await self._notify_progress(
                 progress_callback,
                 {
@@ -919,3 +984,69 @@ def _tool_loop_fingerprint(actions: List[List[str]], cleaned_prompt: str, final_
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _trim_lines_to_budget(lines: List[str], budget_chars: int) -> List[str]:
+    out: List[str] = []
+    used = 0
+    for line in lines:
+        n = len(line)
+        if used + n > budget_chars:
+            break
+        out.append(line)
+        used += n
+    return out
+
+
+def _trim_lines_from_end(lines: List[str], budget_chars: int) -> List[str]:
+    out: List[str] = []
+    used = 0
+    for line in reversed(lines):
+        n = len(line)
+        if used + n > budget_chars:
+            break
+        out.append(line)
+        used += n
+    return list(reversed(out))
+
+
+def _looks_like_patch_command(argv: List[str]) -> bool:
+    if not argv:
+        return False
+    cmd = argv[0].lower()
+    if cmd == "apply_patch":
+        return True
+    return "patch" in cmd
+
+
+def _requires_manual_approval_override(argv: List[str]) -> bool:
+    if not argv:
+        return False
+    cmd = (argv[0] or "").strip().lower()
+    tail = " ".join(argv[1:]).lower()
+    if cmd == "rm" and ("-rf" in tail or "-fr" in tail):
+        return True
+    if cmd == "git" and (
+        "reset --hard" in tail
+        or "checkout --" in tail
+        or "clean -fd" in tail
+        or "clean -xdf" in tail
+    ):
+        return True
+    if _looks_like_patch_command(argv):
+        return True
+    return False
+
+
+def _planning_guidance_lines(user_prompt: str) -> List[str]:
+    low = (user_prompt or "").lower()
+    keywords = ["refactor", "multi-file", "edit", "patch", "implement", "rename", "bugfix", "regression"]
+    if not any(k in low for k in keywords):
+        return []
+    return [
+        "Engineering response contract:",
+        "1) PLAN: deterministic numbered steps before edits.",
+        "2) CHANGES: explicit file references using path:line when possible.",
+        "3) RISKS: list behavior/regression risks before claiming done.",
+        "4) VERIFY: list concrete tests/commands run or missing.",
+    ]

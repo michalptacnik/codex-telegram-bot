@@ -18,6 +18,8 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
 - Admin commands:
 - `/ping`
 - `/status`
+- `/help`
+- `/workspace`
 - `/new`
 - `/resume`
 - `/branch`
@@ -216,6 +218,9 @@ If your `codex` binary is in a different location, update the volume in `docker-
 
 - `/status`: shows Codex version, working directory, allowlist mode
 - `/status`: live run card (session, active job id, current step/total steps, pending approvals, elapsed)
+- `/status`: includes context diagnostics (prompt chars + retrieval confidence)
+- `/help`: command taxonomy, examples, and active policy profile
+- `/workspace`: shows per-session isolated workspace path
 - `/reinstall`: clears stored token and restarts for onboarding
 - `/purge`: removes `.env` and restarts
 - `/restart`: immediate process restart

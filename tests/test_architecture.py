@@ -621,8 +621,86 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             try:
                 session = service.get_or_create_session(chat_id=707, user_id=808)
                 prompt = service.build_session_prompt(session.session_id, "schedule jobs")
+                self.assertIn("Retrieval confidence:", prompt)
                 self.assertIn("Relevant repository snippets:", prompt)
                 self.assertIn("scheduler.py", prompt)
+            finally:
+                await service.shutdown()
+
+    async def test_build_session_prompt_adds_planning_guidance_for_edit_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                session = service.get_or_create_session(chat_id=1201, user_id=1301)
+                prompt = service.build_session_prompt(session.session_id, "Refactor multi-file edit for scheduler and tests.")
+                self.assertIn("Engineering response contract:", prompt)
+                self.assertIn("CHANGES:", prompt)
+            finally:
+                await service.shutdown()
+
+    async def test_tool_loop_patch_command_requires_approval_even_in_trusted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                service.upsert_agent(
+                    agent_id="default",
+                    name="Default Agent",
+                    provider="codex_cli",
+                    policy_profile="trusted",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+                session = service.get_or_create_session(chat_id=1401, user_id=1501)
+                out = await service.run_prompt_with_tool_loop(
+                    prompt="!exec apply_patch --help\nSummarize.",
+                    chat_id=1401,
+                    user_id=1501,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("Approval required", out)
+            finally:
+                await service.shutdown()
+
+    async def test_session_context_diagnostics_exposed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                session = service.get_or_create_session(chat_id=1601, user_id=1701)
+                _ = service.build_session_prompt(session.session_id, "Implement refactor plan for architecture.")
+                diag = service.session_context_diagnostics(session.session_id)
+                self.assertIn("budget_total_chars", diag)
+                self.assertIn("retrieval_confidence", diag)
             finally:
                 await service.shutdown()
 

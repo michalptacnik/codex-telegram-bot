@@ -585,13 +585,26 @@ class SqliteRunStore:
                 if len(summary_bits) >= 3:
                     break
             summary_text = " | ".join(summary_bits) if summary_bits else f"{remove_count} older messages compacted"
+            if remove_count >= 120:
+                tier = "archival"
+            elif remove_count >= 40:
+                tier = "medium"
+            else:
+                tier = "short"
+            prev_summary = conn.execute(
+                "SELECT summary FROM telegram_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            carry = ""
+            if prev_summary and prev_summary["summary"]:
+                carry = f" | prev={str(prev_summary['summary'])[:120]}"
             conn.execute(
                 """
                 UPDATE telegram_sessions
                 SET summary = ?, updated_at = ?
                 WHERE session_id = ?
                 """,
-                (f"Compacted {remove_count} messages. {summary_text}", _utc_now(), session_id),
+                (f"[tier={tier}] Compacted {remove_count} messages. {summary_text}{carry}", _utc_now(), session_id),
             )
             conn.execute(
                 """
