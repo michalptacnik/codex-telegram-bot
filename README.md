@@ -284,6 +284,10 @@ Example cron entry (Sundays at 09:00):
 0 9 * * 0 cd /path/to/codex-telegram-bot && ./scripts/run_parity_weekly.sh >> /tmp/codex-parity.log 2>&1
 ```
 
+Parity gates and milestone plan:
+
+- `docs/parity_exit_criteria.md`
+
 Onboarding:
 
 - `GET /onboarding`
