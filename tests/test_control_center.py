@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 
 from codex_telegram_bot.domain.contracts import CommandResult
@@ -228,3 +229,41 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Pending high-risk tool actions", approvals_page.text)
         finally:
             tmp.cleanup()
+
+    async def test_local_api_v1_scoped_auth(self):
+        app = None
+        old_keys = os.environ.get("LOCAL_API_KEYS")
+        os.environ["LOCAL_API_KEYS"] = "reader-token:meta:read,runs:read,jobs:read;writer-token:prompts:write,jobs:write"
+        try:
+            app = create_app(self.service)
+            client = TestClient(app)
+            denied = client.get("/api/v1/meta")
+            self.assertEqual(denied.status_code, 401)
+
+            meta = client.get("/api/v1/meta", headers={"x-local-api-key": "reader-token"})
+            self.assertEqual(meta.status_code, 200)
+            self.assertEqual(meta.json()["api_version"], "v1")
+
+            runs = client.get("/api/v1/runs", headers={"authorization": "Bearer reader-token"})
+            self.assertEqual(runs.status_code, 200)
+            self.assertIn("items", runs.json())
+
+            prompt = client.post(
+                "/api/v1/prompts",
+                headers={"x-local-api-key": "writer-token"},
+                json={"prompt": "hello from api", "agent_id": "default"},
+            )
+            self.assertEqual(prompt.status_code, 200)
+            job_id = prompt.json()["job_id"]
+
+            job_status = client.get(f"/api/v1/jobs/{job_id}", headers={"x-local-api-key": "reader-token"})
+            self.assertEqual(job_status.status_code, 200)
+            self.assertIn("status", job_status.json())
+
+            forbidden = client.post(f"/api/v1/jobs/{job_id}/cancel", headers={"x-local-api-key": "reader-token"})
+            self.assertEqual(forbidden.status_code, 403)
+        finally:
+            if old_keys is None:
+                os.environ.pop("LOCAL_API_KEYS", None)
+            else:
+                os.environ["LOCAL_API_KEYS"] = old_keys

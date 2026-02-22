@@ -1,6 +1,7 @@
 from dataclasses import asdict
+import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Set
 
 from pydantic import BaseModel
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -30,6 +31,11 @@ class ApproveToolRequest(BaseModel):
     approval_id: str
     chat_id: int
     user_id: int
+
+
+class LocalApiPromptRequest(BaseModel):
+    prompt: str
+    agent_id: str = "default"
 
 
 def _run_to_dict(run) -> Dict[str, Any]:
@@ -90,6 +96,26 @@ def _allowed_recovery_actions() -> Dict[str, str]:
     }
 
 
+def _parse_local_api_keys(raw: str) -> Dict[str, Set[str]]:
+    out: Dict[str, Set[str]] = {}
+    for chunk in (raw or "").split(";"):
+        value = chunk.strip()
+        if not value:
+            continue
+        parts = value.split(":", 1)
+        if len(parts) != 2:
+            continue
+        token = parts[0].strip()
+        scopes_raw = parts[1].strip()
+        if not token:
+            continue
+        scopes = {s.strip().lower() for s in scopes_raw.split(",") if s.strip()}
+        if not scopes:
+            scopes = {"runs:read"}
+        out[token] = scopes
+    return out
+
+
 def create_app(agent_service: AgentService) -> FastAPI:
     return create_app_with_config(agent_service=agent_service, config_dir=None)
 
@@ -100,6 +126,28 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
     app = FastAPI(title="Codex Control Center", version="0.2.0-alpha")
     app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
     onboarding = OnboardingStore(config_dir=config_dir)
+    local_api_version = "v1"
+    local_api_keys = _parse_local_api_keys(os.environ.get("LOCAL_API_KEYS", ""))
+    local_api_enabled = bool(local_api_keys)
+
+    def _resolve_api_token(request: Request) -> str:
+        bearer = (request.headers.get("authorization") or "").strip()
+        if bearer.lower().startswith("bearer "):
+            return bearer[7:].strip()
+        return (request.headers.get("x-local-api-key") or "").strip()
+
+    def _require_local_api_scope(request: Request, required_scope: str) -> str:
+        if not local_api_enabled:
+            raise HTTPException(status_code=503, detail="Local integration API disabled.")
+        token = _resolve_api_token(request)
+        if not token:
+            raise HTTPException(status_code=401, detail="Missing local API token.")
+        scopes = local_api_keys.get(token)
+        if not scopes:
+            raise HTTPException(status_code=401, detail="Invalid local API token.")
+        if "admin:*" in scopes or required_scope in scopes:
+            return token
+        raise HTTPException(status_code=403, detail=f"Missing scope: {required_scope}")
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -357,6 +405,56 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
                 "Do not auto-approve high-risk tool actions during recovery.",
             ],
         }
+
+    @app.get("/api/v1/meta")
+    async def api_v1_meta(request: Request) -> Dict[str, Any]:
+        _require_local_api_scope(request, "meta:read")
+        return {
+            "api_version": local_api_version,
+            "service": "codex-telegram-bot",
+            "compatibility": "minor backward compatible within v1",
+            "endpoints": {
+                "runs_list": {"path": "/api/v1/runs", "scope": "runs:read"},
+                "runs_get": {"path": "/api/v1/runs/{run_id}", "scope": "runs:read"},
+                "prompt_queue": {"path": "/api/v1/prompts", "scope": "prompts:write"},
+                "job_get": {"path": "/api/v1/jobs/{job_id}", "scope": "jobs:read"},
+                "job_cancel": {"path": "/api/v1/jobs/{job_id}/cancel", "scope": "jobs:write"},
+            },
+        }
+
+    @app.get("/api/v1/runs")
+    async def api_v1_runs(request: Request, limit: int = 20) -> Dict[str, Any]:
+        _require_local_api_scope(request, "runs:read")
+        runs = agent_service.list_recent_runs(limit=max(1, min(limit, 100)))
+        return {"items": [_run_to_dict(r) for r in runs], "limit": limit}
+
+    @app.get("/api/v1/runs/{run_id}")
+    async def api_v1_run(request: Request, run_id: str) -> Dict[str, Any]:
+        _require_local_api_scope(request, "runs:read")
+        run = agent_service.get_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return _run_to_dict(run)
+
+    @app.post("/api/v1/prompts")
+    async def api_v1_prompt(request: Request, req: LocalApiPromptRequest) -> Dict[str, Any]:
+        _require_local_api_scope(request, "prompts:write")
+        text = (req.prompt or "").strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="Prompt is required")
+        job_id = await agent_service.queue_prompt(prompt=text, agent_id=(req.agent_id or "default"))
+        return {"job_id": job_id, "status": agent_service.job_status(job_id), "agent_id": req.agent_id}
+
+    @app.get("/api/v1/jobs/{job_id}")
+    async def api_v1_job_status(request: Request, job_id: str) -> Dict[str, Any]:
+        _require_local_api_scope(request, "jobs:read")
+        return {"job_id": job_id, "status": agent_service.job_status(job_id)}
+
+    @app.post("/api/v1/jobs/{job_id}/cancel")
+    async def api_v1_job_cancel(request: Request, job_id: str) -> Dict[str, Any]:
+        _require_local_api_scope(request, "jobs:write")
+        cancelled = agent_service.cancel_job(job_id)
+        return {"job_id": job_id, "cancelled": cancelled, "status": agent_service.job_status(job_id)}
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):

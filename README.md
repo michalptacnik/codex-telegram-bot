@@ -139,6 +139,7 @@ Environment variables override `.env`:
 - `ALERT_DEDUP_WINDOW_SEC` (default: `90`)
 - `ALERT_RETRY_COUNT` (default: `2`)
 - `ALERT_DEAD_LETTER_MAX` (default: `200`)
+- `LOCAL_API_KEYS` (optional; enables scoped `/api/v1` integration API)
 
 Print active config summary (never prints token):
 
@@ -185,6 +186,7 @@ Versioning and provenance details:
 - `docs/recovery_playbook.md`
 - `docs/reliability_ops.md`
 - `docs/upgrade_rollback_runbook.md`
+- `docs/local_api_v1.md`
 
 Bootstrap behavior:
 
