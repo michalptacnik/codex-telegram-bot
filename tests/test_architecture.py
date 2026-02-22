@@ -8,6 +8,7 @@ from codex_telegram_bot.events.event_bus import EventBus
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterConfig
+from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_service import AgentService
 
 
@@ -16,13 +17,15 @@ class FakeRunner:
         self._results = [result]
         self.last_argv = None
         self.last_stdin = None
+        self.last_policy_profile = None
 
     def set_results(self, results):
         self._results = list(results)
 
-    async def run(self, argv, stdin_text="", timeout_sec=60):
+    async def run(self, argv, stdin_text="", timeout_sec=60, policy_profile="balanced"):
         self.last_argv = list(argv)
         self.last_stdin = stdin_text
+        self.last_policy_profile = policy_profile
         if len(self._results) > 1:
             return self._results.pop(0)
         return self._results[0]
@@ -37,6 +40,16 @@ class TestCodexCliProvider(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(output, "hello")
         self.assertEqual(runner.last_argv[0:3], ["codex", "exec", "-"])
+        self.assertEqual(runner.last_policy_profile, "balanced")
+
+    async def test_execute_uses_policy_profile(self):
+        runner = FakeRunner(CommandResult(returncode=0, stdout="hello", stderr=""))
+        provider = CodexCliProvider(runner=runner)
+
+        output = await provider.execute("prompt", policy_profile="strict")
+
+        self.assertEqual(output, "hello")
+        self.assertEqual(runner.last_policy_profile, "strict")
 
     async def test_execute_nonzero_return_code(self):
         runner = FakeRunner(CommandResult(returncode=2, stdout="", stderr="bad args"))
@@ -84,9 +97,10 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(recent[0].status, "completed")
             self.assertEqual(recent[0].output, "done")
             events = service.list_run_events(recent[0].run_id, limit=10)
-            self.assertEqual(len(events), 2)
+            self.assertEqual(len(events), 3)
             self.assertEqual(events[0].event_type, "run.started")
-            self.assertEqual(events[1].event_type, "run.completed")
+            self.assertEqual(events[1].event_type, "run.policy.applied")
+            self.assertEqual(events[2].event_type, "run.completed")
 
     async def test_service_marks_failed_run(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -104,6 +118,48 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(recent), 1)
             self.assertEqual(recent[0].status, "failed")
             self.assertIn("Error:", recent[0].error)
+
+    async def test_service_redacts_secrets_and_emits_audit_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(
+                CommandResult(returncode=0, stdout="token=supersecret sk-abcdef1234567890", stderr="")
+            )
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(provider=provider, run_store=store, event_bus=bus)
+
+            output = await service.run_prompt("hello")
+            self.assertNotIn("supersecret", output)
+
+            run = service.list_recent_runs(limit=1)[0]
+            self.assertNotIn("supersecret", run.output)
+            self.assertIn("token=REDACTED", run.output)
+            events = service.list_run_events(run.run_id, limit=50)
+            event_types = [e.event_type for e in events]
+            self.assertIn("security.redaction.applied", event_types)
+
+    async def test_service_applies_agent_policy_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(provider=provider, run_store=store, event_bus=bus)
+            service.upsert_agent(
+                agent_id="secure",
+                name="Secure Agent",
+                provider="codex_cli",
+                policy_profile="strict",
+                max_concurrency=1,
+                enabled=True,
+            )
+
+            await service.run_prompt("hello", agent_id="secure")
+
+            self.assertEqual(runner.last_policy_profile, "strict")
 
     async def test_agent_registry_upsert_and_validation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -195,6 +251,241 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             events_recover = service.list_run_events(parent_run.run_id, limit=100)
             event_types_recover = [e.event_type for e in events_recover]
             self.assertIn("handoff.recovered", event_types_recover)
+
+    async def test_session_create_reset_and_history_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(provider=provider, run_store=store, event_bus=bus)
+
+            session = service.get_or_create_session(chat_id=1001, user_id=2002)
+            self.assertEqual(session.status, "active")
+            service.append_session_user_message(session.session_id, "hello")
+            service.append_session_assistant_message(session.session_id, "world")
+            built = service.build_session_prompt(session.session_id, "next")
+            self.assertIn("user: hello", built)
+            self.assertIn("assistant: world", built)
+            self.assertTrue(built.endswith("user: next"))
+
+            reset = service.reset_session(chat_id=1001, user_id=2002)
+            self.assertNotEqual(reset.session_id, session.session_id)
+            sessions = service.list_recent_sessions(limit=10)
+            self.assertTrue(any(s.session_id == reset.session_id for s in sessions))
+
+    async def test_session_branch_activate_and_compaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                session_max_messages=10,
+                session_compact_keep=5,
+            )
+            base = service.get_or_create_session(chat_id=10, user_id=20)
+            for i in range(12):
+                service.append_session_user_message(base.session_id, f"user-{i}")
+                service.append_session_assistant_message(base.session_id, f"assistant-{i}")
+
+            compacted_msgs = service.list_session_messages(base.session_id, limit=50)
+            self.assertLessEqual(len(compacted_msgs), 12)
+            self.assertTrue(any("history.compacted" in m.content for m in compacted_msgs if m.role == "system"))
+
+            branched = service.create_branch_session(
+                chat_id=10,
+                user_id=20,
+                from_session_id=base.session_id,
+                copy_messages=4,
+            )
+            self.assertIsNotNone(branched)
+            assert branched is not None
+            self.assertNotEqual(branched.session_id, base.session_id)
+            restored = service.activate_session(chat_id=10, user_id=20, session_id=base.session_id)
+            self.assertIsNotNone(restored)
+            assert restored is not None
+            self.assertEqual(restored.session_id, base.session_id)
+
+    async def test_tool_loop_exec_and_high_risk_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="tool-ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                service.upsert_agent(
+                    agent_id="default",
+                    name="Default Agent",
+                    provider="codex_cli",
+                    policy_profile="trusted",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+                session = service.get_or_create_session(chat_id=301, user_id=401)
+
+                out = await service.run_prompt_with_tool_loop(
+                    prompt="!exec /bin/echo hi\nSummarize quickly.",
+                    chat_id=301,
+                    user_id=401,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIsInstance(out, str)
+                self.assertIn("tool-ok", runner.last_stdin)
+
+                pending_msg = await service.run_prompt_with_tool_loop(
+                    prompt="!exec codex exec - --dangerously-bypass-approvals-and-sandbox\nDo next step.",
+                    chat_id=301,
+                    user_id=401,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("Approval required", pending_msg)
+                pending = service.list_pending_tool_approvals(chat_id=301, user_id=401, limit=10)
+                self.assertTrue(len(pending) >= 1)
+                approval_id = pending[0]["approval_id"]
+                approval_run_id = pending[0]["run_id"]
+                denied = service.deny_tool_action(
+                    approval_id=approval_id,
+                    chat_id=301,
+                    user_id=401,
+                )
+                self.assertEqual(denied, "Denied.")
+                pending_after_deny = service.list_pending_tool_approvals(chat_id=301, user_id=401, limit=10)
+                self.assertFalse(any(p["approval_id"] == approval_id for p in pending_after_deny))
+
+                pending_msg = await service.run_prompt_with_tool_loop(
+                    prompt="!exec codex exec - --dangerously-bypass-approvals-and-sandbox\nDo next step again.",
+                    chat_id=301,
+                    user_id=401,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("Approval required", pending_msg)
+                pending = service.list_pending_tool_approvals(chat_id=301, user_id=401, limit=10)
+                self.assertTrue(len(pending) >= 1)
+                approval_id = pending[0]["approval_id"]
+                approval_run_id = pending[0]["run_id"]
+                approved_output = await service.approve_tool_action(
+                    approval_id=approval_id,
+                    chat_id=301,
+                    user_id=401,
+                )
+                self.assertIn("[tool:", approved_output)
+                approval_events = service.list_run_events(approval_run_id, limit=50)
+                approval_types = [e.event_type for e in approval_events]
+                self.assertIn("tool.approval.requested", approval_types)
+                self.assertIn("tool.approval.approved", approval_types)
+
+                budget = await service.run_prompt_with_tool_loop(
+                    prompt="\n".join(
+                        [
+                            "!exec /bin/echo 1",
+                            "!exec /bin/echo 2",
+                            "!exec /bin/echo 3",
+                            "!exec /bin/echo 4",
+                            "summarize",
+                        ]
+                    ),
+                    chat_id=301,
+                    user_id=401,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("tool step budget exceeded", budget)
+            finally:
+                await service.shutdown()
+
+    async def test_tool_loop_json_plan_and_progress_events(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                service.upsert_agent(
+                    agent_id="default",
+                    name="Default Agent",
+                    provider="codex_cli",
+                    policy_profile="trusted",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+                session = service.get_or_create_session(chat_id=501, user_id=601)
+                events = []
+
+                async def progress(payload):
+                    events.append(payload.get("event"))
+
+                out = await service.run_prompt_with_tool_loop(
+                    prompt=(
+                        "!loop {\"steps\":[{\"kind\":\"exec\",\"command\":\"/bin/echo hi\"}],"
+                        "\"final_prompt\":\"Summarize result\"}"
+                    ),
+                    chat_id=501,
+                    user_id=601,
+                    session_id=session.session_id,
+                    agent_id="default",
+                    progress_callback=progress,
+                )
+
+                self.assertTrue(isinstance(out, str))
+                self.assertIn("loop.started", events)
+                self.assertIn("loop.step.started", events)
+                self.assertIn("loop.step.completed", events)
+                self.assertIn("loop.finished", events)
+            finally:
+                await service.shutdown()
+
+    async def test_build_session_prompt_includes_retrieval_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            repo_root = Path(tmp) / "repo"
+            repo_root.mkdir(parents=True, exist_ok=True)
+            (repo_root / "src").mkdir(parents=True, exist_ok=True)
+            (repo_root / "src" / "scheduler.py").write_text(
+                "def schedule_jobs():\n    return 'ok'\n",
+                encoding="utf-8",
+            )
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            retriever = RepositoryContextRetriever(root=repo_root)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+                repo_retriever=retriever,
+            )
+            try:
+                session = service.get_or_create_session(chat_id=707, user_id=808)
+                prompt = service.build_session_prompt(session.session_id, "schedule jobs")
+                self.assertIn("Relevant repository snippets:", prompt)
+                self.assertIn("scheduler.py", prompt)
+            finally:
+                await service.shutdown()
 
 
 class TestProviderRouter(unittest.IsolatedAsyncioTestCase):

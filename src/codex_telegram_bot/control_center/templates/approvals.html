@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Approvals</h1>
+    <p class="subtitle">Pending high-risk tool actions</p>
+  </div>
+</div>
+
+<section class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>Approval</th>
+        <th>Chat/User</th>
+        <th>Session</th>
+        <th>Risk</th>
+        <th>Command</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if approvals %}
+      {% for a in approvals %}
+      <tr>
+        <td class="mono">{{ a.approval_id[:8] }}</td>
+        <td class="mono">{{ a.chat_id }} / {{ a.user_id }}</td>
+        <td class="mono">{{ a.session_id[:8] }}</td>
+        <td><span class="pill failed">{{ a.risk_tier }}</span></td>
+        <td class="mono">{{ (a.argv | join(" "))[:90] }}</td>
+        <td>
+          <button
+            class="btn approval-btn"
+            data-approval-id="{{ a.approval_id }}"
+            data-chat-id="{{ a.chat_id }}"
+            data-user-id="{{ a.user_id }}"
+            data-op="approve"
+          >
+            Approve
+          </button>
+          <button
+            class="btn approval-btn"
+            data-approval-id="{{ a.approval_id }}"
+            data-chat-id="{{ a.chat_id }}"
+            data-user-id="{{ a.user_id }}"
+            data-op="deny"
+          >
+            Deny
+          </button>
+        </td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="6" class="dim">No pending approvals.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card table-card">
+  <div class="k">Execution Output</div>
+  <pre id="approvalOutput" class="output">(none)</pre>
+</section>
+
+<script>
+  (function () {
+    const outEl = document.getElementById("approvalOutput");
+    async function applyApproval(btn) {
+      const payload = {
+        approval_id: btn.getAttribute("data-approval-id"),
+        chat_id: Number(btn.getAttribute("data-chat-id")),
+        user_id: Number(btn.getAttribute("data-user-id"))
+      };
+      const op = btn.getAttribute("data-op") || "approve";
+      btn.disabled = true;
+      outEl.textContent = (op === "deny" ? "Denying..." : "Approving...");
+      const res = await fetch(op === "deny" ? "/api/approvals/deny" : "/api/approvals/approve", {
+        method: "POST",
+        headers: {"content-type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      outEl.textContent = data.output || "(no output)";
+      window.location.reload();
+    }
+    document.querySelectorAll(".approval-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () { applyApproval(btn); });
+    });
+  })();
+</script>
+{% endblock %}

@@ -15,12 +15,18 @@ class ExecutionRunner(Protocol):
         argv: Sequence[str],
         stdin_text: str = "",
         timeout_sec: int = 60,
+        policy_profile: str = "balanced",
     ) -> CommandResult:
         ...
 
 
 class ProviderAdapter(Protocol):
-    async def execute(self, prompt: str, correlation_id: str = "") -> str:
+    async def execute(
+        self,
+        prompt: str,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
         ...
 
     async def version(self) -> str:

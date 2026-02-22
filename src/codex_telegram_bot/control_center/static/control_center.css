@@ -200,6 +200,98 @@ ul.timeline li {
   font-size: 13px;
 }
 
+button.btn {
+  background: #17305f;
+  border: 1px solid #355086;
+  color: #dbe8ff;
+  border-radius: 8px;
+  padding: 7px 10px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.error-banner {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #8f2a2a;
+  background: linear-gradient(180deg, #3c1116 0%, #2d0f13 100%);
+}
+
+.error-code {
+  font-family: "IBM Plex Mono", "Consolas", monospace;
+  color: #fecaca;
+  font-size: 12px;
+  letter-spacing: 0.6px;
+}
+
+.error-title {
+  margin-top: 4px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.error-message {
+  margin-top: 4px;
+  color: #fca5a5;
+}
+
+.recovery-list {
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.recovery-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: #0d152b;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.recovery-label {
+  font-weight: 700;
+}
+
+.wizard-form {
+  margin-top: 10px;
+  display: grid;
+  gap: 12px;
+}
+
+.wizard-form input,
+.wizard-form select {
+  width: 100%;
+  margin-top: 6px;
+  background: #0d152b;
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+}
+
+.ok-banner {
+  margin-top: 8px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid #1f6f4d;
+  background: linear-gradient(180deg, #0f3225 0%, #112b21 100%);
+}
+
+.banner-row {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 @media (max-width: 900px) {
   .layout { grid-template-columns: 1fr; }
   .cards { grid-template-columns: repeat(2, 1fr); }

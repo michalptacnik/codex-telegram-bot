@@ -15,19 +15,26 @@ class CodexCliProvider(ProviderAdapter):
     def __init__(self, runner: ExecutionRunner):
         self._runner = runner
 
-    async def execute(self, prompt: str, correlation_id: str = "") -> str:
+    async def execute(
+        self,
+        prompt: str,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
         safe_prompt = redact(prompt)
         log_json(
             logger,
             "provider.execute.start",
             provider="codex_cli",
             run_id=correlation_id,
+            policy_profile=policy_profile,
         )
         try:
             result = await self._runner.run(
                 ["codex", "exec", "-", "--color", "never", "--skip-git-repo-check"],
                 stdin_text=safe_prompt,
                 timeout_sec=EXEC_TIMEOUT_SEC,
+                policy_profile=policy_profile,
             )
         except FileNotFoundError:
             log_json(
@@ -66,6 +73,7 @@ class CodexCliProvider(ProviderAdapter):
                 run_id=correlation_id,
                 returncode=result.returncode,
                 status="failed",
+                policy_profile=policy_profile,
             )
             return redact(msg)
         log_json(
@@ -75,6 +83,7 @@ class CodexCliProvider(ProviderAdapter):
             run_id=correlation_id,
             returncode=result.returncode,
             status="completed",
+            policy_profile=policy_profile,
         )
         return redact(result.stdout) if result.stdout.strip() else "(no output)"
 

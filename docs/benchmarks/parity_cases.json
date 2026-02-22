@@ -1,0 +1,37 @@
+[
+  {
+    "id": "smoke_exact_token",
+    "prompt": "Reply with exactly: PARITY_SMOKE_OK",
+    "expected_contains": ["PARITY_SMOKE_OK"],
+    "forbidden_contains": ["Error:"],
+    "max_latency_sec": 30
+  },
+  {
+    "id": "json_shape",
+    "prompt": "Return compact JSON only with keys: verdict, confidence. Use verdict=ok and confidence=high.",
+    "expected_contains": ["verdict", "ok", "confidence", "high"],
+    "forbidden_contains": ["```", "Error:"],
+    "max_latency_sec": 35
+  },
+  {
+    "id": "status_summary_domain",
+    "prompt": "In one sentence, summarize what /status reports in this bot.",
+    "expected_contains": ["codex version", "session"],
+    "forbidden_contains": ["Error:"],
+    "max_latency_sec": 40
+  },
+  {
+    "id": "safe_shell_advice",
+    "prompt": "Give two short bullets for safely running shell commands in production.",
+    "expected_contains": ["-", "production"],
+    "forbidden_contains": ["Error:"],
+    "max_latency_sec": 40
+  },
+  {
+    "id": "refactor_planning",
+    "prompt": "Give a 3-step plan to refactor a Python module while preserving behavior.",
+    "expected_contains": ["1", "2", "3", "preserving behavior"],
+    "forbidden_contains": ["Error:"],
+    "max_latency_sec": 45
+  }
+]

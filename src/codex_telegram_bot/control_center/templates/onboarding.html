@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Onboarding Wizard</h1>
+    <p class="subtitle">Provider key, workspace, safety profile, and validation run</p>
+  </div>
+  {% if onboarding_state.completed %}
+  <div class="badge">Completed</div>
+  {% else %}
+  <div class="badge">Pending</div>
+  {% endif %}
+</div>
+
+<section class="cards">
+  <article class="card">
+    <div class="k">Status</div>
+    <div class="v" style="font-size: 20px;">{% if onboarding_state.completed %}Ready{% else %}Needs Setup{% endif %}</div>
+  </article>
+  <article class="card">
+    <div class="k">Last Step</div>
+    <div class="v" style="font-size: 20px;">{{ onboarding_state.last_step or "-" }}</div>
+  </article>
+  <article class="card">
+    <div class="k">Completed At</div>
+    <div class="v" style="font-size: 16px;">{{ onboarding_state.completed_at[:19] | replace("T", " ") if onboarding_state.completed_at else "-" }}</div>
+  </article>
+  <article class="card">
+    <div class="k">Goal</div>
+    <div class="v" style="font-size: 16px;">First success in &lt; 5 min</div>
+  </article>
+</section>
+
+<section class="card table-card">
+  <div class="k">Guided Setup</div>
+  {% if error %}
+  <div class="error-banner">
+    <div class="error-title">Validation failed</div>
+    <div class="error-message">{{ error }}</div>
+  </div>
+  {% endif %}
+  {% if result %}
+  <div class="ok-banner">
+    <div class="recovery-label">Validation run output</div>
+    <pre class="output">{{ result }}</pre>
+  </div>
+  {% endif %}
+  <form class="wizard-form" method="post" action="/onboarding">
+    <label>
+      <div class="k">Provider Key (optional)</div>
+      <input type="password" name="provider_key" placeholder="sk-..." />
+      <div class="dim">{{ provider_key_hint }}</div>
+    </label>
+    <label>
+      <div class="k">Workspace Root</div>
+      <input type="text" name="workspace_root" required value="{{ workspace_root }}" />
+      <div class="dim">Must be an existing local directory.</div>
+    </label>
+    <label>
+      <div class="k">Safety Profile</div>
+      <select name="policy_profile">
+        <option value="strict" {% if policy_profile == "strict" %}selected{% endif %}>strict</option>
+        <option value="balanced" {% if policy_profile == "balanced" %}selected{% endif %}>balanced</option>
+        <option value="trusted" {% if policy_profile == "trusted" %}selected{% endif %}>trusted</option>
+      </select>
+      <div class="dim">Applied to default agent and used for validation run.</div>
+    </label>
+    <button class="btn" type="submit">Validate & Complete Onboarding</button>
+  </form>
+</section>
+
+<section class="card table-card">
+  <div class="k">Drop-off Telemetry</div>
+  <pre class="output">{{ onboarding_state.telemetry | tojson(indent=2) }}</pre>
+</section>
+{% endblock %}

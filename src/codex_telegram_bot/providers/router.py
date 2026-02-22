@@ -26,18 +26,31 @@ class ProviderRouter(ProviderAdapter):
         self._circuit_open_until = 0.0
         self._active_provider = "primary"
 
-    async def execute(self, prompt: str, correlation_id: str = "") -> str:
+    async def execute(
+        self,
+        prompt: str,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
         if self._circuit_is_open():
             if self._fallback:
                 self._active_provider = "fallback"
-                return await self._fallback.execute(prompt, correlation_id=correlation_id)
+                return await self._fallback.execute(
+                    prompt,
+                    correlation_id=correlation_id,
+                    policy_profile=policy_profile,
+                )
             return "Error: primary provider is temporarily unhealthy."
 
         attempts = max(1, self._cfg.retry_attempts)
         last_output = ""
         for _ in range(attempts):
             self._active_provider = "primary"
-            output = await self._primary.execute(prompt, correlation_id=correlation_id)
+            output = await self._primary.execute(
+                prompt,
+                correlation_id=correlation_id,
+                policy_profile=policy_profile,
+            )
             last_output = output
             if not _is_error_output(output):
                 self._on_success()
@@ -48,7 +61,11 @@ class ProviderRouter(ProviderAdapter):
 
         if self._fallback:
             self._active_provider = "fallback"
-            return await self._fallback.execute(prompt, correlation_id=correlation_id)
+            return await self._fallback.execute(
+                prompt,
+                correlation_id=correlation_id,
+                policy_profile=policy_profile,
+            )
         return last_output or "Error: provider execution failed."
 
     async def version(self) -> str:
@@ -94,4 +111,3 @@ class ProviderRouter(ProviderAdapter):
 
 def _is_error_output(output: str) -> bool:
     return (output or "").startswith("Error:")
-

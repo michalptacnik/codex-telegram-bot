@@ -6,7 +6,12 @@ from codex_telegram_bot.domain.contracts import ProviderAdapter
 class EchoFallbackProvider(ProviderAdapter):
     """Minimal fallback provider for degraded mode."""
 
-    async def execute(self, prompt: str, correlation_id: str = "") -> str:
+    async def execute(
+        self,
+        prompt: str,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
         trimmed = (prompt or "").strip()
         if len(trimmed) > 240:
             trimmed = trimmed[:240] + "..."
@@ -24,4 +29,3 @@ class EchoFallbackProvider(ProviderAdapter):
             "status": "healthy",
             "degraded_mode": True,
         }
-

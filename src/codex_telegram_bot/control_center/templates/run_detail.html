@@ -28,7 +28,36 @@
 {% if run.error %}
 <section class="card table-card">
   <div class="k">Error</div>
+  {% if run.error_code %}
+  <div class="error-banner">
+    <div class="error-code">{{ run.error_code }}</div>
+    <div class="error-title">{{ run.error_title }}</div>
+    <div class="error-message">{{ run.error_message }}</div>
+  </div>
+  {% endif %}
   <pre class="output">{{ run.error }}</pre>
+</section>
+{% endif %}
+
+{% if recovery_options %}
+<section class="card table-card">
+  <div class="k">Recovery Actions</div>
+  <div class="recovery-list">
+    {% for option in recovery_options %}
+    <div class="recovery-item">
+      <div class="recovery-meta">
+        <div class="recovery-label">{{ option.label }}</div>
+        <div class="dim">{{ option.description }}</div>
+      </div>
+      {% if option.kind == "api" %}
+      <button class="btn recovery-btn" data-action="{{ option.action_id }}">Run</button>
+      {% else %}
+      <a class="btn" href="{{ option.href }}">Open</a>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+  <div id="recoveryStatus" class="dim"></div>
 </section>
 {% endif %}
 
@@ -39,8 +68,14 @@
       <select id="eventType">
         <option value="">All</option>
         <option value="run.started">run.started</option>
+        <option value="run.policy.applied">run.policy.applied</option>
         <option value="run.completed">run.completed</option>
         <option value="run.failed">run.failed</option>
+        <option value="security.redaction.applied">security.redaction.applied</option>
+        <option value="recovery.attempted">recovery.attempted</option>
+        <option value="recovery.queued">recovery.queued</option>
+        <option value="recovery.completed">recovery.completed</option>
+        <option value="recovery.failed">recovery.failed</option>
       </select>
     </label>
     <label class="dim">Search
@@ -80,6 +115,7 @@
     const searchEl = document.getElementById("searchText");
     const pauseEl = document.getElementById("pauseLive");
     const autoScrollEl = document.getElementById("autoScroll");
+    const recoveryStatusEl = document.getElementById("recoveryStatus");
 
     function esc(s) {
       return String(s || "").replace(/[&<>"']/g, function (m) {
@@ -89,6 +125,29 @@
         if (m === '"') return "&quot;";
         return "&#39;";
       });
+    }
+    async function runRecoveryAction(actionId) {
+      if (!actionId) return;
+      if (recoveryStatusEl) recoveryStatusEl.textContent = "Submitting recovery action...";
+      const res = await fetch("/api/runs/" + runId + "/recover", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action_id: actionId }),
+      });
+      if (!res.ok) {
+        if (recoveryStatusEl) recoveryStatusEl.textContent = "Recovery failed to submit.";
+        return;
+      }
+      const data = await res.json();
+      if (data.redirect_to) {
+        if (recoveryStatusEl) recoveryStatusEl.textContent = "Recovery action completed. Opening target...";
+        window.location.href = data.redirect_to;
+        return;
+      }
+      if (recoveryStatusEl) {
+        recoveryStatusEl.textContent = "Recovery queued: action=" + data.action_id + ", status=" + data.status + (data.job_id ? ", job=" + data.job_id : "");
+      }
+      await refreshEvents();
     }
     function renderTimeline() {
       const typeFilter = typeEl.value;
@@ -119,6 +178,11 @@
     }
     typeEl.addEventListener("change", renderTimeline);
     searchEl.addEventListener("input", renderTimeline);
+    document.querySelectorAll(".recovery-btn").forEach(function (el) {
+      el.addEventListener("click", function () {
+        runRecoveryAction(el.getAttribute("data-action"));
+      });
+    });
     rawEvents = [
       {% for e in events %}
       {"event_type": "{{ e.event_type }}", "created_at": "{{ e.created_at }}", "payload": {{ e.payload | tojson }}},

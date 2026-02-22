@@ -1,0 +1,58 @@
+{
+  "generated_at": "2026-02-22T11:32:54.920732+00:00",
+  "cases_file": "/home/michalptacnik/codex-telegram-bot/docs/benchmarks/parity_cases.json",
+  "workspace_root": "/home/michalptacnik/codex-telegram-bot",
+  "policy_profile": "balanced",
+  "summary": {
+    "cases": 1,
+    "completion_rate": 1.0,
+    "expected_match_avg": 1.0,
+    "similarity_to_baseline_avg": 1.0,
+    "latency_p95_sec": 2.5523,
+    "forbidden_failures": 0,
+    "user_corrections_required_total": 0
+  },
+  "gates": {
+    "pass": true,
+    "checks": {
+      "completion_rate": true,
+      "expected_match_avg": true,
+      "similarity_to_baseline_avg": true,
+      "latency_p95_sec": true,
+      "user_corrections_required_total": true,
+      "forbidden_failures": true
+    },
+    "thresholds": {
+      "min_completion_rate": 0.9,
+      "min_expected_match": 0.8,
+      "min_similarity": 0.6,
+      "max_p95_latency_sec": 45.0,
+      "max_corrections": 2
+    }
+  },
+  "cases": [
+    {
+      "id": "smoke_exact_token",
+      "prompt": "Reply with exactly: PARITY_SMOKE_OK",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 10.5477,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "PARITY_SMOKE_OK"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 2.5523,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "PARITY_SMOKE_OK\n"
+      },
+      "similarity_to_codex": 1.0
+    }
+  ]
+}

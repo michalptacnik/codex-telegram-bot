@@ -8,6 +8,19 @@
   <div class="badge">State DB-backed</div>
 </div>
 
+{% if not onboarding_state.completed %}
+<section class="card table-card onboarding-banner">
+  <div class="k">First Run Setup</div>
+  <div class="banner-row">
+    <div>
+      <div class="recovery-label">Onboarding incomplete</div>
+      <div class="dim">Complete guided setup (provider key, workspace, safety profile, test run).</div>
+    </div>
+    <a class="btn" href="/onboarding">Open setup wizard</a>
+  </div>
+</section>
+{% endif %}
+
 <section class="cards">
   <article class="card"><div class="k">Total Runs</div><div class="v">{{ metrics.total }}</div></article>
   <article class="card"><div class="k">Running</div><div class="v">{{ metrics.running }}</div></article>
@@ -43,4 +56,3 @@
   </table>
 </section>
 {% endblock %}
-

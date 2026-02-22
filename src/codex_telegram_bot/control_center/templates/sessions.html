@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Sessions</h1>
+    <p class="subtitle">Telegram chat session registry</p>
+  </div>
+</div>
+
+<section class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>Session</th>
+        <th>Status</th>
+        <th>Chat</th>
+        <th>User</th>
+        <th>Last Run</th>
+        <th>Updated</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if sessions %}
+      {% for s in sessions %}
+      <tr>
+        <td class="mono">{{ s.session_id[:8] }}</td>
+        <td><span class="pill">{{ s.status }}</span></td>
+        <td class="mono">{{ s.chat_id }}</td>
+        <td class="mono">{{ s.user_id }}</td>
+        <td class="mono">{{ s.last_run_id[:8] if s.last_run_id else "-" }}</td>
+        <td class="dim">{{ s.updated_at.isoformat()[:19] | replace("T", " ") }}</td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="6" class="dim">No sessions yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

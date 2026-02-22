@@ -1,0 +1,52 @@
+[
+  {
+    "title": "Parity Epic 1: Stateful Session Runtime for Telegram Chats",
+    "labels": ["type/epic", "priority/P0", "area/backend", "architecture"],
+    "body": "## Goal\nMatch Codex CLI/Desktop continuity by introducing persistent session state per Telegram chat.\n\n## Why this matters\nCurrent interaction is mostly stateless prompt forwarding. Parity requires memory of context, objectives, and prior tool actions.\n\n## Scope\n- Introduce `session_id` model mapped to Telegram chat/user.\n- Persist rolling context window and structured memory snippets.\n- Support session reset/branch/resume semantics.\n- Add retention policies and compaction.\n\n## Acceptance Criteria\n- Session survives process restart.\n- `/resume` continues prior context without manual copy/paste.\n- Session metadata visible in Control Center.\n\n## Dependencies\nBlocks #TBD (tool orchestration, eval parity)."
+  },
+  {
+    "title": "Parity Epic 2: Tool-Using Agent Loop with Approval Gates",
+    "labels": ["type/epic", "priority/P0", "area/execution", "security"],
+    "body": "## Goal\nImplement a multi-step agent loop that can plan, run tools, observe outputs, and iterate, with explicit approval checkpoints.\n\n## Why this matters\nCodex-quality behavior depends on iterative tool use, not single-turn execution.\n\n## Scope\n- Plan -> act -> observe loop with max-step budget.\n- Deterministic tool call schema.\n- User approval for risky actions.\n- Cancellation and timeout handling.\n\n## Acceptance Criteria\n- Agent can complete a 3+ step repository task in one Telegram request.\n- All tool actions are traceable with correlation IDs.\n- High-risk actions require explicit approval and are auditable.\n\n## Dependencies\nDepends on policy engine + runner profiles."
+  },
+  {
+    "title": "Parity 3: Repository Context Indexing and Retrieval",
+    "labels": ["type/feature", "priority/P0", "area/backend"],
+    "body": "## Goal\nProvide fast repo understanding similar to Codex environments by indexing files and retrieving relevant context.\n\n## Scope\n- Build local code index (paths, symbols, docs, tests).\n- Retrieval API by intent (bugfix, feature, refactor).\n- Automatic context packing for prompts.\n\n## Acceptance Criteria\n- Typical query returns relevant files in <1s for medium repos.\n- Retrieval precision validated on benchmark tasks.\n- Context budget guard prevents prompt overflow."
+  },
+  {
+    "title": "Parity 4: Streaming UX, Interrupt, and Resume for Telegram",
+    "labels": ["type/ux", "priority/P1", "area/ui", "ux"],
+    "body": "## Goal\nDeliver interaction feel closer to Codex by supporting progressive output, interruption, and continuation.\n\n## Scope\n- Stream partial status/events to Telegram message updates.\n- `/interrupt` command to stop active run safely.\n- `/continue` to resume from latest reasoning state.\n\n## Acceptance Criteria\n- User sees progress within first 2 seconds for long tasks.\n- Interrupt always transitions run to terminal state.\n- Continue preserves run context and recovery hints."
+  },
+  {
+    "title": "Parity 5: Sandboxed Workspace Management per Chat Session",
+    "labels": ["type/security", "priority/P0", "area/execution", "security-review-required"],
+    "body": "## Goal\nCreate isolated workspaces per session/user with strict filesystem boundaries.\n\n## Scope\n- Session workspace provisioning/cleanup.\n- Bind session to allowed roots and execution profile.\n- Quotas for disk/time/process count.\n\n## Acceptance Criteria\n- No cross-session file leakage.\n- Violations are blocked and logged with error codes.\n- Workspace lifecycle visible in telemetry."
+  },
+  {
+    "title": "Parity 6: Outcome Quality Evaluation Harness (Telegram vs Codex Baseline)",
+    "labels": ["type/feature", "priority/P0", "area/observability", "architecture"],
+    "body": "## Goal\nQuantify parity using repeatable benchmarks against a Codex baseline workflow.\n\n## Scope\n- Define benchmark suite (code edits, debugging, refactors, ops tasks).\n- Score dimensions: correctness, completion rate, latency, user corrections required.\n- CI/regression dashboard for parity tracking.\n\n## Acceptance Criteria\n- Baseline tasks runnable automatically.\n- Weekly parity report generated.\n- Clear pass/fail gates for parity claims."
+  },
+  {
+    "title": "Parity 7: Robust Failure Recovery Playbooks for Agent Runs",
+    "labels": ["type/feature", "priority/P1", "area/observability"],
+    "body": "## Goal\nImprove reliability by mapping major failure classes to deterministic recovery sequences.\n\n## Scope\n- Classify transient vs persistent failures.\n- Retry/backoff policy by error code.\n- Auto-suggest recovery actions in Telegram and Control Center.\n\n## Acceptance Criteria\n- Top 15 failures have tested recovery paths.\n- Recovery success telemetry available by error code.\n- Reduced manual intervention rate over baseline."
+  },
+  {
+    "title": "Parity 8: Multi-Provider Adapter Layer with Capability Negotiation",
+    "labels": ["type/feature", "priority/P1", "area/backend", "architecture"],
+    "body": "## Goal\nSupport provider abstraction comparable to Codex setups and route by capability/cost/reliability.\n\n## Scope\n- Unified provider capability schema (tool-calls, context size, streaming).\n- Router policy for fallback and targeted model selection.\n- Health probes and circuit metrics.\n\n## Acceptance Criteria\n- Provider choice visible per run.\n- Fallback preserves session continuity.\n- Capability mismatch handled with explicit user messaging."
+  },
+  {
+    "title": "Parity 9: Security & Abuse Controls for Telegram Agent Access",
+    "labels": ["type/security", "priority/P0", "area/backend", "security"],
+    "body": "## Goal\nPrevent abuse and unauthorized automation while preserving usability.\n\n## Scope\n- Strong auth model beyond static allowlist (roles/scopes).\n- Rate limits and spend ceilings per user/chat.\n- Secret handling and sensitive action confirmations.\n\n## Acceptance Criteria\n- Privileged actions require scoped authorization.\n- Abuse attempts are rate-limited and auditable.\n- Security test checklist passes for release candidate."
+  },
+  {
+    "title": "Parity 10: Productized Telegram Command Surface and Help UX",
+    "labels": ["type/ux", "priority/P2", "area/ui", "onboarding"],
+    "body": "## Goal\nMake the Telegram experience discoverable and consistent for power users and new users.\n\n## Scope\n- Define command taxonomy (`/new`, `/resume`, `/interrupt`, `/status`, `/help`, `/workspace`).\n- Context-aware help and examples.\n- Rich status snapshots (current task, step, pending approvals).\n\n## Acceptance Criteria\n- New user can complete first task with built-in guidance.\n- Help output reflects current runtime capability/profile.\n- Command behavior documented and integration-tested."
+  }
+]

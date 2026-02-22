@@ -102,10 +102,10 @@ def main() -> None:
     agent_service = build_agent_service(state_db_path=state_db_path)
 
     if args.control_center:
-        from codex_telegram_bot.control_center.app import create_app
+        from codex_telegram_bot.control_center.app import create_app_with_config
         import uvicorn
 
-        app = create_app(agent_service)
+        app = create_app_with_config(agent_service, config_dir=config_dir)
         uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
         return
 
