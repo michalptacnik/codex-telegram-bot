@@ -22,6 +22,15 @@ class ExecutionRunner(Protocol):
 
 
 class ProviderAdapter(Protocol):
+    async def generate(
+        self,
+        messages: Sequence[Dict[str, str]],
+        stream: bool = False,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
+        ...
+
     async def execute(
         self,
         prompt: str,

@@ -8,6 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatAction
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
 
+from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.services.agent_service import AgentService
@@ -135,8 +136,8 @@ async def handle_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         if not _allow_user_command(context, user_id):
             await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
             return
-        agent_service = context.bot_data.get("agent_service")
-        session = agent_service.reset_session(chat_id=update.effective_chat.id, user_id=user_id)
+        agent = context.bot_data.get("agent")
+        session = agent.reset_session(chat_id=update.effective_chat.id, user_id=user_id)
         await update.message.reply_text(f"New session started: `{session.session_id[:8]}`", parse_mode="Markdown")
     except Exception as exc:
         logger.exception("Reset handler error: %s", exc)
@@ -605,9 +606,8 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, user_id: int) -> None:
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
+    agent = context.bot_data.get("agent")
     agent_service = context.bot_data.get("agent_service")
-    session = agent_service.get_or_create_session(chat_id=update.effective_chat.id, user_id=user_id)
-    agent_service.append_session_user_message(session.session_id, text)
     active_jobs = context.application.bot_data.setdefault("active_jobs", {})
     active_tasks = context.application.bot_data.setdefault("active_tasks", {})
     run_state = context.application.bot_data.setdefault("run_state", {})
@@ -658,11 +658,10 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             await set_status("Running: tool loop finished, finalizing response...")
 
     try:
-        output = await agent_service.run_prompt_with_tool_loop(
-            prompt=text,
+        response = await agent.handle_message(
             chat_id=update.effective_chat.id,
             user_id=user_id,
-            session_id=session.session_id,
+            text=text,
             agent_id="default",
             progress_callback=progress,
         )
@@ -670,7 +669,7 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         active_jobs.pop(update.effective_chat.id, None)
         active_tasks.pop(update.effective_chat.id, None)
         run_state.pop(update.effective_chat.id, None)
-    agent_service.append_session_assistant_message(session.session_id, output)
+    output = response.output
     output = output.strip() if output else ""
     if not output:
         output = "(no output)"
@@ -693,12 +692,16 @@ def build_application(
     allowlist: Optional[List[int]],
     callbacks: dict,
     agent_service: Optional[AgentService] = None,
+    agent: Optional[Agent] = None,
 ):
     if agent_service is None:
         agent_service = build_agent_service()
+    if agent is None:
+        agent = Agent(agent_service=agent_service)
     app = ApplicationBuilder().token(token).build()
     app.bot_data["allowlist"] = allowlist
     app.bot_data["agent_service"] = agent_service
+    app.bot_data["agent"] = agent
     app.bot_data.update(callbacks)
 
     app.add_handler(CommandHandler("ping", handle_ping))

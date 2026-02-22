@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from codex_telegram_bot.domain.contracts import ProviderAdapter
 
@@ -25,6 +25,24 @@ class ProviderRouter(ProviderAdapter):
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
         self._active_provider = "primary"
+
+    async def generate(
+        self,
+        messages: Sequence[Dict[str, str]],
+        stream: bool = False,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
+        prompt = "\n".join(
+            str(m.get("content") or "").strip()
+            for m in messages or []
+            if isinstance(m, dict) and str(m.get("content") or "").strip()
+        )
+        return await self.execute(
+            prompt=prompt,
+            correlation_id=correlation_id,
+            policy_profile=policy_profile,
+        )
 
     async def execute(
         self,

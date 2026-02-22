@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Sequence
 
 from codex_telegram_bot.domain.contracts import ExecutionRunner, ProviderAdapter
 from codex_telegram_bot.observability.structured_log import log_json
@@ -38,6 +38,23 @@ class CodexCliProvider(ProviderAdapter):
         self._version_timeout_sec = version_timeout_sec or _read_timeout_env(
             "CODEX_VERSION_TIMEOUT_SEC",
             DEFAULT_VERSION_TIMEOUT_SEC,
+        )
+
+    async def generate(
+        self,
+        messages: Sequence[Dict[str, str]],
+        stream: bool = False,
+        correlation_id: str = "",
+        policy_profile: str = "balanced",
+    ) -> str:
+        prompt = _messages_to_prompt(messages)
+        if stream:
+            # codex-cli provider is currently non-streaming; keep contract stable.
+            stream = False
+        return await self.execute(
+            prompt=prompt,
+            correlation_id=correlation_id,
+            policy_profile=policy_profile,
         )
 
     async def execute(
@@ -161,3 +178,19 @@ class CodexCliProvider(ProviderAdapter):
             "supported_policy_profiles": ["strict", "balanced", "trusted"],
             "reliability_tier": "primary",
         }
+
+
+def _messages_to_prompt(messages: Sequence[Dict[str, str]]) -> str:
+    lines: list[str] = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            lines.append(content)
+        else:
+            lines.append(f"{role}: {content}")
+    return "\n\n".join(lines).strip()

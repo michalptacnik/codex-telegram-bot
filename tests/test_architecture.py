@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
+from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
 from codex_telegram_bot.domain.contracts import CommandResult
 from codex_telegram_bot.providers.fallback import EchoFallbackProvider
 from codex_telegram_bot.events.event_bus import EventBus
@@ -64,6 +65,23 @@ class TestCodexCliProvider(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(output, "hello")
         self.assertEqual(runner.last_policy_profile, "strict")
+
+    async def test_generate_uses_messages_contract(self):
+        runner = FakeRunner(CommandResult(returncode=0, stdout="hello", stderr=""))
+        provider = CodexCliProvider(runner=runner)
+
+        output = await provider.generate(
+            [
+                {"role": "system", "content": "You are terse."},
+                {"role": "user", "content": "Do thing"},
+            ],
+            stream=False,
+            policy_profile="balanced",
+        )
+
+        self.assertEqual(output, "hello")
+        self.assertIn("You are terse.", runner.last_stdin)
+        self.assertIn("user: Do thing", runner.last_stdin)
 
     async def test_execute_nonzero_return_code(self):
         runner = FakeRunner(CommandResult(returncode=2, stdout="", stderr="bad args"))
@@ -473,6 +491,37 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             finally:
                 await service.shutdown()
 
+    async def test_tool_loop_supports_registered_tool_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="model-ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                session = service.get_or_create_session(chat_id=511, user_id=611)
+                ws = service.session_workspace(session.session_id)
+                (ws / "notes.txt").write_text("hello tool", encoding="utf-8")
+
+                out = await service.run_prompt_with_tool_loop(
+                    prompt='!tool {"name":"read_file","args":{"path":"notes.txt"}}\nSummarize.',
+                    chat_id=511,
+                    user_id=611,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+
+                self.assertEqual(out, "model-ok")
+                self.assertIn("hello tool", runner.last_stdin)
+            finally:
+                await service.shutdown()
+
     async def test_tool_loop_checkpoint_skips_completed_steps(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state.db"
@@ -649,6 +698,33 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
                 prompt = service.build_session_prompt(session.session_id, "Refactor multi-file edit for scheduler and tests.")
                 self.assertIn("Engineering response contract:", prompt)
                 self.assertIn("CHANGES:", prompt)
+            finally:
+                await service.shutdown()
+
+    async def test_build_session_prompt_adds_capability_hints_selectively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            cap_root = Path(tmp) / "capabilities"
+            cap_root.mkdir(parents=True, exist_ok=True)
+            (cap_root / "system.md").write_text("# System\n- deterministic\n", encoding="utf-8")
+            (cap_root / "git.md").write_text("# Git\n- status and diff\n", encoding="utf-8")
+            (cap_root / "files.md").write_text("# Files\n- safe reads/writes\n", encoding="utf-8")
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+                capability_registry=MarkdownCapabilityRegistry(cap_root),
+            )
+            try:
+                session = service.get_or_create_session(chat_id=1202, user_id=1302)
+                prompt = service.build_session_prompt(session.session_id, "show git status and branch details")
+                self.assertIn("Capability hints (selective summaries):", prompt)
+                self.assertIn("git capability", prompt)
             finally:
                 await service.shutdown()
 

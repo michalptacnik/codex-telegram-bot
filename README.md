@@ -36,17 +36,30 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
 
 ## Architecture
 
-`Telegram -> handlers -> AgentService -> ProviderAdapter -> ExecutionRunner -> codex CLI`
+`Telegram -> Agent Core -> Provider -> Tool Registry -> Execution Runner -> codex CLI`
 
 Current module boundaries:
 
-- `telegram_bot.py`: Telegram handlers and command wiring
-- `services/agent_service.py`: app service boundary for agent actions
-- `providers/codex_cli.py`: OpenAI/Codex provider adapter (CLI-backed)
+- `telegram_bot.py`: Telegram transport handlers and command wiring
+- `agent_core/agent.py`: agent entrypoint used by transport (`Agent.handle_message`)
+- `agent_core/router.py`: agent-to-service routing boundary
+- `agent_core/memory.py`: bounded memory defaults (`SESSION_MAX_TURNS=20`)
+- `services/agent_service.py`: orchestration, session, approvals, tool loop
+- `providers/*.py`: provider abstraction + codex-cli implementation
+- `tools/*.py`: explicit tool registry (`read_file`, `write_file`, `git_status`)
 - `execution/local_shell.py`: local subprocess execution boundary
-- `domain/contracts.py`: shared contracts for providers/execution
 
-The bot remains stateless by default. Each incoming message is executed as an independent `codex exec` call through these layers.
+The runtime is stateful per chat/user session with bounded memory and explicit reset/branch/resume controls.
+
+## Roadmap Tracking
+
+- Roadmap execution is tracked in GitHub Issues and milestones.
+- Current EPIC tracking issues:
+  - `#64` Agent Core Foundation
+  - `#65` Secure Computer Interaction Layer
+  - `#66` Multi-Provider Architecture
+  - `#67` Streaming and CLI-like Feedback
+  - `#68` Lightweight Web Control Center
 
 ## Requirements
 
@@ -122,11 +135,14 @@ Environment variables override `.env`:
 - `PROVIDER_FAILURE_THRESHOLD` (default: `2`)
 - `PROVIDER_RECOVERY_SEC` (default: `30`)
 - `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
+- `PROVIDER_BACKEND` (default: `codex-cli`; current supported value: `codex-cli`)
 - `CODEX_EXEC_TIMEOUT_SEC` (default: `180`, bounded by policy profile max timeout)
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `EXECUTION_WORKSPACE_ROOT` (default: current working directory)
+- `CAPABILITIES_DIR` (default: `<EXECUTION_WORKSPACE_ROOT>/capabilities`)
 - `REDACTION_EXTRA_PATTERNS` (optional regex list separated by `;;`)
-- `SESSION_MAX_MESSAGES` (default: `60`)
+- `SESSION_MAX_TURNS` (default: `20`)
+- `SESSION_MAX_MESSAGES` (default: `40`, derived from turns)
 - `SESSION_COMPACT_KEEP` (default: `20`)
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `APPROVAL_TTL_SEC` (default: `900`)
@@ -383,8 +399,12 @@ Agent concurrency:
 - Example:
   - `!exec /bin/ls -la`
   - `!exec /usr/bin/git status`
+- Registered tools are available via explicit `!tool` JSON:
+  - `!tool {"name":"read_file","args":{"path":"README.md"}}`
+  - `!tool {"name":"write_file","args":{"path":"notes.txt","content":"hello"}}`
+  - `!tool {"name":"git_status","args":{"short":true}}`
 - Structured loop objects are also supported:
-  - `!loop {"steps":[{"kind":"exec","command":"/bin/ls -la"}],"final_prompt":"Summarize findings"}`
+  - `!loop {"steps":[{"kind":"exec","command":"/bin/ls -la"},{"kind":"tool","tool":"git_status","args":{"short":true}}],"final_prompt":"Summarize findings"}`
 - The agent executes listed actions, captures observations, and injects them into the provider prompt.
 - High-risk actions require explicit approval:
   - `/pending` to list pending approvals
@@ -405,6 +425,17 @@ Agent concurrency:
 - Safe replay guardrails:
   - high-risk replays require explicit confirmation (`/continue yes`)
   - completed tool steps can be checkpoint-skipped on identical replay to avoid duplicate execution
+
+## Capability Registry
+
+- Capability markdowns live in `capabilities/`:
+  - `capabilities/system.md`
+  - `capabilities/git.md`
+  - `capabilities/files.md`
+- Registry behavior is lean:
+  - load markdowns dynamically from `CAPABILITIES_DIR`
+  - select only relevant capabilities by prompt keywords
+  - inject only short summaries, never full markdown contents
 
 ## Repository Retrieval (MVP)
 

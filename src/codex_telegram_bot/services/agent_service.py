@@ -5,9 +5,11 @@ import shlex
 import uuid
 import json
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
 from codex_telegram_bot.domain.contracts import ProviderAdapter, ExecutionRunner
 from codex_telegram_bot.domain.agents import AgentRecord
 from codex_telegram_bot.domain.runs import RunRecord
@@ -20,6 +22,7 @@ from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
+from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 
 logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
@@ -28,6 +31,19 @@ CONTEXT_BUDGET_TOTAL_CHARS = 12000
 CONTEXT_HISTORY_BUDGET_CHARS = 6500
 CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
 CONTEXT_SUMMARY_BUDGET_CHARS = 1200
+
+
+@dataclass(frozen=True)
+class LoopAction:
+    kind: str
+    argv: List[str]
+    tool_name: str
+    tool_args: Dict[str, Any]
+
+    def checkpoint_command(self) -> str:
+        if self.kind == "tool":
+            return f"tool:{self.tool_name}:{json.dumps(self.tool_args, sort_keys=True)}"
+        return " ".join(self.argv)
 
 
 class AgentService:
@@ -47,6 +63,8 @@ class AgentService:
         max_pending_approvals_per_user: int = 3,
         session_workspaces_root: Optional[Path] = None,
         alert_dispatcher: Optional[AlertDispatcher] = None,
+        tool_registry: Optional[ToolRegistry] = None,
+        capability_registry: Optional[MarkdownCapabilityRegistry] = None,
     ):
         self._provider = provider
         self._run_store = run_store
@@ -64,6 +82,8 @@ class AgentService:
         self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
         self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
+        self._tool_registry = tool_registry or build_default_tool_registry()
+        self._capability_registry = capability_registry
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -178,8 +198,9 @@ class AgentService:
                 job_id=correlation_id,
             )
 
-        output = await self._provider.execute(
-            prompt,
+        output = await self._provider.generate(
+            messages=[{"role": "user", "content": prompt}],
+            stream=False,
             correlation_id=run_id or correlation_id,
             policy_profile=policy_profile,
         )
@@ -290,8 +311,9 @@ class AgentService:
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
+        capability_lines = self._build_capability_context(user_prompt=user_prompt)
         if not self._run_store:
-            prefix = planning_lines + retrieval_lines
+            prefix = capability_lines + planning_lines + retrieval_lines
             if prefix:
                 return "\n".join(prefix + [user_prompt])
             return user_prompt
@@ -299,7 +321,7 @@ class AgentService:
         summary = (session.summary or "").strip() if session else ""
         history = self._run_store.list_session_messages(session_id=session_id, limit=max_turns * 2)
         if not history:
-            prefix = planning_lines + retrieval_lines
+            prefix = capability_lines + planning_lines + retrieval_lines
             if summary:
                 prefix = [f"Session memory summary:\n{summary[:CONTEXT_SUMMARY_BUDGET_CHARS]}"] + prefix
             if prefix:
@@ -321,6 +343,8 @@ class AgentService:
             used_summary = summary[:CONTEXT_SUMMARY_BUDGET_CHARS]
             lines.append("Session memory summary:")
             lines.append(used_summary)
+        if capability_lines:
+            lines.extend(capability_lines)
         if planning_lines:
             lines.extend(planning_lines)
         if retrieval_lines:
@@ -350,6 +374,17 @@ class AgentService:
 
     def build_retrieval_context(self, user_prompt: str, limit: int = 4) -> List[str]:
         lines, _ = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=limit)
+        return lines
+
+    def _build_capability_context(self, user_prompt: str) -> List[str]:
+        if not self._capability_registry:
+            return []
+        summaries = self._capability_registry.summarize_for_prompt(user_prompt, max_capabilities=2)
+        if not summaries:
+            return []
+        lines = ["Capability hints (selective summaries):"]
+        for item in summaries:
+            lines.append(f"- {item.summary[:260]}")
         return lines
 
     def _build_retrieval_context_with_meta(self, user_prompt: str, limit: int = 4) -> tuple[List[str], Dict[str, Any]]:
@@ -544,9 +579,9 @@ class AgentService:
         )
         observations: List[str] = []
         session_workspace = self.session_workspace(session_id=session_id)
-        for index, argv in enumerate(actions, start=1):
+        for index, action in enumerate(actions, start=1):
             action_id = "tool-" + uuid.uuid4().hex[:8]
-            command = " ".join(argv)
+            command = action.checkpoint_command()
             checkpoint = checkpoints.get(index)
             if checkpoint and checkpoint.get("command") == command and checkpoint.get("status") == "completed":
                 observations.append(f"{action_id} skipped via checkpoint: step {index} already completed")
@@ -570,6 +605,41 @@ class AgentService:
                     "command": command,
                 },
             )
+            if action.kind == "tool":
+                result = self._execute_registered_tool_action(
+                    action_id=action_id,
+                    tool_name=action.tool_name,
+                    tool_args=action.tool_args,
+                    workspace_root=session_workspace,
+                )
+                observations.append(result.output)
+                rc = 0 if result.ok else 1
+                if self._run_store:
+                    self._run_store.upsert_tool_loop_checkpoint(
+                        session_id=session_id,
+                        prompt_fingerprint=prompt_fingerprint,
+                        step_index=index,
+                        command=command,
+                        status="completed" if result.ok else "failed",
+                    )
+                await self._notify_progress(
+                    progress_callback,
+                    {
+                        "event": "loop.step.completed",
+                        "step": index,
+                        "action_id": action_id,
+                        "returncode": rc,
+                    },
+                )
+                self.append_session_assistant_message(
+                    session_id=session_id,
+                    content=f"tool.action.completed action_id={action_id} rc={rc}",
+                )
+                if not result.ok:
+                    break
+                continue
+
+            argv = action.argv
             decision = self._policy_engine.evaluate(argv=argv, policy_profile=policy_profile)
             override_requires_approval = _requires_manual_approval_override(argv=argv)
             if override_requires_approval and decision.risk_tier == "low":
@@ -904,6 +974,30 @@ class AgentService:
             payload=str(envelope),
         )
 
+    def _execute_registered_tool_action(
+        self,
+        action_id: str,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        workspace_root: Path,
+    ):
+        tool = self._tool_registry.get(tool_name)
+        if not tool:
+            known = ", ".join(self._tool_registry.names())
+            return ToolResult(
+                ok=False,
+                output=f"{action_id} tool={tool_name} error=unknown_tool known=[{known}]",
+            )
+        result = tool.run(
+            ToolRequest(name=tool_name, args=dict(tool_args or {})),
+            ToolContext(workspace_root=workspace_root),
+        )
+        status = "ok" if result.ok else "error"
+        return ToolResult(
+            ok=result.ok,
+            output=f"{action_id} tool={tool_name} status={status}\n{result.output}",
+        )
+
     async def _execute_tool_action_with_telemetry(
         self,
         action_id: str,
@@ -1019,8 +1113,8 @@ class AgentService:
         return self._provider.__class__.__name__.lower()
 
 
-def _extract_loop_actions(prompt: str) -> tuple[List[List[str]], str, str]:
-    actions: List[List[str]] = []
+def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
+    actions: List[LoopAction] = []
     keep_lines: List[str] = []
     final_prompt = ""
     for raw in (prompt or "").splitlines():
@@ -1038,19 +1132,25 @@ def _extract_loop_actions(prompt: str) -> tuple[List[List[str]], str, str]:
                         if not isinstance(item, dict):
                             continue
                         kind = str(item.get("kind") or item.get("type") or "").strip().lower()
-                        if kind != "exec":
-                            continue
-                        argv_raw = item.get("argv")
-                        if isinstance(argv_raw, list):
-                            argv = [str(x) for x in argv_raw if str(x).strip()]
-                        else:
-                            command = str(item.get("command") or "").strip()
-                            try:
-                                argv = shlex.split(command) if command else []
-                            except ValueError:
-                                argv = []
-                        if argv:
-                            actions.append(argv)
+                        if kind == "exec":
+                            argv_raw = item.get("argv")
+                            if isinstance(argv_raw, list):
+                                argv = [str(x) for x in argv_raw if str(x).strip()]
+                            else:
+                                command = str(item.get("command") or "").strip()
+                                try:
+                                    argv = shlex.split(command) if command else []
+                                except ValueError:
+                                    argv = []
+                            if argv:
+                                actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+                        elif kind == "tool":
+                            tool_name = str(item.get("tool") or item.get("name") or "").strip().lower()
+                            tool_args = item.get("args")
+                            if tool_name and isinstance(tool_args, dict):
+                                actions.append(
+                                    LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(tool_args))
+                                )
                 fp = str(obj.get("final_prompt") or "").strip()
                 if fp:
                     final_prompt = fp
@@ -1063,15 +1163,34 @@ def _extract_loop_actions(prompt: str) -> tuple[List[List[str]], str, str]:
                 except ValueError:
                     argv = []
                 if argv:
-                    actions.append(argv)
+                    actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+            continue
+        if line.startswith("!tool "):
+            body = line[len("!tool "):].strip()
+            try:
+                obj = json.loads(body)
+            except Exception:
+                obj = {}
+            tool_name = str(obj.get("name") or obj.get("tool") or "").strip().lower() if isinstance(obj, dict) else ""
+            tool_args = obj.get("args") if isinstance(obj, dict) else {}
+            if tool_name and isinstance(tool_args, dict):
+                actions.append(LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(tool_args)))
             continue
         keep_lines.append(raw)
     return actions, "\n".join(keep_lines).strip(), final_prompt
 
 
-def _tool_loop_fingerprint(actions: List[List[str]], cleaned_prompt: str, final_prompt: str) -> str:
+def _tool_loop_fingerprint(actions: List[LoopAction], cleaned_prompt: str, final_prompt: str) -> str:
     payload = {
-        "actions": actions,
+        "actions": [
+            {
+                "kind": a.kind,
+                "argv": a.argv,
+                "tool_name": a.tool_name,
+                "tool_args": a.tool_args,
+            }
+            for a in actions
+        ],
         "cleaned_prompt": (cleaned_prompt or "").strip(),
         "final_prompt": (final_prompt or "").strip(),
     }
