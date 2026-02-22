@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict
 
 from codex_telegram_bot.domain.contracts import ExecutionRunner, ProviderAdapter
@@ -7,13 +8,37 @@ from codex_telegram_bot.util import redact
 
 logger = logging.getLogger(__name__)
 
-EXEC_TIMEOUT_SEC = 60
-VERSION_TIMEOUT_SEC = 10
+DEFAULT_EXEC_TIMEOUT_SEC = 180
+DEFAULT_VERSION_TIMEOUT_SEC = 10
+
+
+def _read_timeout_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, value)
 
 
 class CodexCliProvider(ProviderAdapter):
-    def __init__(self, runner: ExecutionRunner):
+    def __init__(
+        self,
+        runner: ExecutionRunner,
+        exec_timeout_sec: int | None = None,
+        version_timeout_sec: int | None = None,
+    ):
         self._runner = runner
+        self._exec_timeout_sec = exec_timeout_sec or _read_timeout_env(
+            "CODEX_EXEC_TIMEOUT_SEC",
+            DEFAULT_EXEC_TIMEOUT_SEC,
+        )
+        self._version_timeout_sec = version_timeout_sec or _read_timeout_env(
+            "CODEX_VERSION_TIMEOUT_SEC",
+            DEFAULT_VERSION_TIMEOUT_SEC,
+        )
 
     async def execute(
         self,
@@ -33,7 +58,7 @@ class CodexCliProvider(ProviderAdapter):
             result = await self._runner.run(
                 ["codex", "exec", "-", "--color", "never", "--skip-git-repo-check"],
                 stdin_text=safe_prompt,
-                timeout_sec=EXEC_TIMEOUT_SEC,
+                timeout_sec=self._exec_timeout_sec,
                 policy_profile=policy_profile,
             )
         except FileNotFoundError:
@@ -91,7 +116,7 @@ class CodexCliProvider(ProviderAdapter):
         try:
             result = await self._runner.run(
                 ["codex", "--version"],
-                timeout_sec=VERSION_TIMEOUT_SEC,
+                timeout_sec=self._version_timeout_sec,
             )
         except Exception:
             return "unknown"
@@ -103,7 +128,7 @@ class CodexCliProvider(ProviderAdapter):
         try:
             result = await self._runner.run(
                 ["codex", "--version"],
-                timeout_sec=VERSION_TIMEOUT_SEC,
+                timeout_sec=self._version_timeout_sec,
             )
         except Exception:
             return {

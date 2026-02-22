@@ -122,6 +122,8 @@ Environment variables override `.env`:
 - `PROVIDER_FAILURE_THRESHOLD` (default: `2`)
 - `PROVIDER_RECOVERY_SEC` (default: `30`)
 - `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
+- `CODEX_EXEC_TIMEOUT_SEC` (default: `180`, bounded by policy profile max timeout)
+- `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `EXECUTION_WORKSPACE_ROOT` (default: current working directory)
 - `REDACTION_EXTRA_PATTERNS` (optional regex list separated by `;;`)
 - `SESSION_MAX_MESSAGES` (default: `60`)
