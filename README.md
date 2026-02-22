@@ -126,6 +126,8 @@ Environment variables override `.env`:
 - `SESSION_COMPACT_KEEP` (default: `20`)
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `APPROVAL_TTL_SEC` (default: `900`)
+- `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
+- `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
 - `REPO_SCAN_MAX_FILES` (default: `3000`)
 - `REPO_SCAN_MAX_FILE_BYTES` (default: `120000`)
 - `REPO_INDEX_AUTO_REFRESH_SEC` (default: `30`)
@@ -349,6 +351,7 @@ Agent concurrency:
 - `/branch` creates a new session branched from current recent history.
 - Session metadata is visible in Control Center (`/sessions` and `/api/sessions`).
 - Retention policy compacts old session history when message count exceeds configured limits.
+- Tool execution uses isolated per-session workspace roots under `SESSION_WORKSPACES_ROOT`.
 
 ## Tool Loop (MVP)
 
@@ -365,6 +368,7 @@ Agent concurrency:
   - `/deny <approval_id>` to reject pending action
 - Tool loop enforces per-message max step budget (`TOOL_LOOP_MAX_STEPS`).
 - Pending approvals expire automatically after `APPROVAL_TTL_SEC`.
+- Pending approvals are capped per user (`MAX_PENDING_APPROVALS_PER_USER`) to reduce abuse risk.
 - Telegram now emits step-by-step loop progress messages (start, step start, approval wait, finish).
 - Progress updates are delivered via in-place status message edits to reduce chat noise.
 - Progress updates are impermanent: in-place status messages auto-delete shortly after completion.
@@ -374,6 +378,9 @@ Agent concurrency:
   - `3) Show pending`
 - `/interrupt` cancels active run for current chat (queued job + in-flight task).
 - `/continue` reuses latest user prompt and asks the agent to continue the task.
+- Safe replay guardrails:
+  - high-risk replays require explicit confirmation (`/continue yes`)
+  - completed tool steps can be checkpoint-skipped on identical replay to avoid duplicate execution
 
 ## Repository Retrieval (MVP)
 

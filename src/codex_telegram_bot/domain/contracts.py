@@ -16,6 +16,7 @@ class ExecutionRunner(Protocol):
         stdin_text: str = "",
         timeout_sec: int = 60,
         policy_profile: str = "balanced",
+        workspace_root: str = "",
     ) -> CommandResult:
         ...
 

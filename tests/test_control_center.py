@@ -24,7 +24,7 @@ class _FakeRunner:
     def set_results(self, results):
         self._results = list(results)
 
-    async def run(self, argv, stdin_text="", timeout_sec=60, policy_profile="balanced"):
+    async def run(self, argv, stdin_text="", timeout_sec=60, policy_profile="balanced", workspace_root=""):
         if len(self._results) > 1:
             return self._results.pop(0)
         return self._results[0]

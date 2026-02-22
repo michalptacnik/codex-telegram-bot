@@ -15,6 +15,10 @@ from codex_telegram_bot.services.agent_service import AgentService
 
 def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
     workspace_root = _read_workspace_root_env("EXECUTION_WORKSPACE_ROOT", Path.cwd())
+    session_workspaces_root = _read_workspace_root_env(
+        "SESSION_WORKSPACES_ROOT",
+        workspace_root / ".session_workspaces",
+    )
     repo_retriever = RepositoryContextRetriever(
         root=workspace_root,
         max_scan_files=_read_int_env("REPO_SCAN_MAX_FILES", 3000),
@@ -42,6 +46,8 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
             session_compact_keep=_read_int_env("SESSION_COMPACT_KEEP", 20),
             tool_loop_max_steps=_read_int_env("TOOL_LOOP_MAX_STEPS", 3),
             approval_ttl_sec=_read_int_env("APPROVAL_TTL_SEC", 900),
+            max_pending_approvals_per_user=_read_int_env("MAX_PENDING_APPROVALS_PER_USER", 3),
+            session_workspaces_root=session_workspaces_root,
         )
     run_store = SqliteRunStore(db_path=state_db_path)
     event_bus = EventBus()
@@ -55,6 +61,8 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
         session_compact_keep=_read_int_env("SESSION_COMPACT_KEEP", 20),
         tool_loop_max_steps=_read_int_env("TOOL_LOOP_MAX_STEPS", 3),
         approval_ttl_sec=_read_int_env("APPROVAL_TTL_SEC", 900),
+        max_pending_approvals_per_user=_read_int_env("MAX_PENDING_APPROVALS_PER_USER", 3),
+        session_workspaces_root=session_workspaces_root,
     )
 
 

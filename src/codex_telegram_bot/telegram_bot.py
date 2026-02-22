@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 MAX_INPUT_CHARS = 6000
 MAX_OUTPUT_CHARS = 3800
 EPHEMERAL_STATUS_TTL_SEC = 12
+USER_WINDOW_SEC = 60
+MAX_USER_COMMANDS_PER_WINDOW = 20
 
 
 def is_allowed(user_id: int, allowlist: Optional[List[int]]) -> bool:
@@ -58,6 +60,19 @@ def _resolve_pending_by_prefix(pending: List[dict], prefix: str) -> Optional[dic
     if not value:
         return None
     return next((p for p in pending if p["approval_id"].startswith(value)), None)
+
+
+def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
+    now = asyncio.get_running_loop().time()
+    limiter = context.application.bot_data.setdefault("user_command_limiter", {})
+    key = int(user_id or 0)
+    stamps = [t for t in limiter.get(key, []) if now - float(t) <= USER_WINDOW_SEC]
+    if len(stamps) >= MAX_USER_COMMANDS_PER_WINDOW:
+        limiter[key] = stamps
+        return False
+    stamps.append(now)
+    limiter[key] = stamps
+    return True
 
 
 async def _delete_message_later(bot, chat_id: int, message_id: int, delay_sec: int = EPHEMERAL_STATUS_TTL_SEC) -> None:
@@ -116,6 +131,9 @@ async def handle_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         user_id = update.message.from_user.id if update.message.from_user else 0
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
             return
         agent_service = context.bot_data.get("agent_service")
         session = agent_service.reset_session(chat_id=update.effective_chat.id, user_id=user_id)
@@ -227,6 +245,9 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
             return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
+            return
         if not context.args:
             await update.message.reply_text("Usage: /approve <approval_id_prefix>")
             return
@@ -259,6 +280,9 @@ async def handle_deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         user_id = update.message.from_user.id if update.message.from_user else 0
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
             return
         if not context.args:
             await update.message.reply_text("Usage: /deny <approval_id_prefix>")
@@ -396,6 +420,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
             return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
+            return
 
         text = update.message.text
         if len(text) > MAX_INPUT_CHARS:
@@ -470,6 +497,9 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
         user_id = query.from_user.id if query.from_user else 0
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await query.edit_message_text("Rate limit: too many actions. Please wait a minute.")
             return
         data = (query.data or "").strip()
         if not data.startswith("approval:"):

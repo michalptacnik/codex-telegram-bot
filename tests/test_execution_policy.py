@@ -51,6 +51,16 @@ class TestLocalShellRunner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.returncode, 126)
         self.assertIn("outside workspace root", result.stderr)
 
+    async def test_runner_blocks_workspace_override_outside_root(self):
+        runner = LocalShellRunner(profile_resolver=ExecutionProfileResolver(Path("/tmp/workspace")))
+        result = await runner.run(
+            ["/bin/echo", "ok"],
+            policy_profile="balanced",
+            workspace_root="/etc",
+        )
+        self.assertEqual(result.returncode, 126)
+        self.assertIn("workspace root", result.stderr)
+
 
 class TestExecutionProfiles(unittest.TestCase):
     def test_profile_limits_differ_by_policy(self):

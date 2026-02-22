@@ -121,6 +121,27 @@ class SqliteRunStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS tool_loop_checkpoints (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    prompt_fingerprint TEXT NOT NULL,
+                    step_index INTEGER NOT NULL,
+                    command TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    run_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_loop_checkpoint_key
+                ON tool_loop_checkpoints (session_id, prompt_fingerprint, step_index)
+                """
+            )
             # Lightweight migration for existing DBs created before max_concurrency existed.
             cols = conn.execute("PRAGMA table_info(agents)").fetchall()
             col_names = {c["name"] for c in cols}
@@ -674,6 +695,98 @@ class SqliteRunStore:
                 (_utc_now(), cutoff_iso),
             )
             return int(cur.rowcount or 0)
+
+    def count_pending_tool_approvals(self, chat_id: int, user_id: int) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM tool_approvals
+                WHERE chat_id = ? AND user_id = ? AND status = 'pending'
+                """,
+                (chat_id, user_id),
+            ).fetchone()
+        return int(row["c"] or 0)
+
+    def find_pending_tool_approval(
+        self,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        argv: list[str],
+    ) -> Optional[dict]:
+        argv_json = json.dumps(argv)
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM tool_approvals
+                WHERE chat_id = ? AND user_id = ? AND session_id = ? AND status = 'pending' AND argv_json = ?
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (chat_id, user_id, session_id, argv_json),
+            ).fetchone()
+        if not row:
+            return None
+        return _row_to_tool_approval(row)
+
+    def upsert_tool_loop_checkpoint(
+        self,
+        session_id: str,
+        prompt_fingerprint: str,
+        step_index: int,
+        command: str,
+        status: str,
+        run_id: str = "",
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM tool_loop_checkpoints
+                WHERE session_id = ? AND prompt_fingerprint = ? AND step_index = ?
+                """,
+                (session_id, prompt_fingerprint, int(step_index)),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE tool_loop_checkpoints
+                    SET command = ?, status = ?, run_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (command, status, run_id, now, int(existing["id"])),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO tool_loop_checkpoints
+                    (session_id, prompt_fingerprint, step_index, command, status, run_id, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (session_id, prompt_fingerprint, int(step_index), command, status, run_id, now, now),
+                )
+
+    def list_tool_loop_checkpoints(self, session_id: str, prompt_fingerprint: str) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM tool_loop_checkpoints
+                WHERE session_id = ? AND prompt_fingerprint = ?
+                ORDER BY step_index ASC
+                """,
+                (session_id, prompt_fingerprint),
+            ).fetchall()
+        return [
+            {
+                "step_index": int(r["step_index"]),
+                "command": r["command"],
+                "status": r["status"],
+                "run_id": r["run_id"] or "",
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
 
 
 def _parse_dt(raw: Optional[str]) -> Optional[datetime]:

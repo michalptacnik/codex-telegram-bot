@@ -18,14 +18,26 @@ class FakeRunner:
         self.last_argv = None
         self.last_stdin = None
         self.last_policy_profile = None
+        self.last_workspace_root = None
+        self.calls = []
 
     def set_results(self, results):
         self._results = list(results)
 
-    async def run(self, argv, stdin_text="", timeout_sec=60, policy_profile="balanced"):
+    async def run(self, argv, stdin_text="", timeout_sec=60, policy_profile="balanced", workspace_root=""):
         self.last_argv = list(argv)
         self.last_stdin = stdin_text
         self.last_policy_profile = policy_profile
+        self.last_workspace_root = workspace_root
+        self.calls.append(
+            {
+                "argv": list(argv),
+                "stdin_text": stdin_text,
+                "timeout_sec": timeout_sec,
+                "policy_profile": policy_profile,
+                "workspace_root": workspace_root,
+            }
+        )
         if len(self._results) > 1:
             return self._results.pop(0)
         return self._results[0]
@@ -454,6 +466,133 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("loop.step.started", events)
                 self.assertIn("loop.step.completed", events)
                 self.assertIn("loop.finished", events)
+            finally:
+                await service.shutdown()
+
+    async def test_tool_loop_checkpoint_skips_completed_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                service.upsert_agent(
+                    agent_id="default",
+                    name="Default Agent",
+                    provider="codex_cli",
+                    policy_profile="trusted",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+                session = service.get_or_create_session(chat_id=601, user_id=701)
+                prompt = "!exec /bin/echo hello\nSummarize."
+                first = await service.run_prompt_with_tool_loop(
+                    prompt=prompt,
+                    chat_id=601,
+                    user_id=701,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertTrue(isinstance(first, str))
+                first_calls = len(runner.calls)
+                second = await service.run_prompt_with_tool_loop(
+                    prompt=prompt,
+                    chat_id=601,
+                    user_id=701,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertTrue(isinstance(second, str))
+                self.assertEqual(len(runner.calls), first_calls + 1)  # no second tool step call; only model call
+            finally:
+                await service.shutdown()
+
+    async def test_pending_approval_cap_enforced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+                max_pending_approvals_per_user=1,
+            )
+            try:
+                service.upsert_agent(
+                    agent_id="default",
+                    name="Default Agent",
+                    provider="codex_cli",
+                    policy_profile="trusted",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+                session = service.get_or_create_session(chat_id=801, user_id=901)
+                first = await service.run_prompt_with_tool_loop(
+                    prompt="!exec codex exec - --dangerously-bypass-approvals-and-sandbox\nA",
+                    chat_id=801,
+                    user_id=901,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("Approval required", first)
+                second = await service.run_prompt_with_tool_loop(
+                    prompt="!exec codex exec - --dangerously-bypass-approvals-and-sandbox\nB",
+                    chat_id=801,
+                    user_id=901,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("too many pending approvals", second)
+            finally:
+                await service.shutdown()
+
+    async def test_tool_actions_use_session_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            workspace_root = Path(tmp) / "session-workspaces"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+                session_workspaces_root=workspace_root,
+            )
+            try:
+                service.upsert_agent(
+                    agent_id="default",
+                    name="Default Agent",
+                    provider="codex_cli",
+                    policy_profile="trusted",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+                session = service.get_or_create_session(chat_id=1001, user_id=1101)
+                await service.run_prompt_with_tool_loop(
+                    prompt="!exec /bin/echo hi\nSummarize quickly.",
+                    chat_id=1001,
+                    user_id=1101,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                tool_calls = [c for c in runner.calls if c["argv"] and c["argv"][0] == "/bin/echo"]
+                self.assertTrue(tool_calls)
+                self.assertTrue(tool_calls[0]["workspace_root"])
+                self.assertTrue(str(tool_calls[0]["workspace_root"]).startswith(str(workspace_root)))
             finally:
                 await service.shutdown()
 

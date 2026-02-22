@@ -4,7 +4,9 @@ import re
 import shlex
 import uuid
 import json
+import hashlib
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 from codex_telegram_bot.domain.contracts import ProviderAdapter, ExecutionRunner
 from codex_telegram_bot.domain.agents import AgentRecord
@@ -37,6 +39,8 @@ class AgentService:
         session_compact_keep: int = 20,
         tool_loop_max_steps: int = 3,
         approval_ttl_sec: int = 900,
+        max_pending_approvals_per_user: int = 3,
+        session_workspaces_root: Optional[Path] = None,
     ):
         self._provider = provider
         self._run_store = run_store
@@ -48,6 +52,10 @@ class AgentService:
         self._session_compact_keep = max(5, min(int(session_compact_keep), self._session_max_messages))
         self._tool_loop_max_steps = max(1, int(tool_loop_max_steps))
         self._approval_ttl_sec = max(60, int(approval_ttl_sec))
+        self._max_pending_approvals_per_user = max(1, int(max_pending_approvals_per_user))
+        root = session_workspaces_root or (Path.cwd() / ".session_workspaces")
+        self._session_workspaces_root = root.expanduser().resolve()
+        self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -240,6 +248,12 @@ class AgentService:
                 return msg.content
         return ""
 
+    def session_workspace(self, session_id: str) -> Path:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", (session_id or "").strip())[:64] or "default"
+        root = self._session_workspaces_root / safe
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         context_lines = self.build_retrieval_context(user_prompt=user_prompt, limit=4)
         if not self._run_store:
@@ -398,6 +412,7 @@ class AgentService:
             stdin_text=approval.get("stdin_text", ""),
             timeout_sec=timeout_sec,
             policy_profile=policy_profile,
+            workspace_root=str(self.session_workspace(session_id=session_id)),
         )
         self._run_store.set_tool_approval_status(approval_id, "executed")
         text = (
@@ -438,13 +453,33 @@ class AgentService:
             return output
 
         policy_profile = self._agent_policy_profile(agent_id=agent_id)
+        prompt_fingerprint = _tool_loop_fingerprint(actions=actions, cleaned_prompt=cleaned_prompt, final_prompt=final_prompt)
+        checkpoints: Dict[int, Dict[str, Any]] = {}
+        if self._run_store:
+            for cp in self._run_store.list_tool_loop_checkpoints(session_id=session_id, prompt_fingerprint=prompt_fingerprint):
+                checkpoints[int(cp["step_index"])] = cp
         await self._notify_progress(
             progress_callback,
             {"event": "loop.started", "steps_total": len(actions), "agent_id": agent_id},
         )
         observations: List[str] = []
+        session_workspace = self.session_workspace(session_id=session_id)
         for index, argv in enumerate(actions, start=1):
             action_id = "tool-" + uuid.uuid4().hex[:8]
+            command = " ".join(argv)
+            checkpoint = checkpoints.get(index)
+            if checkpoint and checkpoint.get("command") == command and checkpoint.get("status") == "completed":
+                observations.append(f"{action_id} skipped via checkpoint: step {index} already completed")
+                await self._notify_progress(
+                    progress_callback,
+                    {
+                        "event": "loop.step.skipped_checkpoint",
+                        "step": index,
+                        "action_id": action_id,
+                        "command": command,
+                    },
+                )
+                continue
             await self._notify_progress(
                 progress_callback,
                 {
@@ -452,7 +487,7 @@ class AgentService:
                     "step": index,
                     "steps_total": len(actions),
                     "action_id": action_id,
-                    "command": " ".join(argv),
+                    "command": command,
                 },
             )
             decision = self._policy_engine.evaluate(argv=argv, policy_profile=policy_profile)
@@ -471,11 +506,58 @@ class AgentService:
                         "risk_tier": decision.risk_tier,
                     },
                 )
+                if self._run_store:
+                    self._run_store.upsert_tool_loop_checkpoint(
+                        session_id=session_id,
+                        prompt_fingerprint=prompt_fingerprint,
+                        step_index=index,
+                        command=command,
+                        status="blocked",
+                    )
                 return msg
 
             if decision.risk_tier == "high":
                 if not self._run_store:
                     return "Error: approval registry unavailable."
+                if self._run_store.count_pending_tool_approvals(chat_id=chat_id, user_id=user_id) >= self._max_pending_approvals_per_user:
+                    msg = (
+                        "Error: too many pending approvals for this user. "
+                        "Resolve existing approvals with /pending, /approve, or /deny."
+                    )
+                    self.append_session_assistant_message(session_id=session_id, content=msg)
+                    return msg
+                existing = self._run_store.find_pending_tool_approval(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    argv=argv,
+                )
+                if existing:
+                    approval_id = existing["approval_id"]
+                    self._run_store.upsert_tool_loop_checkpoint(
+                        session_id=session_id,
+                        prompt_fingerprint=prompt_fingerprint,
+                        step_index=index,
+                        command=command,
+                        status="pending_approval",
+                        run_id=existing.get("run_id", ""),
+                    )
+                    await self._notify_progress(
+                        progress_callback,
+                        {
+                            "event": "loop.step.awaiting_approval",
+                            "step": index,
+                            "action_id": action_id,
+                            "approval_id": approval_id,
+                        },
+                    )
+                    msg = (
+                        f"Approval required for high-risk action ({action_id}).\n"
+                        f"Run: /approve {approval_id[:8]}\n"
+                        f"Command: {' '.join(argv)}"
+                    )
+                    self.append_session_assistant_message(session_id=session_id, content=msg)
+                    return msg
                 run_id = self._run_store.create_run(f"Approval requested for: {' '.join(argv)}")
                 self._run_store.mark_running(run_id)
                 approval_id = self._run_store.create_tool_approval(
@@ -507,6 +589,14 @@ class AgentService:
                     run_id,
                     f"Approval requested approval_id={approval_id} action_id={action_id}",
                 )
+                self._run_store.upsert_tool_loop_checkpoint(
+                    session_id=session_id,
+                    prompt_fingerprint=prompt_fingerprint,
+                    step_index=index,
+                    command=command,
+                    status="pending_approval",
+                    run_id=run_id,
+                )
                 msg = (
                     f"Approval required for high-risk action ({action_id}).\n"
                     f"Run: /approve {approval_id[:8]}\n"
@@ -523,6 +613,7 @@ class AgentService:
                 stdin_text="",
                 timeout_sec=60,
                 policy_profile=policy_profile,
+                workspace_root=str(session_workspace),
             )
             observations.append(
                 f"{action_id} rc={result.returncode}\n"
@@ -543,6 +634,15 @@ class AgentService:
                 content=f"tool.action.completed action_id={action_id} rc={result.returncode}",
                 run_id=tool_run_id,
             )
+            if self._run_store:
+                self._run_store.upsert_tool_loop_checkpoint(
+                    session_id=session_id,
+                    prompt_fingerprint=prompt_fingerprint,
+                    step_index=index,
+                    command=command,
+                    status="completed" if result.returncode == 0 else "failed",
+                    run_id=tool_run_id,
+                )
 
         enriched = (final_prompt or cleaned_prompt).strip()
         if observations:
@@ -693,6 +793,7 @@ class AgentService:
         stdin_text: str,
         timeout_sec: int,
         policy_profile: str,
+        workspace_root: str = "",
     ):
         run_id = ""
         if self._run_store:
@@ -711,6 +812,7 @@ class AgentService:
             stdin_text=stdin_text,
             timeout_sec=timeout_sec,
             policy_profile=policy_profile,
+            workspace_root=workspace_root,
         )
         if self._run_store and run_id:
             if result.returncode == 0:
@@ -807,3 +909,13 @@ def _extract_loop_actions(prompt: str) -> tuple[List[List[str]], str, str]:
             continue
         keep_lines.append(raw)
     return actions, "\n".join(keep_lines).strip(), final_prompt
+
+
+def _tool_loop_fingerprint(actions: List[List[str]], cleaned_prompt: str, final_prompt: str) -> str:
+    payload = {
+        "actions": actions,
+        "cleaned_prompt": (cleaned_prompt or "").strip(),
+        "final_prompt": (final_prompt or "").strip(),
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
