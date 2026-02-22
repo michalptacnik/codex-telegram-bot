@@ -58,6 +58,9 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         metrics = client.get("/api/metrics")
         self.assertEqual(metrics.status_code, 200)
         self.assertIn("total_runs", metrics.json())
+        reliability = client.get("/api/reliability")
+        self.assertEqual(reliability.status_code, 200)
+        self.assertIn("failure_rate", reliability.json())
 
         runs = client.get("/api/runs")
         self.assertEqual(runs.status_code, 200)
@@ -89,6 +92,10 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.assertEqual(handoff.status_code, 200)
+
+        playbook = client.get("/api/recovery/playbook")
+        self.assertEqual(playbook.status_code, 200)
+        self.assertIn("actions", playbook.json())
         self.assertIn("status", handoff.json())
 
     async def test_html_pages_render(self):

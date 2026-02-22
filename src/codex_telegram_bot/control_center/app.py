@@ -104,6 +104,7 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         metrics = agent_service.metrics()
+        reliability = agent_service.reliability_snapshot(limit=300)
         provider_version = await agent_service.provider_version()
         provider_health = await agent_service.provider_health()
         return {
@@ -111,11 +112,16 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
             "provider_version": provider_version,
             "provider_health": provider_health,
             "metrics": metrics,
+            "reliability": reliability,
         }
 
     @app.get("/api/metrics")
     async def api_metrics() -> Dict[str, int]:
         return agent_service.metrics()
+
+    @app.get("/api/reliability")
+    async def api_reliability(limit: int = 500) -> Dict[str, Any]:
+        return agent_service.reliability_snapshot(limit=max(10, min(limit, 5000)))
 
     @app.get("/api/onboarding/status")
     async def onboarding_status() -> Dict[str, Any]:
@@ -338,6 +344,18 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
             "action_id": action,
             "job_id": job_id,
             "target_agent": target_agent,
+        }
+
+    @app.get("/api/recovery/playbook")
+    async def api_recovery_playbook() -> Dict[str, Any]:
+        return {
+            "actions": _allowed_recovery_actions(),
+            "docs": "/docs/recovery_playbook.md",
+            "notes": [
+                "Use retry_same_agent for transient provider issues.",
+                "Use retry_default_agent when agent-specific profile likely caused failure.",
+                "Do not auto-approve high-risk tool actions during recovery.",
+            ],
         }
 
     @app.get("/", response_class=HTMLResponse)

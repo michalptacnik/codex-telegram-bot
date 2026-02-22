@@ -15,6 +15,7 @@ from codex_telegram_bot.domain.sessions import TelegramSessionRecord, TelegramSe
 from codex_telegram_bot.events.event_bus import EventBus, RunEvent
 from codex_telegram_bot.execution.local_shell import LocalShellRunner
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
+from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
@@ -45,6 +46,7 @@ class AgentService:
         approval_ttl_sec: int = 900,
         max_pending_approvals_per_user: int = 3,
         session_workspaces_root: Optional[Path] = None,
+        alert_dispatcher: Optional[AlertDispatcher] = None,
     ):
         self._provider = provider
         self._run_store = run_store
@@ -61,6 +63,7 @@ class AgentService:
         self._session_workspaces_root = root.expanduser().resolve()
         self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
         self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
+        self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -180,6 +183,14 @@ class AgentService:
                 self._run_store.mark_failed(run_id, output)
                 self._event_bus.publish(run_id=run_id, event_type="run.failed", payload=output)
                 log_json(logger, "run.failed", run_id=run_id, agent_id=agent_id, job_id=correlation_id)
+                self._send_alert(
+                    category="run.failed",
+                    severity="high",
+                    message="Agent run failed",
+                    run_id=run_id,
+                    agent_id=agent_id,
+                    job_id=correlation_id,
+                )
             else:
                 self._run_store.mark_completed(run_id, output)
                 self._event_bus.publish(run_id=run_id, event_type="run.completed", payload=output[:500])
@@ -742,6 +753,37 @@ class AgentService:
             "pending_runs": len([r for r in runs if r.status == "pending"]),
         }
 
+    def reliability_snapshot(self, limit: int = 500) -> Dict[str, Any]:
+        runs = self.list_recent_runs(limit=max(10, min(limit, 5000)))
+        total = len(runs)
+        completed = [r for r in runs if r.status == "completed"]
+        failed = [r for r in runs if r.status == "failed"]
+        durations = []
+        for r in completed:
+            if r.started_at and r.completed_at:
+                durations.append(max(0.0, (r.completed_at - r.started_at).total_seconds()))
+        p95 = _p95(durations)
+        failure_rate = (len(failed) / total) if total else 0.0
+        recovery_events = 0
+        for r in runs:
+            events = self.list_run_events(run_id=r.run_id, limit=30)
+            recovery_events += len([e for e in events if e.event_type.startswith("recovery.")])
+        status = "ok"
+        if failure_rate > 0.2:
+            status = "degraded"
+        if failure_rate > 0.4:
+            status = "critical"
+        return {
+            "status": status,
+            "window_runs": total,
+            "completed_runs": len(completed),
+            "failed_runs": len(failed),
+            "failure_rate": round(failure_rate, 4),
+            "latency_p95_sec": round(p95, 4),
+            "recovery_events": recovery_events,
+            "alerts_enabled": self._alert_dispatcher.enabled,
+        }
+
     def list_agents(self) -> List[AgentRecord]:
         if not self._run_store:
             return []
@@ -900,12 +942,27 @@ class AgentService:
                     event_type="tool.step.failed",
                     payload=f"action_id={action_id}, rc={result.returncode}",
                 )
+                self._send_alert(
+                    category="tool.step.failed",
+                    severity="high",
+                    message="Tool action failed",
+                    run_id=run_id,
+                    action_id=action_id,
+                    rc=result.returncode,
+                )
         return result, run_id
 
     def _emit_tool_event(self, run_id: str, event_type: str, payload: str) -> None:
         if not self._event_bus or not run_id:
             return
         self._event_bus.publish(run_id=run_id, event_type=event_type, payload=payload)
+        if event_type in {"tool.approval.requested", "tool.step.failed"}:
+            self._send_alert(
+                category=event_type,
+                severity="medium" if event_type == "tool.approval.requested" else "high",
+                message=payload[:200],
+                run_id=run_id,
+            )
 
     def _expire_old_approvals(self) -> None:
         if not self._run_store:
@@ -924,6 +981,13 @@ class AgentService:
             await callback(payload)
         except Exception:
             logger.exception("tool loop progress callback failed")
+
+    def _send_alert(self, category: str, severity: str, message: str, **fields: Any) -> None:
+        if not self._alert_dispatcher.enabled:
+            return
+        ok = self._alert_dispatcher.send(category=category, severity=severity, message=message, **fields)
+        if not ok:
+            logger.warning("alert dispatch failed: category=%s", category)
 
 
 def _extract_loop_actions(prompt: str) -> tuple[List[List[str]], str, str]:
@@ -1050,3 +1114,11 @@ def _planning_guidance_lines(user_prompt: str) -> List[str]:
         "3) RISKS: list behavior/regression risks before claiming done.",
         "4) VERIFY: list concrete tests/commands run or missing.",
     ]
+
+
+def _p95(values: List[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    idx = max(0, int((len(ordered) * 0.95) - 1))
+    return ordered[idx]

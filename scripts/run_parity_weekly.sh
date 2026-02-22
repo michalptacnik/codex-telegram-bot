@@ -5,7 +5,27 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 if ! command -v codex >/dev/null 2>&1; then
+  mkdir -p docs/reports
+  ts="$(date -u +%Y%m%d-%H%M%S)"
+  json_path="docs/reports/parity-report-${ts}.json"
+  md_path="docs/reports/parity-report-${ts}.md"
+  cat > "$json_path" <<EOF
+{
+  "generated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "status": "skipped",
+  "reason": "codex_cli_not_found"
+}
+EOF
+  cat > "$md_path" <<EOF
+# Parity Report ($(date -u +%Y-%m-%dT%H:%M:%SZ))
+
+- status: skipped
+- reason: codex CLI not found in PATH
+EOF
+  ln -sf "$(basename "$json_path")" docs/reports/parity-report-latest.json
+  ln -sf "$(basename "$md_path")" docs/reports/parity-report-latest.md
   echo "codex CLI not found in PATH; parity run skipped." >&2
+  echo "weekly parity report completed"
   exit 3
 fi
 

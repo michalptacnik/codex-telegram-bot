@@ -133,6 +133,8 @@ Environment variables override `.env`:
 - `REPO_SCAN_MAX_FILES` (default: `3000`)
 - `REPO_SCAN_MAX_FILE_BYTES` (default: `120000`)
 - `REPO_INDEX_AUTO_REFRESH_SEC` (default: `30`)
+- `ALERT_WEBHOOK_URL` (optional HTTPS endpoint for alerts)
+- `ALERT_WEBHOOK_TIMEOUT_SEC` (default: `3`)
 
 Print active config summary (never prints token):
 
@@ -176,6 +178,8 @@ Outputs:
 Versioning and provenance details:
 
 - `docs/deb_provenance.md`
+- `docs/recovery_playbook.md`
+- `docs/reliability_ops.md`
 
 Bootstrap behavior:
 
@@ -245,12 +249,14 @@ If your `codex` binary is in a different location, update the volume in `docker-
 - `GET /api/retrieval?query=...`
 - `GET /api/retrieval/stats`
 - `POST /api/retrieval/refresh`
+- `GET /api/reliability`
 - `GET /api/runs/{run_id}`
 - `GET /api/runs/{run_id}/events`
 - `GET /api/runs/{run_id}/artifact.txt`
 - `GET /api/error-catalog`
 - `GET /api/runs/{run_id}/recovery-options`
 - `POST /api/runs/{run_id}/recover`
+- `GET /api/recovery/playbook`
 - `GET /api/agents`
 - `POST /api/jobs/{job_id}/cancel`
 - `POST /api/handoffs`

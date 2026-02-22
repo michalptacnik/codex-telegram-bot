@@ -1,0 +1,44 @@
+name: Parity Eval Report
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 9 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  parity-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Run parity report (best effort)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          chmod +x scripts/run_parity_weekly.sh
+          ./scripts/run_parity_weekly.sh --max-cases 5 || true
+
+      - name: Upload parity artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: parity-report-${{ github.run_number }}
+          path: |
+            docs/reports/parity-report-*.json
+            docs/reports/parity-report-*.md
+            docs/reports/parity-report-latest.json
+            docs/reports/parity-report-latest.md
+          if-no-files-found: error

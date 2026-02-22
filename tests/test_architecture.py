@@ -704,6 +704,28 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             finally:
                 await service.shutdown()
 
+    async def test_reliability_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+            )
+            try:
+                await service.run_prompt("hello")
+                snapshot = service.reliability_snapshot(limit=100)
+                self.assertIn("failure_rate", snapshot)
+                self.assertIn("latency_p95_sec", snapshot)
+                self.assertIn("alerts_enabled", snapshot)
+            finally:
+                await service.shutdown()
+
 
 class TestProviderRouter(unittest.IsolatedAsyncioTestCase):
     async def test_retry_then_success_on_primary(self):
