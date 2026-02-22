@@ -184,6 +184,7 @@ Versioning and provenance details:
 - `docs/deb_provenance.md`
 - `docs/recovery_playbook.md`
 - `docs/reliability_ops.md`
+- `docs/upgrade_rollback_runbook.md`
 
 Bootstrap behavior:
 
@@ -197,6 +198,7 @@ Useful flags:
 - `--skip-apt` (use already-installed dependencies)
 - `--no-enable` (install only, do not start service)
 - `--dry-run` (print commands without executing)
+- `--skip-migration-check` (skip state DB integrity+backup preflight; break-glass only)
 
 Recommended (user service):
 
