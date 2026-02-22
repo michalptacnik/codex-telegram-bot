@@ -42,6 +42,7 @@ Response codes:
   - body: `{"prompt":"...", "agent_id":"default"}`
 - `GET /api/v1/jobs/{job_id}` (`jobs:read`)
 - `POST /api/v1/jobs/{job_id}/cancel` (`jobs:write`)
+- `GET /api/v1/plugins` (`plugins:read`)
 
 ## Minimal cURL Example
 

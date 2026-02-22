@@ -13,6 +13,7 @@ from fastapi.templating import Jinja2Templates
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.error_codes import ERROR_CATALOG, detect_error_code, get_catalog_entry
 from codex_telegram_bot.services.onboarding import OnboardingStore
+from codex_telegram_bot.services.plugin_lifecycle import PluginLifecycleManager
 from codex_telegram_bot.config import get_env_path, load_env_file, write_env_file
 
 
@@ -36,6 +37,15 @@ class ApproveToolRequest(BaseModel):
 class LocalApiPromptRequest(BaseModel):
     prompt: str
     agent_id: str = "default"
+
+
+class PluginInstallRequest(BaseModel):
+    manifest_path: str
+    enable: bool = False
+
+
+class PluginUpdateRequest(BaseModel):
+    manifest_path: str
 
 
 def _run_to_dict(run) -> Dict[str, Any]:
@@ -96,6 +106,32 @@ def _allowed_recovery_actions() -> Dict[str, str]:
     }
 
 
+def _plugin_to_dict(plugin) -> Dict[str, Any]:
+    return {
+        "plugin_id": plugin.plugin_id,
+        "name": plugin.name,
+        "version": plugin.version,
+        "manifest_version": plugin.manifest_version,
+        "requires_api_version": plugin.requires_api_version,
+        "capabilities": plugin.capabilities,
+        "enabled": plugin.enabled,
+        "trust_status": plugin.trust_status,
+        "manifest_path": plugin.manifest_path,
+        "created_at": plugin.created_at.isoformat(),
+        "updated_at": plugin.updated_at.isoformat(),
+    }
+
+
+def _plugin_audit_to_dict(event) -> Dict[str, Any]:
+    return {
+        "ts": event.ts.isoformat(),
+        "action": event.action,
+        "plugin_id": event.plugin_id,
+        "outcome": event.outcome,
+        "details": event.details,
+    }
+
+
 def _parse_local_api_keys(raw: str) -> Dict[str, Set[str]]:
     out: Dict[str, Set[str]] = {}
     for chunk in (raw or "").split(";"):
@@ -126,6 +162,7 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
     app = FastAPI(title="Codex Control Center", version="0.2.0-alpha")
     app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
     onboarding = OnboardingStore(config_dir=config_dir)
+    plugin_manager = PluginLifecycleManager(config_dir=config_dir or (Path.cwd() / ".codex-telegram-bot"))
     local_api_version = "v1"
     local_api_keys = _parse_local_api_keys(os.environ.get("LOCAL_API_KEYS", ""))
     local_api_enabled = bool(local_api_keys)
@@ -419,6 +456,7 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
                 "prompt_queue": {"path": "/api/v1/prompts", "scope": "prompts:write"},
                 "job_get": {"path": "/api/v1/jobs/{job_id}", "scope": "jobs:read"},
                 "job_cancel": {"path": "/api/v1/jobs/{job_id}/cancel", "scope": "jobs:write"},
+                "plugins_list": {"path": "/api/v1/plugins", "scope": "plugins:read"},
             },
         }
 
@@ -455,6 +493,57 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
         _require_local_api_scope(request, "jobs:write")
         cancelled = agent_service.cancel_job(job_id)
         return {"job_id": job_id, "cancelled": cancelled, "status": agent_service.job_status(job_id)}
+
+    @app.get("/api/v1/plugins")
+    async def api_v1_plugins(request: Request) -> Dict[str, Any]:
+        _require_local_api_scope(request, "plugins:read")
+        items = [_plugin_to_dict(p) for p in plugin_manager.list_plugins()]
+        return {"items": items}
+
+    @app.get("/api/plugins")
+    async def api_plugins() -> List[Dict[str, Any]]:
+        return [_plugin_to_dict(p) for p in plugin_manager.list_plugins()]
+
+    @app.get("/api/plugins/audit")
+    async def api_plugins_audit(limit: int = 200) -> List[Dict[str, Any]]:
+        return [_plugin_audit_to_dict(e) for e in plugin_manager.list_audit_events(limit=max(1, min(limit, 1000)))]
+
+    @app.post("/api/plugins/install")
+    async def api_plugins_install(req: PluginInstallRequest) -> Dict[str, Any]:
+        try:
+            plugin = plugin_manager.install_plugin(manifest_path=Path(req.manifest_path), enable=req.enable)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return _plugin_to_dict(plugin)
+
+    @app.post("/api/plugins/{plugin_id}/enable")
+    async def api_plugins_enable(plugin_id: str) -> Dict[str, Any]:
+        try:
+            plugin = plugin_manager.enable_plugin(plugin_id=plugin_id)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return _plugin_to_dict(plugin)
+
+    @app.post("/api/plugins/{plugin_id}/disable")
+    async def api_plugins_disable(plugin_id: str) -> Dict[str, Any]:
+        try:
+            plugin = plugin_manager.disable_plugin(plugin_id=plugin_id)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return _plugin_to_dict(plugin)
+
+    @app.post("/api/plugins/{plugin_id}/uninstall")
+    async def api_plugins_uninstall(plugin_id: str) -> Dict[str, Any]:
+        deleted = plugin_manager.uninstall_plugin(plugin_id=plugin_id)
+        return {"plugin_id": plugin_id, "deleted": deleted}
+
+    @app.post("/api/plugins/{plugin_id}/update")
+    async def api_plugins_update(plugin_id: str, req: PluginUpdateRequest) -> Dict[str, Any]:
+        try:
+            plugin = plugin_manager.update_plugin(plugin_id=plugin_id, manifest_path=Path(req.manifest_path))
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return _plugin_to_dict(plugin)
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
@@ -688,6 +777,50 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
             "agents.html",
             {"request": request, "nav": "agents", "agents": agents, "error": error},
         )
+
+    @app.get("/plugins", response_class=HTMLResponse)
+    async def plugins_page(request: Request, error: str = ""):
+        plugins = plugin_manager.list_plugins()
+        audit = plugin_manager.list_audit_events(limit=50)
+        return templates.TemplateResponse(
+            "plugins.html",
+            {
+                "request": request,
+                "nav": "plugins",
+                "plugins": plugins,
+                "audit_events": audit,
+                "error": error,
+            },
+        )
+
+    @app.post("/plugins/install")
+    async def plugins_install_form(manifest_path: str = Form(...), enable: str = Form("false")):
+        try:
+            plugin_manager.install_plugin(Path(manifest_path), enable=(enable == "true"))
+        except Exception as exc:
+            return RedirectResponse(url=f"/plugins?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/plugins", status_code=303)
+
+    @app.post("/plugins/{plugin_id}/enable")
+    async def plugins_enable_form(plugin_id: str):
+        try:
+            plugin_manager.enable_plugin(plugin_id)
+        except Exception as exc:
+            return RedirectResponse(url=f"/plugins?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/plugins", status_code=303)
+
+    @app.post("/plugins/{plugin_id}/disable")
+    async def plugins_disable_form(plugin_id: str):
+        try:
+            plugin_manager.disable_plugin(plugin_id)
+        except Exception as exc:
+            return RedirectResponse(url=f"/plugins?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/plugins", status_code=303)
+
+    @app.post("/plugins/{plugin_id}/uninstall")
+    async def plugins_uninstall_form(plugin_id: str):
+        plugin_manager.uninstall_plugin(plugin_id)
+        return RedirectResponse(url="/plugins", status_code=303)
 
     @app.get("/sessions", response_class=HTMLResponse)
     async def sessions_page(request: Request):

@@ -140,6 +140,7 @@ Environment variables override `.env`:
 - `ALERT_RETRY_COUNT` (default: `2`)
 - `ALERT_DEAD_LETTER_MAX` (default: `200`)
 - `LOCAL_API_KEYS` (optional; enables scoped `/api/v1` integration API)
+- `PLUGIN_TRUST_POLICY` (`require_signature` or `allow_local_unsigned`, default: `require_signature`)
 
 Print active config summary (never prints token):
 
@@ -188,6 +189,7 @@ Versioning and provenance details:
 - `docs/upgrade_rollback_runbook.md`
 - `docs/local_api_v1.md`
 - `docs/plugin_manifest.md`
+- `docs/plugin_lifecycle.md`
 
 Bootstrap behavior:
 

@@ -128,6 +128,10 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agents.status_code, 200)
         self.assertIn("Registered Agents", agents.text)
 
+        plugins = client.get("/plugins")
+        self.assertEqual(plugins.status_code, 200)
+        self.assertIn("Plugins", plugins.text)
+
     async def test_error_catalog_and_recovery_api(self):
         tmp = tempfile.TemporaryDirectory()
         try:

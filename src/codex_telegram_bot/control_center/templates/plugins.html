@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Plugins</h1>
+    <p class="subtitle">Lifecycle management and audit trail</p>
+  </div>
+</div>
+
+{% if error %}
+<section class="card table-card">
+  <div class="k">Lifecycle Error</div>
+  <pre class="output">{{ error }}</pre>
+</section>
+{% endif %}
+
+<section class="card table-card">
+  <div class="k">Install Plugin</div>
+  <form class="toolbar" method="post" action="/plugins/install">
+    <input type="text" name="manifest_path" placeholder="/path/to/plugin-manifest.json" required />
+    <select name="enable">
+      <option value="false" selected>install disabled</option>
+      <option value="true">install and enable</option>
+    </select>
+    <button type="submit" class="btn">Install</button>
+  </form>
+</section>
+
+<section class="card table-card">
+  <div class="k">Installed Plugins</div>
+  <table>
+    <caption class="sr-only">Installed plugin registry</caption>
+    <thead>
+      <tr>
+        <th scope="col">Plugin</th>
+        <th scope="col">Version</th>
+        <th scope="col">Status</th>
+        <th scope="col">Trust</th>
+        <th scope="col">Capabilities</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if plugins %}
+      {% for p in plugins %}
+      <tr>
+        <td class="mono">{{ p.plugin_id }}</td>
+        <td>{{ p.version }}</td>
+        <td>
+          {% if p.enabled %}
+          <span class="pill completed">enabled</span>
+          {% else %}
+          <span class="pill pending">disabled</span>
+          {% endif %}
+        </td>
+        <td>{{ p.trust_status }}</td>
+        <td>{{ ", ".join(p.capabilities) }}</td>
+        <td class="toolbar">
+          {% if p.enabled %}
+          <form method="post" action="/plugins/{{ p.plugin_id }}/disable">
+            <button type="submit" class="btn">Disable</button>
+          </form>
+          {% else %}
+          <form method="post" action="/plugins/{{ p.plugin_id }}/enable">
+            <button type="submit" class="btn">Enable</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/plugins/{{ p.plugin_id }}/uninstall">
+            <button type="submit" class="btn">Uninstall</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="6" class="dim">No plugins installed.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card table-card">
+  <div class="k">Plugin Audit Events</div>
+  <table>
+    <caption class="sr-only">Plugin lifecycle audit events</caption>
+    <thead>
+      <tr>
+        <th scope="col">Timestamp</th>
+        <th scope="col">Action</th>
+        <th scope="col">Plugin</th>
+        <th scope="col">Outcome</th>
+        <th scope="col">Details</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if audit_events %}
+      {% for e in audit_events %}
+      <tr>
+        <td class="mono">{{ e.ts.isoformat()[:19] | replace("T", " ") }}</td>
+        <td>{{ e.action }}</td>
+        <td class="mono">{{ e.plugin_id }}</td>
+        <td>{{ e.outcome }}</td>
+        <td>{{ e.details }}</td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="5" class="dim">No plugin lifecycle events yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
