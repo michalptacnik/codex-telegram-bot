@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from codex_telegram_bot.connectors.base import IngestionCursor, LeadRecord
 from codex_telegram_bot.domain.missions import (
     MISSION_STATE_IDLE,
     MissionEventRecord,
@@ -183,6 +184,42 @@ class SqliteRunStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_missions_state
                 ON missions (state)
+                """
+            )
+            # EPIC 7: intake leads and connector cursors.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS intake_leads (
+                    lead_id TEXT PRIMARY KEY,
+                    connector_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 50,
+                    labels_json TEXT NOT NULL DEFAULT '[]',
+                    score REAL NOT NULL DEFAULT 0.0,
+                    score_factors_json TEXT NOT NULL DEFAULT '{}',
+                    extra_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    ingested_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_intake_leads_connector
+                ON intake_leads (connector_id, score DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connector_cursors (
+                    connector_id TEXT PRIMARY KEY,
+                    cursor_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
                 """
             )
             # Lightweight migration for existing DBs created before max_concurrency existed.
@@ -975,6 +1012,144 @@ class SqliteRunStore:
                 (mission_id,),
             ).fetchall()
         return [_row_to_mission_event(r) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Intake leads + connector cursors (EPIC 7)
+    # ------------------------------------------------------------------
+
+    def upsert_lead(
+        self,
+        lead: LeadRecord,
+        score: float = 0.0,
+        score_factors_json: str = "{}",
+    ) -> None:
+        """Insert or update a lead record."""
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO intake_leads
+                    (lead_id, connector_id, source_id, title, body, url,
+                     priority, labels_json, score, score_factors_json,
+                     extra_json, created_at, updated_at, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lead_id) DO UPDATE SET
+                    title=excluded.title,
+                    body=excluded.body,
+                    url=excluded.url,
+                    priority=excluded.priority,
+                    labels_json=excluded.labels_json,
+                    score=excluded.score,
+                    score_factors_json=excluded.score_factors_json,
+                    extra_json=excluded.extra_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    lead.lead_id,
+                    lead.connector_id,
+                    lead.source_id,
+                    lead.title,
+                    lead.body,
+                    lead.url,
+                    lead.priority,
+                    json.dumps(lead.labels),
+                    score,
+                    score_factors_json,
+                    json.dumps(lead.extra),
+                    lead.created_at.isoformat(),
+                    lead.updated_at.isoformat(),
+                    now,
+                ),
+            )
+
+    def lead_exists(self, lead_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM intake_leads WHERE lead_id = ?", (lead_id,)
+            ).fetchone()
+        return row is not None
+
+    def get_lead(self, lead_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM intake_leads WHERE lead_id = ?", (lead_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_lead(row)
+
+    def list_leads(
+        self,
+        connector_id: Optional[str] = None,
+        limit: int = 100,
+        min_score: float = 0.0,
+    ) -> List[dict]:
+        with self._connect() as conn:
+            if connector_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM intake_leads
+                    WHERE connector_id = ? AND score >= ?
+                    ORDER BY score DESC LIMIT ?
+                    """,
+                    (connector_id, min_score, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM intake_leads
+                    WHERE score >= ?
+                    ORDER BY score DESC LIMIT ?
+                    """,
+                    (min_score, limit),
+                ).fetchall()
+        return [_row_to_lead(r) for r in rows]
+
+    def get_connector_cursor(self, connector_id: str) -> Optional[IngestionCursor]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM connector_cursors WHERE connector_id = ?",
+                (connector_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return IngestionCursor(
+            connector_id=row["connector_id"],
+            value=row["cursor_value"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def save_connector_cursor(self, cursor: IngestionCursor) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO connector_cursors (connector_id, cursor_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(connector_id) DO UPDATE SET
+                    cursor_value=excluded.cursor_value,
+                    updated_at=excluded.updated_at
+                """,
+                (cursor.connector_id, cursor.value, cursor.updated_at.isoformat()),
+            )
+
+
+def _row_to_lead(row: sqlite3.Row) -> dict:
+    return {
+        "lead_id": row["lead_id"],
+        "connector_id": row["connector_id"],
+        "source_id": row["source_id"],
+        "title": row["title"],
+        "body": row["body"],
+        "url": row["url"],
+        "priority": int(row["priority"]),
+        "labels": json.loads(row["labels_json"] or "[]"),
+        "score": float(row["score"] or 0),
+        "score_factors": json.loads(row["score_factors_json"] or "{}"),
+        "extra": json.loads(row["extra_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "ingested_at": row["ingested_at"],
+    }
 
 
 def _parse_dt(raw: Optional[str]) -> Optional[datetime]:
