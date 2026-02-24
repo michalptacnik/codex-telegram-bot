@@ -3,8 +3,14 @@ import uuid
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from codex_telegram_bot.domain.missions import (
+    MISSION_STATE_IDLE,
+    MissionEventRecord,
+    MissionRecord,
+    validate_transition,
+)
 from codex_telegram_bot.domain.runs import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
@@ -140,6 +146,43 @@ class SqliteRunStore:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_loop_checkpoint_key
                 ON tool_loop_checkpoints (session_id, prompt_fingerprint, step_index)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS missions (
+                    mission_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    goal TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    schedule_interval_sec INTEGER,
+                    retry_limit INTEGER NOT NULL DEFAULT 3,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    max_concurrency INTEGER NOT NULL DEFAULT 1,
+                    context_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mission_id TEXT NOT NULL,
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_missions_state
+                ON missions (state)
                 """
             )
             # Lightweight migration for existing DBs created before max_concurrency existed.
@@ -801,6 +844,138 @@ class SqliteRunStore:
             for r in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Mission persistence (EPIC 6)
+    # ------------------------------------------------------------------
+
+    def create_mission(
+        self,
+        title: str,
+        goal: str,
+        schedule_interval_sec: Optional[int] = None,
+        retry_limit: int = 3,
+        max_concurrency: int = 1,
+        context: Optional[Dict] = None,
+    ) -> str:
+        mission_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO missions
+                    (mission_id, title, goal, state, schedule_interval_sec,
+                     retry_limit, retry_count, max_concurrency, context_json,
+                     created_at, updated_at, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    mission_id,
+                    title,
+                    goal,
+                    MISSION_STATE_IDLE,
+                    schedule_interval_sec,
+                    retry_limit,
+                    max_concurrency,
+                    json.dumps(context or {}),
+                    now,
+                    now,
+                ),
+            )
+        return mission_id
+
+    def get_mission(self, mission_id: str) -> Optional[MissionRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_mission(row)
+
+    def list_missions(self, state: Optional[str] = None) -> List[MissionRecord]:
+        with self._connect() as conn:
+            if state:
+                rows = conn.execute(
+                    "SELECT * FROM missions WHERE state = ? ORDER BY created_at ASC",
+                    (state,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM missions ORDER BY created_at ASC"
+                ).fetchall()
+        return [_row_to_mission(r) for r in rows]
+
+    def transition_mission(
+        self, mission_id: str, to_state: str, reason: str = ""
+    ) -> MissionRecord:
+        """Validate and apply a state transition, writing an audit event."""
+        mission = self.get_mission(mission_id)
+        if mission is None:
+            raise ValueError(f"Mission not found: {mission_id}")
+        validate_transition(mission.state, to_state)
+        now = _utc_now()
+        started_at = mission.started_at
+        completed_at = mission.completed_at
+        if to_state == "running" and started_at is None:
+            started_at = datetime.fromisoformat(now)
+        if to_state in {"completed", "failed"}:
+            completed_at = datetime.fromisoformat(now)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE missions
+                SET state = ?, updated_at = ?,
+                    started_at = COALESCE(started_at, ?),
+                    completed_at = ?
+                WHERE mission_id = ?
+                """,
+                (
+                    to_state,
+                    now,
+                    started_at.isoformat() if started_at else None,
+                    completed_at.isoformat() if completed_at else None,
+                    mission_id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mission_events (mission_id, from_state, to_state, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (mission_id, mission.state, to_state, reason or "", now),
+            )
+        return self.get_mission(mission_id)  # type: ignore[return-value]
+
+    def increment_mission_retry(self, mission_id: str) -> int:
+        """Increment retry_count and return the new value."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE missions SET retry_count = retry_count + 1, updated_at = ? WHERE mission_id = ?",
+                (_utc_now(), mission_id),
+            )
+            row = conn.execute(
+                "SELECT retry_count FROM missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return int(row["retry_count"]) if row else 0
+
+    def reset_mission_retry(self, mission_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE missions SET retry_count = 0, updated_at = ? WHERE mission_id = ?",
+                (_utc_now(), mission_id),
+            )
+
+    def list_mission_events(self, mission_id: str) -> List[MissionEventRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM mission_events WHERE mission_id = ?
+                ORDER BY id ASC
+                """,
+                (mission_id,),
+            ).fetchall()
+        return [_row_to_mission_event(r) for r in rows]
+
 
 def _parse_dt(raw: Optional[str]) -> Optional[datetime]:
     if not raw:
@@ -845,6 +1020,35 @@ def _row_to_session(row: sqlite3.Row) -> TelegramSessionRecord:
         last_run_id=row["last_run_id"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _row_to_mission(row: sqlite3.Row) -> MissionRecord:
+    return MissionRecord(
+        mission_id=row["mission_id"],
+        title=row["title"],
+        goal=row["goal"],
+        state=row["state"],
+        schedule_interval_sec=row["schedule_interval_sec"],
+        retry_limit=int(row["retry_limit"] or 3),
+        retry_count=int(row["retry_count"] or 0),
+        max_concurrency=int(row["max_concurrency"] or 1),
+        context_json=row["context_json"] or "{}",
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
+        completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+    )
+
+
+def _row_to_mission_event(row: sqlite3.Row) -> MissionEventRecord:
+    return MissionEventRecord(
+        id=int(row["id"]),
+        mission_id=row["mission_id"],
+        from_state=row["from_state"],
+        to_state=row["to_state"],
+        reason=row["reason"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 
