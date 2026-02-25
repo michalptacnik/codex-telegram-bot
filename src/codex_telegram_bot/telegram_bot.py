@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import shlex
+import json
 from typing import Optional, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -47,6 +48,99 @@ def _extract_exec_argv(prompt: str) -> List[List[str]]:
         if argv:
             argv_list.append(argv)
     return argv_list
+
+
+def _strip_flag(parts: List[str], flag: str) -> tuple[List[str], bool]:
+    out: List[str] = []
+    found = False
+    for p in parts:
+        if p == flag:
+            found = True
+            continue
+        out.append(p)
+    return out, found
+
+
+def _parse_email_command_spec(args: List[str]) -> tuple[Optional[dict], str]:
+    cleaned, dry_run = _strip_flag([str(a or "").strip() for a in args], "--dry-run")
+    raw = " ".join([x for x in cleaned if x]).strip()
+    if not raw:
+        return None, "Usage: /email [--dry-run] to@example.com | Subject | Body"
+    parts = [p.strip() for p in raw.split("|", 2)]
+    if len(parts) != 3:
+        return None, "Usage: /email [--dry-run] to@example.com | Subject | Body"
+    to_addr, subject, body = parts
+    if "@" not in to_addr or "." not in to_addr.split("@")[-1]:
+        return None, "Error: invalid recipient email address."
+    if not subject or not body:
+        return None, "Error: subject and body are required."
+    payload = {
+        "name": "send_email_smtp",
+        "args": {
+            "to": to_addr,
+            "subject": subject,
+            "body": body,
+            "dry_run": bool(dry_run),
+        },
+    }
+    return payload, ""
+
+
+def _parse_gh_command_spec(args: List[str]) -> tuple[Optional[dict], str]:
+    cleaned, dry_run = _strip_flag([str(a or "").strip() for a in args], "--dry-run")
+    tokens = [t for t in cleaned if t]
+    if len(tokens) < 1:
+        return None, (
+            "Usage: /gh [--dry-run] comment <owner/repo> <issue> <body...>\n"
+            "or: /gh [--dry-run] create <owner/repo> <title> | <body>\n"
+            "or: /gh [--dry-run] close <owner/repo> <issue> [completed|not_planned]"
+        )
+    op = tokens[0].lower()
+    if op == "comment":
+        if len(tokens) < 4:
+            return None, "Usage: /gh comment <owner/repo> <issue> <body...>"
+        repo = tokens[1]
+        try:
+            issue = int(tokens[2])
+        except ValueError:
+            return None, "Error: issue must be an integer."
+        body = " ".join(tokens[3:]).strip()
+        if not body:
+            return None, "Error: comment body is required."
+        return {
+            "name": "github_comment",
+            "args": {"repo": repo, "issue": issue, "body": body, "dry_run": bool(dry_run)},
+        }, ""
+    if op == "create":
+        if len(tokens) < 3:
+            return None, "Usage: /gh create <owner/repo> <title> | <body>"
+        repo = tokens[1]
+        tail = " ".join(tokens[2:]).strip()
+        parts = [p.strip() for p in tail.split("|", 1)]
+        title = parts[0] if parts else ""
+        body = parts[1] if len(parts) > 1 else ""
+        if not title:
+            return None, "Error: issue title is required."
+        return {
+            "name": "github_create_issue",
+            "args": {"repo": repo, "title": title, "body": body, "dry_run": bool(dry_run)},
+        }, ""
+    if op == "close":
+        if len(tokens) < 3:
+            return None, "Usage: /gh close <owner/repo> <issue> [completed|not_planned]"
+        repo = tokens[1]
+        try:
+            issue = int(tokens[2])
+        except ValueError:
+            return None, "Error: issue must be an integer."
+        reason = (tokens[3].strip().lower() if len(tokens) > 3 else "completed")
+        if reason not in {"completed", "not_planned"}:
+            reason = "completed"
+        return {
+            "name": "github_close_issue",
+            "args": {"repo": repo, "issue": issue, "reason": reason, "dry_run": bool(dry_run)},
+        }, ""
+    return None, "Error: unknown /gh operation. Use comment, create, or close."
 
 
 def _prompt_has_high_risk_tool_actions(prompt: str) -> bool:
@@ -372,11 +466,13 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 profile = agent.policy_profile
         text = (
             "Commands:\n"
-            "/new, /resume [id], /branch, /status, /workspace, /pending, /approve <id>, /deny <id>, /interrupt, /continue\n"
+            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /email, /gh\n"
             "\n"
             "Examples:\n"
             "- `!exec /bin/ls -la`\n"
             "- `!loop {\"steps\":[{\"kind\":\"exec\",\"command\":\"/bin/echo hi\"}],\"final_prompt\":\"summarize\"}`\n"
+            "- `/email me@example.com | Subject | Body`\n"
+            "- `/gh comment owner/repo 123 looks good`\n"
             "\n"
             f"Active policy profile: `{profile}`\n"
             "High-risk actions require approval and are auditable."
@@ -403,6 +499,70 @@ async def handle_workspace(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     except Exception as exc:
         logger.exception("Workspace handler error: %s", exc)
+
+
+async def handle_skills(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        agent_service = context.bot_data.get("agent_service")
+        items = agent_service.list_skills()
+        if not items:
+            await update.message.reply_text("No skills available.")
+            return
+        lines = ["Skills:"]
+        for s in items:
+            status = "enabled" if s.get("enabled") else "disabled"
+            lines.append(f"- `{s.get('skill_id')}` {status} tools={','.join(s.get('tools') or [])}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as exc:
+        logger.exception("Skills handler error: %s", exc)
+
+
+async def handle_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
+            return
+        spec, err = _parse_email_command_spec(context.args or [])
+        if not spec:
+            await update.message.reply_text(err or "Invalid /email command.")
+            return
+        text = "!tool " + json.dumps(spec, ensure_ascii=True) + "\n\nConfirm email send result briefly."
+        await _process_prompt(update=update, context=context, text=text, user_id=user_id)
+    except Exception as exc:
+        logger.exception("Email handler error: %s", exc)
+
+
+async def handle_gh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
+            return
+        spec, err = _parse_gh_command_spec(context.args or [])
+        if not spec:
+            await update.message.reply_text(err or "Invalid /gh command.")
+            return
+        text = "!tool " + json.dumps(spec, ensure_ascii=True) + "\n\nSummarize the GitHub action result briefly."
+        await _process_prompt(update=update, context=context, text=text, user_id=user_id)
+    except Exception as exc:
+        logger.exception("GH handler error: %s", exc)
 
 
 async def handle_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -781,6 +941,9 @@ def build_application(
     app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("help", handle_help))
     app.add_handler(CommandHandler("workspace", handle_workspace))
+    app.add_handler(CommandHandler("skills", handle_skills))
+    app.add_handler(CommandHandler("email", handle_email))
+    app.add_handler(CommandHandler("gh", handle_gh))
     app.add_handler(CommandHandler("reinstall", handle_reinstall))
     app.add_handler(CommandHandler("purge", handle_purge))
     app.add_handler(CommandHandler("restart", handle_restart))
