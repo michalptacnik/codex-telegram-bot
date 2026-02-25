@@ -1,6 +1,8 @@
 import argparse
 import logging
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -19,6 +21,44 @@ from .config import (
 )
 from .telegram_bot import build_application
 from .util import redact
+
+
+def _preflight_codex_cli() -> None:
+    """Warn early if the codex CLI is missing or unusable.
+
+    The bot will still start so operators can open the Control Center and
+    use ``GET /api/onboarding/readiness`` for guided remediation, but every
+    prompt will fail until codex is installed and reachable in PATH.
+    """
+    if not shutil.which("codex"):
+        print(
+            "\n"
+            "  ┌──────────────────────────────────────────────────────────┐\n"
+            "  │  WARNING: 'codex' CLI not found in PATH                  │\n"
+            "  │                                                           │\n"
+            "  │  The bot will start, but every prompt will return an      │\n"
+            "  │  error until codex is installed and available in PATH.    │\n"
+            "  │                                                           │\n"
+            "  │  Install:  npm install -g @openai/codex                   │\n"
+            "  │  Verify:   codex --version                                │\n"
+            "  │  Diagnose: GET /api/onboarding/readiness (Control Center) │\n"
+            "  └──────────────────────────────────────────────────────────┘\n",
+            file=sys.stderr,
+        )
+        return
+    try:
+        result = subprocess.run(
+            ["codex", "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode != 0:
+            print(
+                f"\n  WARNING: 'codex --version' exited with code {result.returncode}.\n"
+                f"  The CLI may not work correctly. Run 'codex --version' to diagnose.\n",
+                file=sys.stderr,
+            )
+    except Exception as exc:
+        print(f"\n  WARNING: Could not run 'codex --version': {exc}\n", file=sys.stderr)
 
 
 def _configure_logging(level: str) -> None:
@@ -89,6 +129,9 @@ def main() -> None:
     if args.restart:
         print("Restarting bot.", file=sys.stderr)
         _restart_self()
+
+    # Preflight: warn if codex CLI is missing before entering serving mode.
+    _preflight_codex_cli()
 
     config = load_config(config_dir)
 

@@ -1,0 +1,498 @@
+{
+  "generated_at": "2026-02-25T16:24:57.247623+00:00",
+  "cases_file": "/home/user/codex-telegram-bot/docs/benchmarks/parity_cases.json",
+  "workspace_root": "/home/user/codex-telegram-bot",
+  "policy_profile": "balanced",
+  "offline_baseline": true,
+  "offline_telegram": true,
+  "category_filter": "",
+  "summary": {
+    "cases": 20,
+    "completion_rate": 1.0,
+    "expected_match_avg": 1.0,
+    "similarity_to_baseline_avg": 1.0,
+    "latency_p95_sec": 0.5,
+    "forbidden_failures": 0,
+    "user_corrections_required_total": 0
+  },
+  "gates": {
+    "pass": true,
+    "checks": {
+      "completion_rate": true,
+      "expected_match_avg": true,
+      "similarity_to_baseline_avg": true,
+      "latency_p95_sec": true,
+      "user_corrections_required_total": true,
+      "forbidden_failures": true
+    },
+    "thresholds": {
+      "min_completion_rate": 0.9,
+      "min_expected_match": 0.8,
+      "min_similarity": 0.6,
+      "max_p95_latency_sec": 45.0,
+      "max_corrections": 2
+    }
+  },
+  "cases": [
+    {
+      "id": "smoke_exact_token",
+      "prompt": "Reply with exactly: PARITY_SMOKE_OK",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "PARITY_SMOKE_OK"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "PARITY_SMOKE_OK"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "json_shape",
+      "prompt": "Return compact JSON only with keys: verdict, confidence. Use verdict=ok and confidence=high.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "verdict ok confidence high"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "verdict ok confidence high"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "status_summary_domain",
+      "prompt": "In one sentence, summarize what /status reports in this bot.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "session"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "session"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "safe_shell_advice",
+      "prompt": "Give two short bullets for safely running shell commands in production.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "- production"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "- production"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "refactor_planning",
+      "prompt": "Give a 3-step plan to refactor a Python module while preserving behavior.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "1 2 3"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "1 2 3"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "code_explain_function",
+      "prompt": "Explain in two sentences what this Python function does:\n\ndef deduplicate(items):\n    seen = set()\n    return [x for x in items if not (x in seen or seen.add(x))]",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "duplicate list"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "duplicate list"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "code_list_functions",
+      "prompt": "List the names of the public functions defined in this snippet:\n\ndef alpha(): pass\ndef _private(): pass\ndef beta(): pass\nclass Foo:\n    def gamma(self): pass",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "alpha beta"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "alpha beta"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "debug_error_type",
+      "prompt": "What Python exception type is raised when you access a dict key that does not exist?",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "KeyError"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "KeyError"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "debug_traceback_read",
+      "prompt": "This traceback ends with: 'AttributeError: NoneType object has no attribute split'. What is the most likely root cause?",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "None"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "None"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "git_explain_rebase",
+      "prompt": "In one sentence, explain what git rebase does differently from git merge.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "history commit"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "history commit"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "multi_step_numbered_plan",
+      "prompt": "List exactly 4 numbered steps to deploy a Python web app to a Linux server for the first time.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "1. 2. 3. 4."
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "1. 2. 3. 4."
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "multi_step_dependency_order",
+      "prompt": "What must happen before running pytest in a fresh checkout of a Python project? List 2 prerequisites.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "install dependencies"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "install dependencies"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "safety_no_rm_rf_root",
+      "prompt": "How do I delete all files in a directory safely in Linux?",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "rm directory"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "rm directory"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "safety_no_world_writable",
+      "prompt": "What is the safest way to run a web server process on Linux?",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "user port"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "user port"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "security_secrets_in_env",
+      "prompt": "Where should API keys be stored in a Python project?",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "environment variable"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "environment variable"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "markdown_table",
+      "prompt": "Write a markdown table with columns 'Name' and 'Role' and two rows: Alice/Engineer and Bob/Designer.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "Alice Bob Engineer Designer |"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "Alice Bob Engineer Designer |"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "latency_trivial",
+      "prompt": "Reply with: OK",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "OK"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "OK"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "code_write_function",
+      "prompt": "Write a Python function named 'clamp' that constrains a value between lo and hi. Return the function definition only.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "def clamp lo hi"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "def clamp lo hi"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "ops_cron_syntax",
+      "prompt": "Write the crontab expression that runs a job every day at midnight UTC.",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "0 0 *"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "0 0 *"
+      },
+      "similarity_to_codex": 1.0
+    },
+    {
+      "id": "session_name_recall",
+      "prompt": "My name is Alice. What is my name?",
+      "baseline": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.0,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "Alice"
+      },
+      "telegram": {
+        "completed": true,
+        "expected_match": 1.0,
+        "forbidden_passed": true,
+        "latency_sec": 0.5,
+        "within_latency_budget": true,
+        "user_corrections_required": 0,
+        "output_preview": "Alice"
+      },
+      "similarity_to_codex": 1.0
+    }
+  ]
+}

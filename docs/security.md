@@ -34,9 +34,12 @@ for `codex-telegram-bot`.
 ### Threat Categories
 
 #### T1: Unauthorized Control Center access (SSRF / direct access)
-- **Risk**: Attacker accesses `/api/*` endpoints to read run history or queue prompts.
-- **Mitigation**: Set `LOCAL_API_KEYS` and restrict Control Center to localhost.
-  Use a TLS-terminating reverse proxy for remote access.
+- **Risk**: Attacker accesses `/api/*` endpoints or UI pages to read run history
+  or queue prompts.
+- **Mitigation**: Set `LOCAL_API_KEYS` to protect all `/api/*` endpoints.  Set
+  `CONTROL_CENTER_UI_SECRET` to require a login secret for all HTML UI pages
+  (`/`, `/runs`, `/sessions`, etc.).  Use a TLS-terminating reverse proxy when
+  exposing the Control Center outside localhost.
 
 #### T2: Secret leakage via prompts
 - **Risk**: User sends a prompt containing API keys or credentials; agent echoes them.
@@ -110,10 +113,11 @@ for `codex-telegram-bot`.
 2. **Codex CLI runs with bot process permissions.** If the bot has broad filesystem
    access, so does the agent. Restrict workspace root and use policy profiles.
 
-3. **Control Center UI has no session authentication.** The HTML pages (`/`, `/runs`,
-   etc.) are served without auth. Use network-level controls (firewall, VPN) to
-   restrict access to the Control Center port. The `/api/*` endpoints are protected
-   when `LOCAL_API_KEYS` is configured.
+3. **Control Center UI auth is optional.** Set `CONTROL_CENTER_UI_SECRET` to require
+   a login secret for all HTML pages (`/`, `/runs`, etc.).  When not set (local/dev
+   mode), UI pages are served without auth — use network-level controls (firewall,
+   VPN) to restrict access to the Control Center port.  The `/api/*` endpoints are
+   protected when `LOCAL_API_KEYS` is configured.
 
 4. **SQLite is not encrypted at rest.** Use full-disk encryption (LUKS/BitLocker)
    if the state DB contains sensitive data.
