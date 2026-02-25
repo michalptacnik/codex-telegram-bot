@@ -673,7 +673,16 @@ class AgentService:
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
-            if _output_claims_email_sent(output):
+            executed_slash = await self._attempt_autonomous_email_slash_command(
+                output=output,
+                session_id=session_id,
+                workspace_root=self.session_workspace(session_id=session_id),
+                policy_profile=self._agent_policy_profile(agent_id=agent_id),
+                extra_tools=extra_tools,
+            )
+            if executed_slash is not None:
+                output = executed_slash
+            elif _output_claims_email_sent(output):
                 recovered = await self._attempt_autonomous_email_send_recovery(
                     output=output,
                     prompt=(cleaned_prompt or prompt),
@@ -945,7 +954,16 @@ class AgentService:
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
         output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
-        if _output_claims_email_sent(output):
+        executed_slash = await self._attempt_autonomous_email_slash_command(
+            output=output,
+            session_id=session_id,
+            workspace_root=session_workspace,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        if executed_slash is not None:
+            output = executed_slash
+        elif _output_claims_email_sent(output):
             recovered = await self._attempt_autonomous_email_send_recovery(
                 output=output,
                 prompt=(cleaned_prompt or prompt),
@@ -1229,7 +1247,38 @@ class AgentService:
         )
         if not result.ok:
             return f"Error: attempted autonomous email send but failed.\n{result.output}"
-        return f"{result.output}\n\nAutonomous recovery: executed send_email_smtp after provider claimed send."
+        return _compact_email_tool_output(result.output)
+
+    async def _attempt_autonomous_email_slash_command(
+        self,
+        output: str,
+        session_id: str,
+        workspace_root: Path,
+        policy_profile: str,
+        extra_tools: Dict[str, Any],
+    ) -> Optional[str]:
+        tool_name = "send_email_smtp"
+        if tool_name not in (extra_tools or {}) and self._tool_registry.get(tool_name) is None:
+            return None
+        to_addr, subject, body = _extract_email_triplet_from_slash_command(output)
+        if not to_addr or not subject or not body:
+            return None
+        action_id = "tool-" + uuid.uuid4().hex[:8]
+        result = await self._execute_registered_tool_action(
+            action_id=action_id,
+            tool_name=tool_name,
+            tool_args={"to": to_addr, "subject": subject, "body": body},
+            workspace_root=workspace_root,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        self.append_session_assistant_message(
+            session_id=session_id,
+            content=f"tool.action.completed action_id={action_id} rc={0 if result.ok else 1}",
+        )
+        if not result.ok:
+            return f"Error: attempted /email execution but failed.\n{result.output}"
+        return _compact_email_tool_output(result.output)
 
     async def _execute_tool_action_with_telemetry(
         self,
@@ -1816,6 +1865,18 @@ def _extract_email_triplet_from_slash_command(text: str) -> tuple[str, str, str]
     if not to_addr or not subject or not body:
         return "", "", ""
     return to_addr, subject, body
+
+
+def _compact_email_tool_output(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "Email sent."
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return "Email sent."
+    if len(lines) >= 2 and lines[0].startswith("tool-"):
+        return lines[-1]
+    return raw
 
 
 def _p95(values: List[float]) -> float:

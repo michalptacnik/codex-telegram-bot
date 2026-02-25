@@ -1121,7 +1121,6 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 agent_id="default",
             )
             self.assertIn("Email sent to partnerships@ambergroup.io", out)
-            self.assertIn("Autonomous recovery", out)
             await service.shutdown()
 
     async def test_email_send_claim_in_actions_path_triggers_recovery(self):
@@ -1173,7 +1172,6 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 agent_id="default",
             )
             self.assertIn("Email sent to partnerships@ambergroup.io", out)
-            self.assertIn("Autonomous recovery", out)
             await service.shutdown()
 
     async def test_email_send_claim_with_slash_command_output_triggers_recovery(self):
@@ -1227,7 +1225,6 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 agent_id="default",
             )
             self.assertIn("Email sent to partnerships@ambergroup.io", out)
-            self.assertIn("Autonomous recovery", out)
             await service.shutdown()
 
 
