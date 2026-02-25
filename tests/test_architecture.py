@@ -14,6 +14,7 @@ from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterCo
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.agent_service import _extract_email_address
+from codex_telegram_bot.services.agent_service import _extract_email_triplet_from_slash_command
 from codex_telegram_bot.services.agent_service import _extract_subject_and_body_from_email_text
 from codex_telegram_bot.services.agent_service import _model_job_phase_hint
 from codex_telegram_bot.services.agent_service import _is_email_send_intent
@@ -1175,6 +1176,60 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Autonomous recovery", out)
             await service.shutdown()
 
+    async def test_email_send_claim_with_slash_command_output_triggers_recovery(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return (
+                    "I'll send the email again using the correct format.\n\n"
+                    "/email partnerships@ambergroup.io | Introduction from Michal Ptacnik | "
+                    "Hi Amber Group Team"
+                )
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        class _FakeEmailTool:
+            name = "send_email_smtp"
+
+            def run(self, request, context):
+                return type("R", (), {"ok": True, "output": f"Email sent to {request.args.get('to')}"})()
+
+        class _Skill:
+            skill_id = "smtp_email"
+
+        class _SkillManager:
+            def auto_activate(self, _prompt):
+                return [_Skill()]
+
+            def tools_for_skills(self, _skills):
+                return {"send_email_smtp": _FakeEmailTool()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(db_path=Path(tmp) / "state.db")
+            service = AgentService(
+                provider=_Provider(),
+                run_store=store,
+                event_bus=EventBus(),
+                skill_manager=_SkillManager(),
+            )
+            session = service.get_or_create_session(chat_id=15, user_id=26)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Try again",
+                chat_id=15,
+                user_id=26,
+                session_id=session.session_id,
+                agent_id="default",
+            )
+            self.assertIn("Email sent to partnerships@ambergroup.io", out)
+            self.assertIn("Autonomous recovery", out)
+            await service.shutdown()
+
 
 class TestEmailIntentGuards(unittest.TestCase):
     def test_detects_email_send_intent(self):
@@ -1199,3 +1254,11 @@ class TestEmailIntentGuards(unittest.TestCase):
         )
         self.assertEqual(subject, "Intro from Michal")
         self.assertIn("Hi Team", body)
+
+    def test_extract_email_triplet_from_slash_command(self):
+        to_addr, subject, body = _extract_email_triplet_from_slash_command(
+            "I'll send now.\n/email partnerships@ambergroup.io | Intro | Hello team"
+        )
+        self.assertEqual(to_addr, "partnerships@ambergroup.io")
+        self.assertEqual(subject, "Intro")
+        self.assertEqual(body, "Hello team")

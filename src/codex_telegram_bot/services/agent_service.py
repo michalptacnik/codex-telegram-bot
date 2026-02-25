@@ -1202,14 +1202,17 @@ class AgentService:
         tool_name = "send_email_smtp"
         if tool_name not in (extra_tools or {}) and self._tool_registry.get(tool_name) is None:
             return None
-        subject, body = _extract_subject_and_body_from_email_text(output)
-        if not subject or not body:
-            return None
-        to_addr = _extract_email_address(prompt)
-        if not to_addr and self._run_store:
-            history = self._run_store.list_session_messages(session_id=session_id, limit=40)
-            to_addr = _extract_email_address_from_messages(history)
+        to_addr, subject, body = _extract_email_triplet_from_slash_command(output)
         if not to_addr:
+            to_addr = _extract_email_address(prompt)
+            if not to_addr and self._run_store:
+                history = self._run_store.list_session_messages(session_id=session_id, limit=40)
+                to_addr = _extract_email_address_from_messages(history)
+        if not subject or not body:
+            subject, body = _extract_subject_and_body_from_email_text(output)
+        if not to_addr:
+            to_addr = _extract_email_address(output)
+        if not to_addr or not subject or not body:
             return None
         action_id = "tool-" + uuid.uuid4().hex[:8]
         result = await self._execute_registered_tool_action(
@@ -1797,6 +1800,22 @@ def _extract_subject_and_body_from_email_text(text: str) -> tuple[str, str]:
     body = "\n".join(body_lines).strip()
     body = re.sub(r"^Autonomous recovery:.*$", "", body, flags=re.I | re.M).strip()
     return subject, body
+
+
+def _extract_email_triplet_from_slash_command(text: str) -> tuple[str, str, str]:
+    raw = (text or "").replace("\r\n", "\n")
+    match = re.search(r"/email\s+(.+)", raw, flags=re.I | re.S)
+    if not match:
+        return "", "", ""
+    payload = match.group(1).strip()
+    parts = [p.strip() for p in payload.split("|", 2)]
+    if len(parts) != 3:
+        return "", "", ""
+    to_addr, subject, body = parts
+    to_addr = _extract_email_address(to_addr)
+    if not to_addr or not subject or not body:
+        return "", "", ""
+    return to_addr, subject, body
 
 
 def _p95(values: List[float]) -> float:
