@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import socket
 import smtplib
+import time
 from email.message import EmailMessage
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
@@ -11,6 +13,7 @@ class SendEmailSmtpTool:
     """Send outbound email through SMTP using app-password style auth."""
 
     name = "send_email_smtp"
+    _MAX_ATTEMPTS = 3
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
         profile = (getattr(context, "policy_profile", "balanced") or "balanced").strip().lower()
@@ -26,9 +29,9 @@ class SendEmailSmtpTool:
         smtp_host = str(request.args.get("smtp_host") or os.environ.get("SMTP_HOST") or "").strip()
         smtp_port_raw = request.args.get("smtp_port") or os.environ.get("SMTP_PORT") or 587
         smtp_user = str(request.args.get("smtp_user") or os.environ.get("SMTP_USER") or "").strip()
-        smtp_password = str(
-            request.args.get("smtp_password") or os.environ.get("SMTP_APP_PASSWORD") or ""
-        ).strip()
+        smtp_password = "".join(
+            str(request.args.get("smtp_password") or os.environ.get("SMTP_APP_PASSWORD") or "").split()
+        )
         from_addr = str(request.args.get("from") or os.environ.get("SMTP_FROM") or smtp_user).strip()
         dry_run = bool(request.args.get("dry_run", False))
 
@@ -64,11 +67,26 @@ class SendEmailSmtpTool:
         msg["Subject"] = subject
         msg.set_content(body)
 
-        try:
-            with smtplib.SMTP(smtp_host, smtp_port, timeout=25) as server:
-                server.starttls()
-                server.login(smtp_user, smtp_password)
-                server.send_message(msg)
-        except Exception as exc:
-            return ToolResult(ok=False, output=f"Error: SMTP send failed: {exc}")
-        return ToolResult(ok=True, output=f"Email sent to {to_addr} with subject '{subject}'.")
+        last_exc: Exception | None = None
+        for attempt in range(1, self._MAX_ATTEMPTS + 1):
+            try:
+                if smtp_port == 465:
+                    with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=25) as server:
+                        server.login(smtp_user, smtp_password)
+                        server.send_message(msg)
+                else:
+                    with smtplib.SMTP(smtp_host, smtp_port, timeout=25) as server:
+                        server.starttls()
+                        server.login(smtp_user, smtp_password)
+                        server.send_message(msg)
+                return ToolResult(ok=True, output=f"Email sent to {to_addr} with subject '{subject}'.")
+            except Exception as exc:
+                last_exc = exc
+                transient = isinstance(
+                    exc, (socket.gaierror, TimeoutError, ConnectionError, smtplib.SMTPServerDisconnected, OSError)
+                )
+                if transient and attempt < self._MAX_ATTEMPTS:
+                    time.sleep(1.2 * attempt)
+                    continue
+                break
+        return ToolResult(ok=False, output=f"Error: SMTP send failed after {self._MAX_ATTEMPTS} attempt(s): {last_exc}")

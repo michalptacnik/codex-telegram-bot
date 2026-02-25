@@ -1,7 +1,9 @@
 import os
+import socket
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_telegram_bot.services.skill_manager import SkillManager
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
@@ -65,3 +67,46 @@ class TestEmailTool(unittest.TestCase):
         out = tool.run(req, ToolContext(workspace_root=Path("."), policy_profile="trusted"))
         self.assertTrue(out.ok)
         self.assertIn("Would send email", out.output)
+
+    def test_password_whitespace_is_normalized(self):
+        tool = SendEmailSmtpTool()
+        req = ToolRequest(
+            name="send_email_smtp",
+            args={
+                "to": "user@example.com",
+                "subject": "Hello",
+                "body": "World",
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "smtp_user": "bot@example.com",
+                "smtp_password": "gdqd sswj qfyg bkna",
+                "from": "bot@example.com",
+            },
+        )
+        with patch("smtplib.SMTP") as smtp_cls:
+            smtp = smtp_cls.return_value.__enter__.return_value
+            out = tool.run(req, ToolContext(workspace_root=Path("."), policy_profile="trusted"))
+            self.assertTrue(out.ok)
+            smtp.login.assert_called_once_with("bot@example.com", "gdqdsswjqfygbkna")
+
+    def test_transient_dns_error_retries_then_succeeds(self):
+        tool = SendEmailSmtpTool()
+        req = ToolRequest(
+            name="send_email_smtp",
+            args={
+                "to": "user@example.com",
+                "subject": "Hello",
+                "body": "World",
+                "smtp_host": "smtp.example.com",
+                "smtp_port": 587,
+                "smtp_user": "bot@example.com",
+                "smtp_password": "secret",
+                "from": "bot@example.com",
+            },
+        )
+        with patch("smtplib.SMTP") as smtp_cls:
+            smtp = smtp_cls.return_value.__enter__.return_value
+            smtp.starttls.side_effect = [socket.gaierror(-3, "Temporary failure in name resolution"), None]
+            out = tool.run(req, ToolContext(workspace_root=Path("."), policy_profile="trusted"))
+            self.assertTrue(out.ok)
+            self.assertGreaterEqual(smtp.starttls.call_count, 2)
