@@ -1,7 +1,7 @@
 import sqlite3
 import uuid
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -308,7 +308,17 @@ class SqliteRunStore:
                     INSERT INTO agents (agent_id, name, provider, policy_profile, max_concurrency, enabled, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    ("default", "Default Agent", "codex_cli", "balanced", 1, 1, now, now),
+                    ("default", "Default Agent", "codex_cli", "trusted", 1, 1, now, now),
+                )
+            else:
+                # Upgrade legacy default agent profile to trusted for full-capability startup.
+                conn.execute(
+                    """
+                    UPDATE agents
+                    SET policy_profile = ?, updated_at = ?
+                    WHERE agent_id = ? AND policy_profile = ?
+                    """,
+                    ("trusted", _utc_now(), "default", "balanced"),
                 )
 
     def create_run(self, prompt: str) -> str:
@@ -368,6 +378,33 @@ class SqliteRunStore:
                     context="run.error",
                     replacements=redacted_error.replacements,
                 )
+
+    def recover_interrupted_runs(self, stale_after_sec: int = 30) -> int:
+        """Mark stale 'running' rows as failed after process restart."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=max(1, int(stale_after_sec)))
+        ).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE runs
+                SET status = ?,
+                    error = CASE
+                        WHEN error = '' THEN ?
+                        ELSE error
+                    END,
+                    completed_at = COALESCE(completed_at, ?)
+                WHERE status = ? AND started_at IS NOT NULL AND started_at < ?
+                """,
+                (
+                    RUN_STATUS_FAILED,
+                    "Recovered after restart: interrupted execution marked failed.",
+                    _utc_now(),
+                    RUN_STATUS_RUNNING,
+                    cutoff,
+                ),
+            )
+            return int(cur.rowcount or 0)
 
     def append_event(self, event: RunEvent) -> None:
         redacted_payload = redact_with_audit(event.payload)

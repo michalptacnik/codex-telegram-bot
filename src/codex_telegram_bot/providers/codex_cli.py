@@ -12,6 +12,24 @@ DEFAULT_EXEC_TIMEOUT_SEC = 180
 DEFAULT_VERSION_TIMEOUT_SEC = 10
 
 
+def _normalize_policy_profile(policy_profile: str) -> str:
+    value = (policy_profile or "").strip().lower()
+    if value in {"strict", "balanced", "trusted"}:
+        return value
+    return "balanced"
+
+
+def _build_exec_argv(policy_profile: str) -> list[str]:
+    profile = _normalize_policy_profile(policy_profile)
+    argv = ["codex", "exec", "-", "--color", "never", "--skip-git-repo-check"]
+    # Force sandbox mode explicitly so startup behavior does not depend on local codex defaults.
+    if profile == "balanced":
+        argv.append("--sandbox=workspace-write")
+    elif profile == "trusted":
+        argv.append("--sandbox=danger-full-access")
+    return argv
+
+
 def _read_timeout_env(name: str, default: int) -> int:
     raw = (os.environ.get(name) or "").strip()
     if not raw:
@@ -73,7 +91,7 @@ class CodexCliProvider(ProviderAdapter):
         )
         try:
             result = await self._runner.run(
-                ["codex", "exec", "-", "--color", "never", "--skip-git-repo-check"],
+                _build_exec_argv(policy_profile=policy_profile),
                 stdin_text=safe_prompt,
                 timeout_sec=self._exec_timeout_sec,
                 policy_profile=policy_profile,

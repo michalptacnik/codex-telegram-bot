@@ -31,6 +31,7 @@ from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, Too
 logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
 ALLOWED_POLICY_PROFILES = {"strict", "balanced", "trusted"}
+ALLOWED_AGENT_PROVIDERS = {"codex_cli", "openai", "anthropic", "gemini", "deepseek", "qwen"}
 CONTEXT_BUDGET_TOTAL_CHARS = 12000
 CONTEXT_HISTORY_BUDGET_CHARS = 6500
 CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
@@ -74,8 +75,10 @@ class AgentService:
         access_controller: Optional[AccessController] = None,
         retention_policy: Optional[SessionRetentionPolicy] = None,
         capability_router: Optional[CapabilityRouter] = None,
+        provider_registry: Optional[Any] = None,
     ):
         self._provider = provider
+        self._provider_registry = provider_registry
         self._run_store = run_store
         self._event_bus = event_bus
         self._execution_runner = execution_runner or LocalShellRunner()
@@ -91,7 +94,7 @@ class AgentService:
         self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
         self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
-        self._tool_registry = tool_registry or build_default_tool_registry()
+        self._tool_registry = tool_registry or build_default_tool_registry(provider_registry=provider_registry)
         self._capability_registry = capability_registry
         # Parity services (optional — degrade gracefully when not provided)
         self._workspace_manager = workspace_manager
@@ -184,10 +187,12 @@ class AgentService:
     async def _execute_prompt(self, agent_id: str, prompt: str, correlation_id: str) -> str:
         run_id = None
         policy_profile = self._agent_policy_profile(agent_id=agent_id)
+        requested_provider = self._agent_provider(agent_id=agent_id)
+        provider_for_call = self._provider_for_agent(agent_id=agent_id)
         if self._run_store and self._event_bus:
             run_id = self._run_store.create_run(prompt)
             self._run_store.mark_running(run_id)
-            provider_label_before = self._provider_label()
+            provider_label_before = self._provider_label(provider_for_call)
             self._event_bus.publish(
                 run_id=run_id,
                 event_type="run.started",
@@ -196,7 +201,7 @@ class AgentService:
             self._event_bus.publish(
                 run_id=run_id,
                 event_type="run.provider.selected",
-                payload=f"provider={provider_label_before}",
+                payload=f"provider={provider_label_before}, requested={requested_provider}",
             )
             self._event_bus.publish(
                 run_id=run_id,
@@ -212,7 +217,7 @@ class AgentService:
                 job_id=correlation_id,
             )
 
-        output = await self._provider.generate(
+        output = await provider_for_call.generate(
             messages=[{"role": "user", "content": prompt}],
             stream=False,
             correlation_id=run_id or correlation_id,
@@ -220,11 +225,11 @@ class AgentService:
         )
 
         if self._run_store and self._event_bus and run_id:
-            provider_label_after = self._provider_label()
+            provider_label_after = self._provider_label(provider_for_call)
             self._event_bus.publish(
                 run_id=run_id,
                 event_type="run.provider.used",
-                payload=f"provider={provider_label_after}",
+                payload=f"provider={provider_label_after}, requested={requested_provider}",
             )
             if output.startswith("Error:"):
                 self._run_store.mark_failed(run_id, output)
@@ -952,7 +957,9 @@ class AgentService:
             raise ValueError("Invalid agent_id. Use 2-40 chars: lowercase letters, numbers, '_' or '-'.")
         if not name:
             raise ValueError("Agent name is required.")
-        if provider not in {"codex_cli"}:
+        if provider == "quen":
+            provider = "qwen"
+        if provider not in ALLOWED_AGENT_PROVIDERS:
             raise ValueError("Unsupported provider.")
         if policy_profile not in ALLOWED_POLICY_PROFILES:
             raise ValueError("Invalid policy profile.")
@@ -982,14 +989,36 @@ class AgentService:
 
     def _agent_policy_profile(self, agent_id: str) -> str:
         if not self._run_store:
-            return "balanced"
+            return "trusted"
         agent = self._run_store.get_agent(agent_id)
         if not agent or not agent.enabled:
-            return "balanced"
+            return "trusted"
         profile = (agent.policy_profile or "").strip().lower()
         if profile not in ALLOWED_POLICY_PROFILES:
-            return "balanced"
+            return "trusted"
         return profile
+
+    def _agent_provider(self, agent_id: str) -> str:
+        if not self._run_store:
+            return "codex_cli"
+        agent = self._run_store.get_agent(agent_id)
+        if not agent or not agent.enabled:
+            return "codex_cli"
+        value = (agent.provider or "").strip().lower()
+        if value == "quen":
+            value = "qwen"
+        if value not in ALLOWED_AGENT_PROVIDERS:
+            return "codex_cli"
+        return value
+
+    def _provider_for_agent(self, agent_id: str):
+        selected = self._agent_provider(agent_id=agent_id)
+        if self._provider_registry is not None and hasattr(self._provider_registry, "get_provider"):
+            try:
+                return self._provider_registry.get_provider(selected)
+            except Exception:
+                pass
+        return self._provider
 
     def _build_handoff_envelope(
         self,
@@ -1152,11 +1181,12 @@ class AgentService:
         if not ok:
             logger.warning("alert dispatch failed: category=%s", category)
 
-    def _provider_label(self) -> str:
-        active = getattr(self._provider, "_active_provider", "")
+    def _provider_label(self, provider: Optional[Any] = None) -> str:
+        selected = provider if provider is not None else self._provider
+        active = getattr(selected, "_active_provider", "")
         if isinstance(active, str) and active.strip():
             return active.strip()
-        getter = getattr(self._provider, "capabilities", None)
+        getter = getattr(selected, "capabilities", None)
         if callable(getter):
             try:
                 caps = getter()
@@ -1166,7 +1196,10 @@ class AgentService:
                 value = str(caps.get("provider") or "").strip()
                 if value:
                     return value
-        return self._provider.__class__.__name__.lower()
+        return selected.__class__.__name__.lower()
+
+    def provider_registry(self):
+        return self._provider_registry
 
 
 def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:

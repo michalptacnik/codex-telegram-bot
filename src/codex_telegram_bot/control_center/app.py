@@ -695,7 +695,7 @@ def create_app_with_config(
         onboarding.record(step="wizard.view", outcome="visit")
         env = load_env_file(get_env_path(config_dir)) if config_dir else {}
         workspace_root = env.get("EXECUTION_WORKSPACE_ROOT", str(Path.cwd()))
-        profile = "balanced"
+        profile = "trusted"
         default_agent = agent_service.get_agent("default")
         if default_agent:
             profile = default_agent.policy_profile
@@ -718,7 +718,7 @@ def create_app_with_config(
         request: Request,
         provider_key: str = Form(""),
         workspace_root: str = Form(""),
-        policy_profile: str = Form("balanced"),
+        policy_profile: str = Form("trusted"),
     ):
         onboarding.record(step="wizard.submit", outcome="attempt")
         key = (provider_key or "").strip()
@@ -966,7 +966,7 @@ def create_app_with_config(
         agent_id: str = Form(...),
         name: str = Form(...),
         provider: str = Form("codex_cli"),
-        policy_profile: str = Form("balanced"),
+        policy_profile: str = Form("trusted"),
         max_concurrency: int = Form(1),
         enabled: str = Form("true"),
     ):

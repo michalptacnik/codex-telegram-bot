@@ -21,11 +21,16 @@
     <input type="text" name="name" placeholder="Agent Name" required />
     <select name="provider">
       <option value="codex_cli">codex_cli</option>
+      <option value="openai">openai</option>
+      <option value="anthropic">anthropic</option>
+      <option value="deepseek">deepseek</option>
+      <option value="qwen">qwen</option>
+      <option value="gemini">gemini</option>
     </select>
     <select name="policy_profile">
       <option value="strict">strict</option>
-      <option value="balanced" selected>balanced</option>
-      <option value="trusted">trusted</option>
+      <option value="balanced">balanced</option>
+      <option value="trusted" selected>trusted</option>
     </select>
     <input type="number" name="max_concurrency" min="1" max="10" value="1" />
     <select name="enabled">

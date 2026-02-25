@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -8,8 +9,11 @@ from codex_telegram_bot.execution.local_shell import LocalShellRunner
 from codex_telegram_bot.execution.profiles import ExecutionProfileResolver
 from codex_telegram_bot.events.event_bus import EventBus
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
+from codex_telegram_bot.providers.anthropic_provider import AnthropicProvider
 from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.fallback import EchoFallbackProvider
+from codex_telegram_bot.providers.gemini_provider import GeminiProvider
+from codex_telegram_bot.providers.openai_compatible import OpenAICompatibleProvider
 from codex_telegram_bot.providers.registry import ProviderRegistry
 from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterConfig
 from codex_telegram_bot.services.access_control import AccessController
@@ -35,11 +39,9 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
     )
     runner = LocalShellRunner(profile_resolver=ExecutionProfileResolver(workspace_root))
     provider_backend = _read_provider_backend()
-    if provider_backend != "codex-cli":
+    if provider_backend not in {"codex-cli", "codex_cli", "openai", "deepseek", "qwen", "anthropic", "gemini"}:
         raise ValueError(f"Unsupported provider backend: {provider_backend}")
-    primary = CodexCliProvider(runner=runner)
-    provider_registry = ProviderRegistry()
-    provider_registry.register("codex_cli", primary, make_active=True)
+    provider_registry = _build_provider_registry(runner=runner, preferred_backend=provider_backend)
     capability_router = CapabilityRouter(provider_registry)
 
     fallback_mode = (os.environ.get("PROVIDER_FALLBACK_MODE", "none") or "none").strip().lower()
@@ -71,12 +73,17 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
             approval_ttl_sec=_read_int_env("APPROVAL_TTL_SEC", 900),
             max_pending_approvals_per_user=_read_int_env("MAX_PENDING_APPROVALS_PER_USER", 3),
             session_workspaces_root=session_workspaces_root,
+            provider_registry=provider_registry,
             capability_registry=capability_registry,
             workspace_manager=workspace_manager,
             access_controller=access_controller,
             capability_router=capability_router,
         )
     run_store = SqliteRunStore(db_path=state_db_path)
+    run_store.recover_interrupted_runs()
+    approval_ttl_sec = _read_int_env("APPROVAL_TTL_SEC", 900)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(60, approval_ttl_sec))
+    run_store.expire_tool_approvals_before(cutoff.isoformat())
     event_bus = EventBus()
     retention_policy = SessionRetentionPolicy(
         store=run_store,
@@ -92,9 +99,10 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
         session_max_messages=memory_cfg.max_messages,
         session_compact_keep=memory_cfg.keep_recent_messages,
         tool_loop_max_steps=_read_int_env("TOOL_LOOP_MAX_STEPS", 3),
-        approval_ttl_sec=_read_int_env("APPROVAL_TTL_SEC", 900),
+        approval_ttl_sec=approval_ttl_sec,
         max_pending_approvals_per_user=_read_int_env("MAX_PENDING_APPROVALS_PER_USER", 3),
         session_workspaces_root=session_workspaces_root,
+        provider_registry=provider_registry,
         capability_registry=capability_registry,
         workspace_manager=workspace_manager,
         access_controller=access_controller,
@@ -129,5 +137,54 @@ def _read_provider_backend() -> str:
     aliases = {
         "codex_cli": "codex-cli",
         "codex": "codex-cli",
+        "quen": "qwen",
+        "qwen-openai": "qwen",
+        "deepseek-openai": "deepseek",
     }
     return aliases.get(raw, raw)
+
+
+def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -> ProviderRegistry:
+    active = _registry_name_for_backend(preferred_backend)
+    registry = ProviderRegistry(default_provider_name=active)
+    registry.register("codex_cli", CodexCliProvider(runner=runner), make_active=(active == "codex_cli"))
+    registry.register("anthropic", AnthropicProvider(), make_active=(active == "anthropic"))
+    registry.register(
+        "openai",
+        OpenAICompatibleProvider(
+            provider_name="openai",
+            api_key_env="OPENAI_API_KEY",
+            default_base_url="https://api.openai.com/v1",
+            default_model="gpt-4.1-mini",
+        ),
+        make_active=(active == "openai"),
+    )
+    registry.register(
+        "deepseek",
+        OpenAICompatibleProvider(
+            provider_name="deepseek",
+            api_key_env="DEEPSEEK_API_KEY",
+            default_base_url="https://api.deepseek.com/v1",
+            default_model="deepseek-chat",
+        ),
+        make_active=(active == "deepseek"),
+    )
+    registry.register(
+        "qwen",
+        OpenAICompatibleProvider(
+            provider_name="qwen",
+            api_key_env="QWEN_API_KEY",
+            default_base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            default_model="qwen-plus",
+            api_key=os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY") or "",
+        ),
+        make_active=(active == "qwen"),
+    )
+    registry.register("gemini", GeminiProvider(), make_active=(active == "gemini"))
+    return registry
+
+
+def _registry_name_for_backend(value: str) -> str:
+    if value == "codex-cli":
+        return "codex_cli"
+    return value

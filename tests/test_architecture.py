@@ -55,6 +55,7 @@ class TestCodexCliProvider(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(output, "hello")
         self.assertEqual(runner.last_argv[0:3], ["codex", "exec", "-"])
+        self.assertIn("--sandbox=workspace-write", runner.last_argv)
         self.assertEqual(runner.last_policy_profile, "balanced")
 
     async def test_execute_uses_policy_profile(self):
@@ -64,7 +65,19 @@ class TestCodexCliProvider(unittest.IsolatedAsyncioTestCase):
         output = await provider.execute("prompt", policy_profile="strict")
 
         self.assertEqual(output, "hello")
+        self.assertNotIn("--sandbox=workspace-write", runner.last_argv)
+        self.assertNotIn("--sandbox=danger-full-access", runner.last_argv)
         self.assertEqual(runner.last_policy_profile, "strict")
+
+    async def test_execute_trusted_uses_full_sandbox(self):
+        runner = FakeRunner(CommandResult(returncode=0, stdout="hello", stderr=""))
+        provider = CodexCliProvider(runner=runner)
+
+        output = await provider.execute("prompt", policy_profile="trusted")
+
+        self.assertEqual(output, "hello")
+        self.assertIn("--sandbox=danger-full-access", runner.last_argv)
+        self.assertEqual(runner.last_policy_profile, "trusted")
 
     async def test_generate_uses_messages_contract(self):
         runner = FakeRunner(CommandResult(returncode=0, stdout="hello", stderr=""))

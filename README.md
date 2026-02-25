@@ -419,7 +419,7 @@ Provider router behavior:
 
 Agent profiles are persisted in SQLite and seeded with:
 
-- `default` agent (`provider=codex_cli`, `policy_profile=balanced`)
+- `default` agent (`provider=codex_cli`, `policy_profile=trusted`)
 
 Supported policy profiles:
 
@@ -432,6 +432,12 @@ Execution profile behavior:
 - `strict`: command allowlist + workspace-root path enforcement + timeout cap `45s`
 - `balanced`: command allowlist + workspace-root path enforcement + timeout cap `120s`
 - `trusted`: relaxed command scope + timeout cap `300s`
+
+Codex CLI sandbox mode is forced by policy profile to avoid read-only startup defaults:
+
+- `strict`: codex sandbox flag not overridden
+- `balanced`: `--sandbox=workspace-write`
+- `trusted`: `--sandbox=danger-full-access`
 
 Each run emits `run.policy.applied` audit events with agent/profile metadata.
 

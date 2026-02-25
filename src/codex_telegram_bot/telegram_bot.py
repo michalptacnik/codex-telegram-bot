@@ -362,7 +362,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
         agent_service = context.bot_data.get("agent_service")
         session = agent_service.get_or_create_session(chat_id=update.effective_chat.id, user_id=user_id)
-        profile = "balanced"
+        profile = "trusted"
         session_obj = agent_service.get_session(session.session_id)
         if session_obj:
             agent = agent_service.get_agent(session_obj.current_agent_id)
