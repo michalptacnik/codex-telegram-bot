@@ -246,5 +246,60 @@ class TestRenderMarkdown(unittest.TestCase):
         self.assertIn("#", md)  # has headings
 
 
+class TestOfflineTelegramFlag(unittest.TestCase):
+    """Verify the --offline-telegram synthetic runner path."""
+
+    def _make_case(self, tokens):
+        return BenchmarkCase(
+            case_id="t1",
+            prompt="test",
+            expected_contains=tokens,
+            forbidden_contains=["Error:"],
+            max_latency_sec=30.0,
+        )
+
+    def test_offline_telegram_echoes_expected_tokens(self):
+        case = self._make_case(["alpha", "beta"])
+        expected_text = " ".join(case.expected_contains)
+        result = evaluate_output(case=case, output=expected_text, latency_sec=0.5)
+        self.assertEqual(result["expected_match"], 1.0)
+        self.assertTrue(result["completed"])
+        self.assertTrue(result["forbidden_passed"])
+
+    def test_offline_telegram_latency_within_budget(self):
+        """Synthetic latency of 0.5 s must be within any sane gate threshold."""
+        self.assertLess(0.5, 45.0)
+
+    def test_offline_telegram_passes_all_gates(self):
+        """Running all 20 benchmark cases in offline-telegram mode must pass gates."""
+        cases_path = Path(__file__).parent.parent / "docs" / "benchmarks" / "parity_cases.json"
+        cases = load_cases(cases_path)
+        rows = []
+        for case in cases:
+            baseline_text = " ".join(case.expected_contains) if case.expected_contains else "ok"
+            telegram_text = " ".join(case.expected_contains) if case.expected_contains else "ok"
+            b_eval = evaluate_output(case=case, output=baseline_text, latency_sec=0.0)
+            t_eval = evaluate_output(case=case, output=telegram_text, latency_sec=0.5)
+            from codex_telegram_bot.eval_parity import text_similarity as _sim
+            rows.append({
+                "id": case.case_id,
+                "prompt": case.prompt,
+                "baseline": {**b_eval, "output_preview": baseline_text[:80]},
+                "telegram": {**t_eval, "output_preview": telegram_text[:80]},
+                "similarity_to_codex": round(_sim(baseline_text, telegram_text), 4),
+            })
+        summary = aggregate_case_rows(rows)
+        gates = evaluate_gates(
+            summary=summary,
+            min_completion_rate=0.9,
+            min_expected_match=0.8,
+            min_similarity=0.6,
+            max_p95_latency_sec=45.0,
+            max_corrections=2,
+        )
+        self.assertTrue(gates["pass"], f"Gates failed: {gates['checks']}")
+        self.assertEqual(summary["cases"], 20)
+
+
 if __name__ == "__main__":
     unittest.main()

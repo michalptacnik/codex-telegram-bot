@@ -305,6 +305,7 @@ If your `codex` binary is in a different location, update the volume in `docker-
 - `GET /health`
 - `GET /api/metrics`
 - `GET /api/onboarding/status`
+- `GET /api/onboarding/readiness` (first-run checks: workspace, codex CLI, telegram token)
 - `GET /api/runs?limit=20`
 - `GET /api/sessions?limit=50`
 - `GET /api/sessions/{session_id}/detail`
@@ -565,6 +566,11 @@ Handoff lifecycle events (attached to `parent_run_id` timeline when provided):
 - `handoff.failed`
 
 ## Troubleshooting
+
+See [docs/support.md](docs/support.md) for the full troubleshooting playbook, FAQ,
+and bug reporting instructions.
+
+Quick checks:
 
 - `Error: codex CLI not found.`
   - Ensure `codex` is installed and available in `PATH` for the runtime user.

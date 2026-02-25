@@ -169,7 +169,7 @@ def create_app_with_config(
 ) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=str(base_dir / "templates"))
-    app = FastAPI(title="Codex Control Center", version="0.2.0-alpha")
+    app = FastAPI(title="Codex Control Center", version="0.2.0")
     app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
     onboarding = OnboardingStore(config_dir=config_dir)
     plugin_manager = PluginLifecycleManager(config_dir=config_dir or (Path.cwd() / ".codex-telegram-bot"))
@@ -196,6 +196,29 @@ def create_app_with_config(
             return token
         raise HTTPException(status_code=403, detail=f"Missing scope: {required_scope}")
 
+    def _opt_api_scope(request: Request, read_scope: str = "api:read", write_scope: str = "api:write") -> None:
+        """Optionally enforce API auth on non-v1 endpoints.
+
+        When LOCAL_API_KEYS is configured all /api/* requests must carry a valid
+        token.  The required scope is ``read_scope`` for safe (GET/HEAD) methods
+        and ``write_scope`` for all mutating methods.  When LOCAL_API_KEYS is not
+        configured the check is skipped so that local / dev deployments keep
+        working without configuration.
+        """
+        if not local_api_enabled:
+            return
+        token = _resolve_api_token(request)
+        if not token:
+            raise HTTPException(status_code=401, detail="Missing API token.")
+        scopes = local_api_keys.get(token)
+        if not scopes:
+            raise HTTPException(status_code=401, detail="Invalid API token.")
+        if "admin:*" in scopes:
+            return
+        required = read_scope if request.method in {"GET", "HEAD", "OPTIONS"} else write_scope
+        if required not in scopes:
+            raise HTTPException(status_code=403, detail=f"Missing scope: {required}")
+
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         metrics = agent_service.metrics()
@@ -211,35 +234,103 @@ def create_app_with_config(
         }
 
     @app.get("/api/metrics")
-    async def api_metrics() -> Dict[str, int]:
+    async def api_metrics(request: Request) -> Dict[str, int]:
+        _opt_api_scope(request)
         return agent_service.metrics()
 
     @app.get("/api/reliability")
-    async def api_reliability(limit: int = 500) -> Dict[str, Any]:
+    async def api_reliability(request: Request, limit: int = 500) -> Dict[str, Any]:
+        _opt_api_scope(request)
         return agent_service.reliability_snapshot(limit=max(10, min(limit, 5000)))
 
     @app.get("/api/onboarding/status")
-    async def onboarding_status() -> Dict[str, Any]:
+    async def onboarding_status(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
         return onboarding.load()
 
+    @app.get("/api/onboarding/readiness")
+    async def onboarding_readiness(request: Request) -> Dict[str, Any]:
+        """Return structured readiness checks for first-run validation."""
+        import shutil
+        import subprocess as _subprocess
+        _opt_api_scope(request)
+        checks: Dict[str, Any] = {}
+
+        # Workspace check
+        ws_root_env = os.environ.get("EXECUTION_WORKSPACE_ROOT", "")
+        if ws_root_env:
+            ws_path = Path(ws_root_env)
+            ws_exists = ws_path.is_dir()
+            ws_writable = False
+            if ws_exists:
+                try:
+                    test_file = ws_path / ".codex_write_test"
+                    test_file.touch()
+                    test_file.unlink()
+                    ws_writable = True
+                except OSError:
+                    pass
+            checks["workspace"] = {
+                "pass": ws_exists and ws_writable,
+                "path": ws_root_env,
+                "exists": ws_exists,
+                "writable": ws_writable,
+            }
+        else:
+            checks["workspace"] = {"pass": False, "reason": "EXECUTION_WORKSPACE_ROOT not set"}
+
+        # Codex CLI check
+        codex_path = shutil.which("codex")
+        codex_ok = codex_path is not None
+        if codex_ok:
+            try:
+                result = _subprocess.run(
+                    ["codex", "--version"],
+                    capture_output=True, text=True, timeout=5
+                )
+                codex_version = result.stdout.strip() or result.stderr.strip() or "unknown"
+                codex_ok = result.returncode == 0
+            except Exception:
+                codex_version = "unavailable"
+                codex_ok = False
+        else:
+            codex_version = "not found"
+        checks["codex_cli"] = {"pass": codex_ok, "path": codex_path, "version": codex_version}
+
+        # Telegram token check
+        tg_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+        tg_present = bool(tg_token and len(tg_token) > 20)
+        checks["telegram_token"] = {
+            "pass": tg_present,
+            "configured": tg_present,
+            "hint": "Set TELEGRAM_BOT_TOKEN env var" if not tg_present else "",
+        }
+
+        overall = all(c.get("pass", False) for c in checks.values())
+        return {"ready": overall, "checks": checks}
+
     @app.get("/api/runs")
-    async def list_runs(limit: int = 20) -> List[Dict[str, Any]]:
+    async def list_runs(request: Request, limit: int = 20) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         runs = agent_service.list_recent_runs(limit=max(1, min(limit, 100)))
         return [_run_to_dict(r) for r in runs]
 
     @app.get("/api/runs/{run_id}")
-    async def get_run(run_id: str) -> Dict[str, Any]:
+    async def get_run(request: Request, run_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request)
         run = agent_service.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
         return _run_to_dict(run)
 
     @app.get("/api/error-catalog")
-    async def api_error_catalog() -> List[Dict[str, Any]]:
+    async def api_error_catalog(request: Request) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         return _catalog_to_dict()
 
     @app.get("/api/runs/{run_id}/recovery-options")
-    async def get_recovery_options(run_id: str) -> Dict[str, Any]:
+    async def get_recovery_options(request: Request, run_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request)
         run = agent_service.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -259,7 +350,8 @@ def create_app_with_config(
         return {"run_id": run_id, "error_code": code, "actions": actions}
 
     @app.get("/api/runs/{run_id}/events")
-    async def get_run_events(run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    async def get_run_events(request: Request, run_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         run = agent_service.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -267,7 +359,8 @@ def create_app_with_config(
         return [_event_to_dict(e) for e in events]
 
     @app.get("/api/runs/{run_id}/artifact.txt")
-    async def download_run_artifact(run_id: str) -> PlainTextResponse:
+    async def download_run_artifact(request: Request, run_id: str) -> PlainTextResponse:
+        _opt_api_scope(request)
         run = agent_service.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -298,7 +391,8 @@ def create_app_with_config(
         return PlainTextResponse(content=content, headers=headers)
 
     @app.get("/api/agents")
-    async def api_list_agents() -> List[Dict[str, Any]]:
+    async def api_list_agents(request: Request) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         agents = agent_service.list_agents()
         return [
             {
@@ -315,7 +409,8 @@ def create_app_with_config(
         ]
 
     @app.get("/api/sessions")
-    async def api_list_sessions(limit: int = 50) -> List[Dict[str, Any]]:
+    async def api_list_sessions(request: Request, limit: int = 50) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         sessions = agent_service.list_recent_sessions(limit=max(1, min(limit, 200)))
         return [
             {
@@ -333,25 +428,30 @@ def create_app_with_config(
         ]
 
     @app.get("/api/approvals")
-    async def api_list_approvals(limit: int = 200) -> List[Dict[str, Any]]:
+    async def api_list_approvals(request: Request, limit: int = 200) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         items = agent_service.list_all_pending_tool_approvals(limit=max(1, min(limit, 500)))
         return items
 
     @app.get("/api/retrieval")
-    async def api_retrieval(query: str, limit: int = 4) -> Dict[str, Any]:
+    async def api_retrieval(request: Request, query: str, limit: int = 4) -> Dict[str, Any]:
+        _opt_api_scope(request)
         context_lines = agent_service.build_retrieval_context(user_prompt=query, limit=max(1, min(limit, 10)))
         return {"query": query, "context": context_lines}
 
     @app.get("/api/retrieval/stats")
-    async def api_retrieval_stats() -> Dict[str, Any]:
+    async def api_retrieval_stats(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
         return agent_service.retrieval_stats()
 
     @app.post("/api/retrieval/refresh")
-    async def api_retrieval_refresh() -> Dict[str, Any]:
+    async def api_retrieval_refresh(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
         return agent_service.refresh_retrieval_index(force=True)
 
     @app.post("/api/approvals/approve")
-    async def api_approve_tool(req: ApproveToolRequest) -> Dict[str, Any]:
+    async def api_approve_tool(request: Request, req: ApproveToolRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
         output = await agent_service.approve_tool_action(
             approval_id=req.approval_id,
             chat_id=req.chat_id,
@@ -360,7 +460,8 @@ def create_app_with_config(
         return {"approval_id": req.approval_id, "output": output}
 
     @app.post("/api/approvals/deny")
-    async def api_deny_tool(req: ApproveToolRequest) -> Dict[str, Any]:
+    async def api_deny_tool(request: Request, req: ApproveToolRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
         output = agent_service.deny_tool_action(
             approval_id=req.approval_id,
             chat_id=req.chat_id,
@@ -369,12 +470,14 @@ def create_app_with_config(
         return {"approval_id": req.approval_id, "output": output}
 
     @app.post("/api/jobs/{job_id}/cancel")
-    async def api_cancel_job(job_id: str) -> Dict[str, Any]:
+    async def api_cancel_job(request: Request, job_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
         cancelled = agent_service.cancel_job(job_id)
         return {"job_id": job_id, "cancelled": cancelled, "status": agent_service.job_status(job_id)}
 
     @app.post("/api/handoffs")
-    async def api_handoff(req: HandoffRequest) -> Dict[str, Any]:
+    async def api_handoff(request: Request, req: HandoffRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
         return await agent_service.handoff_prompt(
             from_agent_id=req.from_agent_id,
             to_agent_id=req.to_agent_id,
@@ -383,7 +486,8 @@ def create_app_with_config(
         )
 
     @app.post("/api/runs/{run_id}/recover")
-    async def api_recover_run(run_id: str, req: RecoveryRequest) -> Dict[str, Any]:
+    async def api_recover_run(request: Request, run_id: str, req: RecoveryRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
         run = agent_service.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -442,7 +546,8 @@ def create_app_with_config(
         }
 
     @app.get("/api/recovery/playbook")
-    async def api_recovery_playbook() -> Dict[str, Any]:
+    async def api_recovery_playbook(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
         return {
             "actions": _allowed_recovery_actions(),
             "docs": "/docs/recovery_playbook.md",
@@ -511,15 +616,18 @@ def create_app_with_config(
         return {"items": items}
 
     @app.get("/api/plugins")
-    async def api_plugins() -> List[Dict[str, Any]]:
+    async def api_plugins(request: Request) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         return [_plugin_to_dict(p) for p in plugin_manager.list_plugins()]
 
     @app.get("/api/plugins/audit")
-    async def api_plugins_audit(limit: int = 200) -> List[Dict[str, Any]]:
+    async def api_plugins_audit(request: Request, limit: int = 200) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
         return [_plugin_audit_to_dict(e) for e in plugin_manager.list_audit_events(limit=max(1, min(limit, 1000)))]
 
     @app.post("/api/plugins/install")
-    async def api_plugins_install(req: PluginInstallRequest) -> Dict[str, Any]:
+    async def api_plugins_install(request: Request, req: PluginInstallRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
         try:
             plugin = plugin_manager.install_plugin(manifest_path=Path(req.manifest_path), enable=req.enable)
         except Exception as exc:
@@ -527,7 +635,8 @@ def create_app_with_config(
         return _plugin_to_dict(plugin)
 
     @app.post("/api/plugins/{plugin_id}/enable")
-    async def api_plugins_enable(plugin_id: str) -> Dict[str, Any]:
+    async def api_plugins_enable(request: Request, plugin_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
         try:
             plugin = plugin_manager.enable_plugin(plugin_id=plugin_id)
         except Exception as exc:
@@ -535,7 +644,8 @@ def create_app_with_config(
         return _plugin_to_dict(plugin)
 
     @app.post("/api/plugins/{plugin_id}/disable")
-    async def api_plugins_disable(plugin_id: str) -> Dict[str, Any]:
+    async def api_plugins_disable(request: Request, plugin_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
         try:
             plugin = plugin_manager.disable_plugin(plugin_id=plugin_id)
         except Exception as exc:
@@ -543,12 +653,14 @@ def create_app_with_config(
         return _plugin_to_dict(plugin)
 
     @app.post("/api/plugins/{plugin_id}/uninstall")
-    async def api_plugins_uninstall(plugin_id: str) -> Dict[str, Any]:
+    async def api_plugins_uninstall(request: Request, plugin_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
         deleted = plugin_manager.uninstall_plugin(plugin_id=plugin_id)
         return {"plugin_id": plugin_id, "deleted": deleted}
 
     @app.post("/api/plugins/{plugin_id}/update")
-    async def api_plugins_update(plugin_id: str, req: PluginUpdateRequest) -> Dict[str, Any]:
+    async def api_plugins_update(request: Request, plugin_id: str, req: PluginUpdateRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
         try:
             plugin = plugin_manager.update_plugin(plugin_id=plugin_id, manifest_path=Path(req.manifest_path))
         except Exception as exc:
@@ -900,8 +1012,9 @@ def create_app_with_config(
     # ------------------------------------------------------------------
 
     @app.get("/api/providers")
-    async def api_providers():
+    async def api_providers(request: Request):
         """List all registered providers and their capabilities."""
+        _opt_api_scope(request)
         if provider_registry is None:
             return {"providers": [], "active": None}
         return {
@@ -913,6 +1026,7 @@ def create_app_with_config(
     @app.post("/api/providers/switch")
     async def api_provider_switch(request: Request):
         """Switch the active provider.  Body: {\"name\": \"...\"}"""
+        _opt_api_scope(request, write_scope="admin:*")
         if provider_registry is None:
             raise HTTPException(status_code=503, detail="No provider registry configured")
         body = await request.json()
@@ -926,8 +1040,9 @@ def create_app_with_config(
             raise HTTPException(status_code=404, detail=str(exc))
 
     @app.get("/api/providers/health")
-    async def api_providers_health():
+    async def api_providers_health(request: Request):
         """Return aggregated health check for all providers."""
+        _opt_api_scope(request)
         if provider_registry is None:
             return {"error": "no provider registry"}
         return await provider_registry.health()
@@ -939,11 +1054,14 @@ def create_app_with_config(
     @app.get("/api/logs/stream")
     async def api_logs_stream(request: Request, limit: int = 50, max_polls: int = 0):
         """SSE endpoint streaming recent run events as JSON lines.
+        Auth is checked before the stream is opened.
+
 
         Clients connect and receive a batch of recent events, then stay
         connected for new events (polled every 2 s from the store).
         Pass ``max_polls=N`` to limit polling iterations (useful for tests).
         """
+        _opt_api_scope(request)
         from fastapi.responses import StreamingResponse
         import json as _json
 
@@ -1000,8 +1118,9 @@ def create_app_with_config(
     # ------------------------------------------------------------------
 
     @app.get("/api/mission-metrics")
-    async def api_mission_metrics():
+    async def api_mission_metrics(request: Request):
         """Return a live mission dashboard snapshot (EPIC 10 MetricsCollector)."""
+        _opt_api_scope(request)
         if metrics_collector is None:
             # Provide a basic stub so the endpoint always works
             return {
@@ -1012,8 +1131,9 @@ def create_app_with_config(
         return snapshot.to_dict()
 
     @app.get("/api/mission-metrics/text")
-    async def api_mission_metrics_text():
+    async def api_mission_metrics_text(request: Request):
         """Return the metrics dashboard as plain text (for CLI / Telegram)."""
+        _opt_api_scope(request)
         from fastapi.responses import PlainTextResponse as _PlainTextResponse
         if metrics_collector is None:
             return _PlainTextResponse("metrics_collector not configured")
@@ -1025,8 +1145,9 @@ def create_app_with_config(
     # ------------------------------------------------------------------
 
     @app.get("/api/sessions/{session_id}/detail")
-    async def api_session_detail(session_id: str):
+    async def api_session_detail(request: Request, session_id: str):
         """Return metadata and recent messages for a specific session."""
+        _opt_api_scope(request)
         session = agent_service.get_session(session_id)
         if session is None:
             from fastapi import HTTPException as _HTTPException

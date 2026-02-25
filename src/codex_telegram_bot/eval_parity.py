@@ -317,12 +317,11 @@ async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
         cases = cases[: args.max_cases]
 
     offline = getattr(args, "offline_baseline", False)
+    offline_telegram = getattr(args, "offline_telegram", False)
 
     rows: List[Dict[str, Any]] = []
-    async with TelegramAgentRunner(
-        workspace_root=Path(args.workspace_root).expanduser().resolve(),
-        policy_profile=args.policy_profile,
-    ) as telegram_runner:
+
+    async def _collect_rows(telegram_runner) -> None:
         for case in cases:
             if offline:
                 baseline_output, _, baseline_latency = _offline_baseline(case)
@@ -331,7 +330,11 @@ async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
                     prompt=case.prompt,
                     timeout_sec=args.timeout_sec,
                 )
-            telegram_output, telegram_latency = await telegram_runner.run_prompt(case.prompt)
+            if offline_telegram:
+                telegram_output = " ".join(case.expected_contains) if case.expected_contains else "ok"
+                telegram_latency = 0.5
+            else:
+                telegram_output, telegram_latency = await telegram_runner.run_prompt(case.prompt)
             baseline_eval = evaluate_output(case=case, output=baseline_output, latency_sec=baseline_latency)
             telegram_eval = evaluate_output(case=case, output=telegram_output, latency_sec=telegram_latency)
             sim = text_similarity(baseline_output, telegram_output)
@@ -351,6 +354,15 @@ async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
                 }
             )
 
+    if offline_telegram:
+        await _collect_rows(None)
+    else:
+        async with TelegramAgentRunner(
+            workspace_root=Path(args.workspace_root).expanduser().resolve(),
+            policy_profile=args.policy_profile,
+        ) as telegram_runner:
+            await _collect_rows(telegram_runner)
+
     summary = aggregate_case_rows(rows)
     gates = evaluate_gates(
         summary=summary,
@@ -366,6 +378,7 @@ async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
         "workspace_root": str(Path(args.workspace_root).expanduser().resolve()),
         "policy_profile": args.policy_profile,
         "offline_baseline": offline,
+        "offline_telegram": offline_telegram,
         "category_filter": category_filter,
         "summary": summary,
         "gates": gates,
@@ -395,6 +408,17 @@ def _build_parser() -> argparse.ArgumentParser:
             "Skip codex CLI baseline calls and use synthetic expected-token "
             "output as the baseline. Useful in CI environments where the codex "
             "CLI is not installed."
+        ),
+    )
+    parser.add_argument(
+        "--offline-telegram",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the live TelegramAgentRunner and use synthetic expected-token "
+            "output as the telegram runner output. Combine with --offline-baseline "
+            "for a fully offline CI run that validates gate logic without any "
+            "external dependencies."
         ),
     )
     parser.add_argument(

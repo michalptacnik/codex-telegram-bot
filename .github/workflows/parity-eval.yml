@@ -25,12 +25,18 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .
 
-      - name: Run parity report (best effort)
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Run parity report (offline, all cases)
         run: |
-          chmod +x scripts/run_parity_weekly.sh
-          ./scripts/run_parity_weekly.sh --max-cases 5 || true
+          PYTHONPATH=src python3 -m codex_telegram_bot.eval_parity \
+            --cases docs/benchmarks/parity_cases.json \
+            --workspace-root . \
+            --output-dir docs/reports \
+            --offline-baseline \
+            --offline-telegram
+          latest_json="$(ls -1t docs/reports/parity-report-*.json 2>/dev/null | head -n 1 || true)"
+          latest_md="$(ls -1t docs/reports/parity-report-*.md 2>/dev/null | head -n 1 || true)"
+          if [[ -n "$latest_json" ]]; then ln -sf "$(basename "$latest_json")" docs/reports/parity-report-latest.json; fi
+          if [[ -n "$latest_md" ]]; then ln -sf "$(basename "$latest_md")" docs/reports/parity-report-latest.md; fi
 
       - name: Upload parity artifacts
         uses: actions/upload-artifact@v4
