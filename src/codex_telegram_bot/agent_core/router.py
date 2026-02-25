@@ -1,12 +1,15 @@
-from typing import Any, Awaitable, Callable, Dict, Optional
+from __future__ import annotations
 
-from codex_telegram_bot.services.agent_service import AgentService
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
+
+if TYPE_CHECKING:
+    from codex_telegram_bot.services.agent_service import AgentService
 
 
 class AgentRouter:
     """Routes requests from Agent entrypoint into the service layer."""
 
-    def __init__(self, agent_service: AgentService):
+    def __init__(self, agent_service: "AgentService"):
         self._agent_service = agent_service
 
     async def route_prompt(

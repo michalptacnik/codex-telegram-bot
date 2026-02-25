@@ -152,11 +152,21 @@ def _parse_local_api_keys(raw: str) -> Dict[str, Set[str]]:
     return out
 
 
-def create_app(agent_service: AgentService) -> FastAPI:
-    return create_app_with_config(agent_service=agent_service, config_dir=None)
+def create_app(agent_service: AgentService, provider_registry=None, metrics_collector=None) -> FastAPI:
+    return create_app_with_config(
+        agent_service=agent_service,
+        config_dir=None,
+        provider_registry=provider_registry,
+        metrics_collector=metrics_collector,
+    )
 
 
-def create_app_with_config(agent_service: AgentService, config_dir: Path | None) -> FastAPI:
+def create_app_with_config(
+    agent_service: AgentService,
+    config_dir: "Path | None",
+    provider_registry=None,
+    metrics_collector=None,
+) -> FastAPI:
     base_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=str(base_dir / "templates"))
     app = FastAPI(title="Codex Control Center", version="0.2.0-alpha")
@@ -884,5 +894,130 @@ def create_app_with_config(agent_service: AgentService, config_dir: Path | None)
                 "provider_health": provider_health,
             },
         )
+
+    # ------------------------------------------------------------------
+    # EPIC 3: Provider management API
+    # ------------------------------------------------------------------
+
+    @app.get("/api/providers")
+    async def api_providers():
+        """List all registered providers and their capabilities."""
+        if provider_registry is None:
+            return {"providers": [], "active": None}
+        return {
+            "providers": provider_registry.list_providers(),
+            "active": provider_registry.get_active_name(),
+            "switch_history": provider_registry.switch_history[-10:],
+        }
+
+    @app.post("/api/providers/switch")
+    async def api_provider_switch(request: Request):
+        """Switch the active provider.  Body: {\"name\": \"...\"}"""
+        if provider_registry is None:
+            raise HTTPException(status_code=503, detail="No provider registry configured")
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        if not name:
+            raise HTTPException(status_code=400, detail="'name' is required")
+        try:
+            msg = provider_registry.switch(name)
+            return {"ok": True, "message": msg, "active": provider_registry.get_active_name()}
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+
+    @app.get("/api/providers/health")
+    async def api_providers_health():
+        """Return aggregated health check for all providers."""
+        if provider_registry is None:
+            return {"error": "no provider registry"}
+        return await provider_registry.health()
+
+    # ------------------------------------------------------------------
+    # EPIC 4: Streaming log viewer (Server-Sent Events)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/logs/stream")
+    async def api_logs_stream(request: Request, limit: int = 50, max_polls: int = 0):
+        """SSE endpoint streaming recent run events as JSON lines.
+
+        Clients connect and receive a batch of recent events, then stay
+        connected for new events (polled every 2 s from the store).
+        Pass ``max_polls=N`` to limit polling iterations (useful for tests).
+        """
+        from fastapi.responses import StreamingResponse
+        import json as _json
+
+        async def _event_generator():
+            import json as _json2
+            import asyncio as _asyncio
+            seen_run_ids: set = set()
+            # Initial batch: emit recent runs as events
+            runs = agent_service.list_recent_runs(limit=limit)
+            for run in runs:
+                rid = run.run_id
+                if rid not in seen_run_ids:
+                    seen_run_ids.add(rid)
+                    payload = _json2.dumps({
+                        "run_id": rid,
+                        "event_type": "run.status",
+                        "payload": {"status": run.status, "prompt": (run.prompt or "")[:120]},
+                        "created_at": run.created_at.isoformat() if run.created_at else "",
+                    })
+                    yield f"data: {payload}\n\n"
+            # Tail: poll for new runs every 2 s
+            polls = 0
+            while True:
+                if await request.is_disconnected():
+                    break
+                if max_polls > 0 and polls >= max_polls:
+                    break
+                polls += 1
+                await _asyncio.sleep(0.05 if max_polls > 0 else 2)
+                new_runs = agent_service.list_recent_runs(limit=10)
+                for run in new_runs:
+                    rid = run.run_id
+                    if rid not in seen_run_ids:
+                        seen_run_ids.add(rid)
+                        payload = _json2.dumps({
+                            "run_id": rid,
+                            "event_type": "run.status",
+                            "payload": {"status": run.status, "prompt": (run.prompt or "")[:120]},
+                            "created_at": run.created_at.isoformat() if run.created_at else "",
+                        })
+                        yield f"data: {payload}\n\n"
+
+        return StreamingResponse(
+            _event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # EPIC 5: Metrics API (wired to MetricsCollector from EPIC 10)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/mission-metrics")
+    async def api_mission_metrics():
+        """Return a live mission dashboard snapshot (EPIC 10 MetricsCollector)."""
+        if metrics_collector is None:
+            # Provide a basic stub so the endpoint always works
+            return {
+                "error": "metrics_collector not configured",
+                "hint": "Pass metrics_collector to create_app()",
+            }
+        snapshot = metrics_collector.snapshot()
+        return snapshot.to_dict()
+
+    @app.get("/api/mission-metrics/text")
+    async def api_mission_metrics_text():
+        """Return the metrics dashboard as plain text (for CLI / Telegram)."""
+        from fastapi.responses import PlainTextResponse as _PlainTextResponse
+        if metrics_collector is None:
+            return _PlainTextResponse("metrics_collector not configured")
+        snapshot = metrics_collector.snapshot()
+        return _PlainTextResponse(snapshot.format_text())
 
     return app
