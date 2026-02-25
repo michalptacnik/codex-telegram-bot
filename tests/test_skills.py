@@ -31,6 +31,19 @@ class TestSkillManager(unittest.TestCase):
                     else:
                         os.environ[k] = v
 
+    def test_existing_registry_gets_builtin_skill_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = Path(tmp)
+            reg = cfg / "skills" / "registry.json"
+            reg.parent.mkdir(parents=True, exist_ok=True)
+            reg.write_text(
+                '{"skills":{"smtp_email":{"skill_id":"smtp_email","name":"SMTP Email","description":"","keywords":[],"tools":["send_email_smtp"],"requires_env":[],"enabled":true,"source":"builtin","trusted":true}}}\n',
+                encoding="utf-8",
+            )
+            mgr = SkillManager(config_dir=cfg)
+            rows = {s.skill_id for s in mgr.list_skills()}
+            self.assertIn("email_ops", rows)
+
 
 class TestEmailTool(unittest.TestCase):
     def test_dry_run(self):

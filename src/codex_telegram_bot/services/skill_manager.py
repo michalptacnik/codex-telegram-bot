@@ -7,6 +7,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib import parse, request
 
+from codex_telegram_bot.services.email_assets import EmailAssetsStore
+from codex_telegram_bot.tools.email_assets import (
+    ContactListTool,
+    ContactRemoveTool,
+    ContactUpsertTool,
+    EmailValidateTool,
+    SendEmailTemplateTool,
+    TemplateDeleteTool,
+    TemplateGetTool,
+    TemplateListTool,
+    TemplateUpsertTool,
+)
 from codex_telegram_bot.tools.email import SendEmailSmtpTool
 from codex_telegram_bot.tools.outbound import GitHubCloseIssueTool, GitHubCommentTool, GitHubCreateIssueTool
 
@@ -24,11 +36,20 @@ class SkillSpec:
     trusted: bool = True
 
 
-_TOOL_FACTORIES = {
-    "send_email_smtp": lambda: SendEmailSmtpTool(),
-    "github_comment": lambda: GitHubCommentTool(token=os.environ.get("GITHUB_TOKEN", "")),
-    "github_close_issue": lambda: GitHubCloseIssueTool(token=os.environ.get("GITHUB_TOKEN", "")),
-    "github_create_issue": lambda: GitHubCreateIssueTool(token=os.environ.get("GITHUB_TOKEN", "")),
+_SUPPORTED_TOOLS = {
+    "send_email_smtp",
+    "email_validate",
+    "contact_upsert",
+    "contact_list",
+    "contact_remove",
+    "template_upsert",
+    "template_list",
+    "template_get",
+    "template_delete",
+    "send_email_template",
+    "github_comment",
+    "github_close_issue",
+    "github_create_issue",
 }
 
 
@@ -37,6 +58,7 @@ class SkillManager:
         self._config_dir = config_dir.expanduser().resolve()
         self._skills_dir = self._config_dir / "skills"
         self._registry_path = self._skills_dir / "registry.json"
+        self._email_store = EmailAssetsStore(config_dir=self._config_dir)
         self._skills_dir.mkdir(parents=True, exist_ok=True)
         self._trusted_hosts = self._read_trusted_hosts()
         self._ensure_registry()
@@ -97,15 +119,43 @@ class SkillManager:
         out: Dict[str, Any] = {}
         for skill in skills:
             for tool_name in skill.tools:
-                factory = _TOOL_FACTORIES.get(tool_name)
-                if not factory:
+                tool = self._build_tool(tool_name)
+                if tool is None:
                     continue
-                out[tool_name] = factory()
+                out[tool_name] = tool
         return out
 
+    def _build_tool(self, tool_name: str) -> Optional[Any]:
+        name = (tool_name or "").strip().lower()
+        if name == "send_email_smtp":
+            return SendEmailSmtpTool()
+        if name == "email_validate":
+            return EmailValidateTool()
+        if name == "contact_upsert":
+            return ContactUpsertTool(self._email_store)
+        if name == "contact_list":
+            return ContactListTool(self._email_store)
+        if name == "contact_remove":
+            return ContactRemoveTool(self._email_store)
+        if name == "template_upsert":
+            return TemplateUpsertTool(self._email_store)
+        if name == "template_list":
+            return TemplateListTool(self._email_store)
+        if name == "template_get":
+            return TemplateGetTool(self._email_store)
+        if name == "template_delete":
+            return TemplateDeleteTool(self._email_store)
+        if name == "send_email_template":
+            return SendEmailTemplateTool(self._email_store)
+        if name == "github_comment":
+            return GitHubCommentTool(token=os.environ.get("GITHUB_TOKEN", ""))
+        if name == "github_close_issue":
+            return GitHubCloseIssueTool(token=os.environ.get("GITHUB_TOKEN", ""))
+        if name == "github_create_issue":
+            return GitHubCreateIssueTool(token=os.environ.get("GITHUB_TOKEN", ""))
+        return None
+
     def _ensure_registry(self) -> None:
-        if self._registry_path.exists():
-            return
         seeds = {
             "skills": {
                 "smtp_email": asdict(
@@ -116,6 +166,36 @@ class SkillManager:
                         keywords=["email", "mail", "smtp", "send message", "gmail"],
                         tools=["send_email_smtp"],
                         requires_env=["SMTP_HOST", "SMTP_USER", "SMTP_APP_PASSWORD"],
+                        enabled=True,
+                        source="builtin",
+                        trusted=True,
+                    )
+                ),
+                "email_ops": asdict(
+                    SkillSpec(
+                        skill_id="email_ops",
+                        name="Email Operations",
+                        description="Email validation, contact management, and template management.",
+                        keywords=[
+                            "validate email",
+                            "email validation",
+                            "contact list",
+                            "contact",
+                            "template",
+                            "email template",
+                        ],
+                        tools=[
+                            "email_validate",
+                            "contact_upsert",
+                            "contact_list",
+                            "contact_remove",
+                            "template_upsert",
+                            "template_list",
+                            "template_get",
+                            "template_delete",
+                            "send_email_template",
+                        ],
+                        requires_env=[],
                         enabled=True,
                         source="builtin",
                         trusted=True,
@@ -136,7 +216,18 @@ class SkillManager:
                 ),
             }
         }
-        self._write_registry(seeds)
+        if not self._registry_path.exists():
+            self._write_registry(seeds)
+            return
+        current = self._load_registry()
+        skills = current.setdefault("skills", {})
+        changed = False
+        for sid, payload in seeds.get("skills", {}).items():
+            if sid not in skills:
+                skills[sid] = payload
+                changed = True
+        if changed:
+            self._write_registry(current)
 
     def _upsert(self, skill: SkillSpec) -> None:
         registry = self._load_registry()
@@ -193,9 +284,9 @@ def _manifest_to_skill(payload: Dict[str, Any], source: str, trusted: bool) -> S
     tools = [str(x).strip().lower() for x in list(payload.get("tools") or []) if str(x).strip()]
     if not tools:
         raise ValueError("Skill manifest must declare at least one tool.")
-    for tool_name in tools:
-        if tool_name not in _TOOL_FACTORIES:
-            raise ValueError(f"Unsupported tool in manifest: {tool_name}")
+        for tool_name in tools:
+            if tool_name not in _SUPPORTED_TOOLS:
+                raise ValueError(f"Unsupported tool in manifest: {tool_name}")
     return SkillSpec(
         skill_id=skill_id,
         name=str(payload.get("name") or skill_id).strip(),

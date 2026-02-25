@@ -1,6 +1,13 @@
 import unittest
 
-from codex_telegram_bot.telegram_bot import _parse_email_command_spec, _parse_gh_command_spec
+from codex_telegram_bot.telegram_bot import (
+    _parse_contact_spec,
+    _parse_email_check_spec,
+    _parse_email_command_spec,
+    _parse_email_template_spec,
+    _parse_gh_command_spec,
+    _parse_template_spec,
+)
 
 
 class TestEmailCommandParser(unittest.TestCase):
@@ -33,3 +40,26 @@ class TestGhCommandParser(unittest.TestCase):
         spec, err = _parse_gh_command_spec(["close", "owner/repo", "14", "not_planned"])
         self.assertEqual(err, "")
         self.assertEqual(spec["name"], "github_close_issue")
+
+
+class TestEmailOpsParsers(unittest.TestCase):
+    def test_parse_email_check(self):
+        spec, err = _parse_email_check_spec(["user@example.com"])
+        self.assertEqual(err, "")
+        self.assertEqual(spec["name"], "email_validate")
+
+    def test_parse_contact_add(self):
+        spec, err = _parse_contact_spec(["add", "user@example.com", "John", "Doe"])
+        self.assertEqual(err, "")
+        self.assertEqual(spec["name"], "contact_upsert")
+
+    def test_parse_template_save(self):
+        spec, err = _parse_template_spec(["save", "welcome", "|", "Hello", "|", "Body"])
+        self.assertEqual(err, "")
+        self.assertEqual(spec["name"], "template_upsert")
+
+    def test_parse_email_template(self):
+        spec, err = _parse_email_template_spec(["--dry-run", "welcome", "user@example.com"])
+        self.assertEqual(err, "")
+        self.assertEqual(spec["name"], "send_email_template")
+        self.assertTrue(spec["args"]["dry_run"])

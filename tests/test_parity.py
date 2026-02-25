@@ -829,6 +829,10 @@ class TestParity10CommandSurface:
             "/continue",
             "/email",
             "/gh",
+            "/email-check",
+            "/contact",
+            "/template",
+            "/email-template",
         ]
         for cmd in expected_commands:
             assert cmd in source, f"Command {cmd} not found in telegram_bot source"
@@ -853,6 +857,10 @@ class TestParity10CommandSurface:
             "handle_continue",
             "handle_email",
             "handle_gh",
+            "handle_email_check",
+            "handle_contact",
+            "handle_template",
+            "handle_email_template",
         ]
         for fn_name in required:
             assert f"def {fn_name}" in source, f"Missing handler: {fn_name}"

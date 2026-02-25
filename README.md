@@ -31,9 +31,16 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - `/status`
   - `/help`
   - `/workspace`
+  - `/skills`
   - `/new`
   - `/resume`
   - `/branch`
+  - `/email`
+  - `/email-check`
+  - `/email-template`
+  - `/contact`
+  - `/template`
+  - `/gh`
   - `/pending`
   - `/approve <approval_id>`
   - `/deny <approval_id>`
@@ -540,6 +547,13 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - `3) Show pending`
 - `/interrupt` cancels active run for current chat (queued job + in-flight task).
 - `/continue` reuses latest user prompt and asks the agent to continue the task.
+- Shortcut command surface for common workflows:
+  - `/email [--dry-run] to@example.com | Subject | Body`
+  - `/email-check <email>`
+  - `/contact add <email> [name...] | list | remove <email>`
+  - `/template save <id> | <subject> | <body> | list | show <id> | delete <id>`
+  - `/email-template [--dry-run] <template_id> <to_email>`
+  - `/gh comment|create|close ...`
 - Safe replay guardrails:
   - high-risk replays require explicit confirmation (`/continue yes`)
   - completed tool steps can be checkpoint-skipped on identical replay to avoid duplicate execution
@@ -549,6 +563,7 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
 - Skills are provider-agnostic: same skill runtime works with `codex_cli`, `deepseek`, `openai`, `gemini`, etc.
 - Built-in seeded skills:
   - `smtp_email` (enabled by default): provides `send_email_smtp` tool
+  - `email_ops` (enabled by default): provides validation, contacts, templates, and template-send tools
   - `github_outbound` (disabled by default): provides GitHub outbound tools
 - Skill lifecycle:
   - install from trusted manifest URL (`/skills` page or `POST /api/skills/install`)

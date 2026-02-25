@@ -143,6 +143,75 @@ def _parse_gh_command_spec(args: List[str]) -> tuple[Optional[dict], str]:
     return None, "Error: unknown /gh operation. Use comment, create, or close."
 
 
+def _parse_email_check_spec(args: List[str]) -> tuple[Optional[dict], str]:
+    email = str((args[0] if args else "") or "").strip()
+    if not email:
+        return None, "Usage: /email-check <email>"
+    return {"name": "email_validate", "args": {"email": email}}, ""
+
+
+def _parse_contact_spec(args: List[str]) -> tuple[Optional[dict], str]:
+    tokens = [str(a or "").strip() for a in args if str(a or "").strip()]
+    if not tokens:
+        return None, "Usage: /contact add <email> [name...] | list | remove <email>"
+    op = tokens[0].lower()
+    if op == "list":
+        return {"name": "contact_list", "args": {}}, ""
+    if op == "add":
+        if len(tokens) < 2:
+            return None, "Usage: /contact add <email> [name...]"
+        return {
+            "name": "contact_upsert",
+            "args": {"email": tokens[1], "name": " ".join(tokens[2:]).strip()},
+        }, ""
+    if op == "remove":
+        if len(tokens) < 2:
+            return None, "Usage: /contact remove <email>"
+        return {"name": "contact_remove", "args": {"email": tokens[1]}}, ""
+    return None, "Error: unknown /contact operation. Use add, list, or remove."
+
+
+def _parse_template_spec(args: List[str]) -> tuple[Optional[dict], str]:
+    raw = " ".join([str(a or "").strip() for a in args if str(a or "").strip()]).strip()
+    if not raw:
+        return None, "Usage: /template save <id> | <subject> | <body> | list | show <id> | delete <id>"
+    if raw.lower() == "list":
+        return {"name": "template_list", "args": {}}, ""
+    tokens = raw.split()
+    op = tokens[0].lower() if tokens else ""
+    if op == "show":
+        if len(tokens) < 2:
+            return None, "Usage: /template show <id>"
+        return {"name": "template_get", "args": {"template_id": tokens[1]}}, ""
+    if op == "delete":
+        if len(tokens) < 2:
+            return None, "Usage: /template delete <id>"
+        return {"name": "template_delete", "args": {"template_id": tokens[1]}}, ""
+    if op == "save":
+        body = raw[len("save"):].strip()
+        parts = [p.strip() for p in body.split("|", 2)]
+        if len(parts) != 3:
+            return None, "Usage: /template save <id> | <subject> | <body>"
+        return {
+            "name": "template_upsert",
+            "args": {"template_id": parts[0], "subject": parts[1], "body": parts[2]},
+        }, ""
+    return None, "Error: unknown /template operation."
+
+
+def _parse_email_template_spec(args: List[str]) -> tuple[Optional[dict], str]:
+    tokens = [str(a or "").strip() for a in args if str(a or "").strip()]
+    if len(tokens) < 2:
+        return None, "Usage: /email-template [--dry-run] <template_id> <to_email>"
+    tokens, dry_run = _strip_flag(tokens, "--dry-run")
+    if len(tokens) < 2:
+        return None, "Usage: /email-template [--dry-run] <template_id> <to_email>"
+    return {
+        "name": "send_email_template",
+        "args": {"template_id": tokens[0], "to": tokens[1], "dry_run": bool(dry_run)},
+    }, ""
+
+
 def _prompt_has_high_risk_tool_actions(prompt: str) -> bool:
     engine = ExecutionPolicyEngine()
     for argv in _extract_exec_argv(prompt):
@@ -466,13 +535,16 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 profile = agent.policy_profile
         text = (
             "Commands:\n"
-            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /email, /gh\n"
+            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /email, /gh, /email-check, /contact, /template, /email-template\n"
             "\n"
             "Examples:\n"
             "- `!exec /bin/ls -la`\n"
             "- `!loop {\"steps\":[{\"kind\":\"exec\",\"command\":\"/bin/echo hi\"}],\"final_prompt\":\"summarize\"}`\n"
             "- `/email me@example.com | Subject | Body`\n"
             "- `/gh comment owner/repo 123 looks good`\n"
+            "- `/contact add me@example.com Michal`\n"
+            "- `/template save welcome | Welcome | Hello from template.`\n"
+            "- `/email-template welcome me@example.com`\n"
             "\n"
             f"Active policy profile: `{profile}`\n"
             "High-risk actions require approval and are auditable."
@@ -563,6 +635,78 @@ async def handle_gh(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _process_prompt(update=update, context=context, text=text, user_id=user_id)
     except Exception as exc:
         logger.exception("GH handler error: %s", exc)
+
+
+async def handle_email_check(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        spec, err = _parse_email_check_spec(context.args or [])
+        if not spec:
+            await update.message.reply_text(err or "Invalid /email-check command.")
+            return
+        text = "!tool " + json.dumps(spec, ensure_ascii=True)
+        await _process_prompt(update=update, context=context, text=text, user_id=user_id)
+    except Exception as exc:
+        logger.exception("Email-check handler error: %s", exc)
+
+
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        spec, err = _parse_contact_spec(context.args or [])
+        if not spec:
+            await update.message.reply_text(err or "Invalid /contact command.")
+            return
+        text = "!tool " + json.dumps(spec, ensure_ascii=True)
+        await _process_prompt(update=update, context=context, text=text, user_id=user_id)
+    except Exception as exc:
+        logger.exception("Contact handler error: %s", exc)
+
+
+async def handle_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        spec, err = _parse_template_spec(context.args or [])
+        if not spec:
+            await update.message.reply_text(err or "Invalid /template command.")
+            return
+        text = "!tool " + json.dumps(spec, ensure_ascii=True)
+        await _process_prompt(update=update, context=context, text=text, user_id=user_id)
+    except Exception as exc:
+        logger.exception("Template handler error: %s", exc)
+
+
+async def handle_email_template(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        spec, err = _parse_email_template_spec(context.args or [])
+        if not spec:
+            await update.message.reply_text(err or "Invalid /email-template command.")
+            return
+        text = "!tool " + json.dumps(spec, ensure_ascii=True)
+        await _process_prompt(update=update, context=context, text=text, user_id=user_id)
+    except Exception as exc:
+        logger.exception("Email-template handler error: %s", exc)
 
 
 async def handle_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -944,6 +1088,10 @@ def build_application(
     app.add_handler(CommandHandler("skills", handle_skills))
     app.add_handler(CommandHandler("email", handle_email))
     app.add_handler(CommandHandler("gh", handle_gh))
+    app.add_handler(CommandHandler("email-check", handle_email_check))
+    app.add_handler(CommandHandler("contact", handle_contact))
+    app.add_handler(CommandHandler("template", handle_template))
+    app.add_handler(CommandHandler("email-template", handle_email_template))
     app.add_handler(CommandHandler("reinstall", handle_reinstall))
     app.add_handler(CommandHandler("purge", handle_purge))
     app.add_handler(CommandHandler("restart", handle_restart))
