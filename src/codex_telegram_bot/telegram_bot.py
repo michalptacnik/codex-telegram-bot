@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 MAX_INPUT_CHARS = 6000
 MAX_OUTPUT_CHARS = 3800
 EPHEMERAL_STATUS_TTL_SEC = 12
+STATUS_HEARTBEAT_SEC = 15
 USER_WINDOW_SEC = 60
 MAX_USER_COMMANDS_PER_WINDOW = 20
 
@@ -657,6 +658,26 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         elif event == "loop.finished":
             await set_status("Running: tool loop finished, finalizing response...")
 
+    async def heartbeat() -> None:
+        chat_id = update.effective_chat.id
+        while True:
+            await asyncio.sleep(STATUS_HEARTBEAT_SEC)
+            state = run_state.get(chat_id, {})
+            if not state:
+                return
+            elapsed = int(max(0, asyncio.get_running_loop().time() - float(state.get("started_at", 0.0))))
+            active_step = int(state.get("active_step", 0) or 0)
+            total_steps = int(state.get("steps_total", 0) or 0)
+            job_id = str(active_jobs.get(chat_id, "") or "")
+            if total_steps > 0:
+                msg = f"Running: still working ({elapsed}s elapsed), step {active_step}/{total_steps}..."
+            elif job_id:
+                msg = f"Running: model job `{job_id[:8]}` in progress ({elapsed}s elapsed)..."
+            else:
+                msg = f"Running: still processing ({elapsed}s elapsed)..."
+            await set_status(msg)
+
+    heartbeat_task = asyncio.create_task(heartbeat())
     try:
         response = await agent.handle_message(
             chat_id=update.effective_chat.id,
@@ -666,6 +687,11 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             progress_callback=progress,
         )
     finally:
+        heartbeat_task.cancel()
+        try:
+            await heartbeat_task
+        except asyncio.CancelledError:
+            pass
         active_jobs.pop(update.effective_chat.id, None)
         active_tasks.pop(update.effective_chat.id, None)
         run_state.pop(update.effective_chat.id, None)
