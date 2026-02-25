@@ -99,7 +99,7 @@ def main() -> None:
     }
 
     state_db_path = config.config_dir / "state.db"
-    agent_service = build_agent_service(state_db_path=state_db_path)
+    agent_service = build_agent_service(state_db_path=state_db_path, config_dir=config.config_dir)
 
     if args.control_center:
         from codex_telegram_bot.control_center.app import create_app_with_config

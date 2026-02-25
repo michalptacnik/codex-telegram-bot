@@ -80,6 +80,7 @@ class AgentService:
         retention_policy: Optional[SessionRetentionPolicy] = None,
         capability_router: Optional[CapabilityRouter] = None,
         provider_registry: Optional[Any] = None,
+        skill_manager: Optional[Any] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -105,6 +106,7 @@ class AgentService:
         self._access_controller = access_controller
         self._retention_policy = retention_policy
         self._capability_router = capability_router
+        self._skill_manager = skill_manager
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -613,6 +615,24 @@ class AgentService:
             except Exception as exc:
                 return f"Error: {exc}"
         actions, cleaned_prompt, final_prompt = _extract_loop_actions(prompt)
+        active_skills: List[Any] = []
+        extra_tools: Dict[str, Any] = {}
+        if self._skill_manager is not None:
+            try:
+                active_skills = self._skill_manager.auto_activate(cleaned_prompt or prompt)
+                extra_tools = self._skill_manager.tools_for_skills(active_skills)
+            except Exception:
+                active_skills = []
+                extra_tools = {}
+        if active_skills:
+            await self._notify_progress(
+                progress_callback,
+                {
+                    "event": "skills.activated",
+                    "skills": [s.skill_id for s in active_skills],
+                },
+            )
+        available_tool_names = sorted(set(self._tool_registry.names()) | set(extra_tools.keys()))
         if len(actions) > self._tool_loop_max_steps:
             msg = (
                 f"Error: tool step budget exceeded ({len(actions)} > {self._tool_loop_max_steps}). "
@@ -623,12 +643,18 @@ class AgentService:
                 progress_callback,
                 {"event": "loop.failed", "reason": "budget_exceeded", "steps_total": len(actions)},
             )
+            if active_skills:
+                await self._notify_progress(
+                    progress_callback,
+                    {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
+                )
             return msg
         if not actions and self._autonomous_tool_loop_enabled():
             await self._notify_progress(progress_callback, {"event": "loop.autoplan.started"})
             planned_actions, planned_final_prompt = await self._plan_tool_loop_actions(
                 prompt=(cleaned_prompt or prompt),
                 agent_id=agent_id,
+                tool_names=available_tool_names,
             )
             if planned_actions:
                 actions = planned_actions
@@ -647,6 +673,11 @@ class AgentService:
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+            if active_skills:
+                await self._notify_progress(
+                    progress_callback,
+                    {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
+                )
             return output
 
         policy_profile = self._agent_policy_profile(agent_id=agent_id)
@@ -688,11 +719,13 @@ class AgentService:
                 },
             )
             if action.kind == "tool":
-                result = self._execute_registered_tool_action(
+                result = await self._execute_registered_tool_action(
                     action_id=action_id,
                     tool_name=action.tool_name,
                     tool_args=action.tool_args,
                     workspace_root=session_workspace,
+                    policy_profile=policy_profile,
+                    extra_tools=extra_tools,
                 )
                 observations.append(result.output)
                 rc = 0 if result.ok else 1
@@ -900,6 +933,14 @@ class AgentService:
             progress_callback,
             {"event": "loop.finished", "steps_total": len(actions)},
         )
+        if active_skills:
+            await self._notify_progress(
+                progress_callback,
+                {
+                    "event": "skills.deactivated",
+                    "skills": [s.skill_id for s in active_skills],
+                },
+            )
         return output
 
     def append_run_event(self, run_id: str, event_type: str, payload: str) -> None:
@@ -1083,24 +1124,34 @@ class AgentService:
             payload=str(envelope),
         )
 
-    def _execute_registered_tool_action(
+    async def _execute_registered_tool_action(
         self,
         action_id: str,
         tool_name: str,
         tool_args: Dict[str, Any],
         workspace_root: Path,
+        policy_profile: str,
+        extra_tools: Optional[Dict[str, Any]] = None,
     ):
-        tool = self._tool_registry.get(tool_name)
+        tool = (extra_tools or {}).get(tool_name) or self._tool_registry.get(tool_name)
         if not tool:
-            known = ", ".join(self._tool_registry.names())
+            names = set(self._tool_registry.names())
+            names.update((extra_tools or {}).keys())
+            known = ", ".join(sorted(names))
             return ToolResult(
                 ok=False,
                 output=f"{action_id} tool={tool_name} error=unknown_tool known=[{known}]",
             )
-        result = tool.run(
-            ToolRequest(name=tool_name, args=dict(tool_args or {})),
-            ToolContext(workspace_root=workspace_root),
-        )
+        context = ToolContext(workspace_root=workspace_root, policy_profile=policy_profile)
+        req = ToolRequest(name=tool_name, args=dict(tool_args or {}))
+        try:
+            arun = getattr(tool, "arun", None)
+            if callable(arun):
+                result = await arun(req, context)
+            else:
+                result = tool.run(req, context)
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"{action_id} tool={tool_name} error=tool_exception {exc}")
         status = "ok" if result.ok else "error"
         return ToolResult(
             ok=result.ok,
@@ -1263,9 +1314,11 @@ class AgentService:
         self,
         prompt: str,
         agent_id: str,
+        tool_names: Optional[List[str]] = None,
     ) -> tuple[List[LoopAction], str]:
         provider_for_plan = self._provider_for_agent(agent_id=agent_id)
-        tool_names = ", ".join(self._tool_registry.names())
+        available_tools = tool_names if tool_names is not None else self._tool_registry.names()
+        tools_line = ", ".join(sorted({str(x).strip() for x in available_tools if str(x).strip()}))
         planner_prompt = (
             "You are an execution planner.\n"
             "Decide whether local tool/shell actions are required before answering the user.\n"
@@ -1277,7 +1330,7 @@ class AgentService:
             "- step kinds:\n"
             "  - {\"kind\":\"exec\",\"command\":\"...\"}\n"
             "  - {\"kind\":\"tool\",\"tool\":\"<name>\",\"args\":{...}}\n"
-            f"- available tool names: {tool_names}\n"
+            f"- available tool names: {tools_line}\n"
             "- prefer read-only checks first; keep steps minimal and deterministic.\n"
             "- do not include dangerous/destructive cleanup commands unless explicitly requested.\n"
             f"User request:\n{(prompt or '').strip()}"
@@ -1327,6 +1380,61 @@ class AgentService:
 
     def provider_registry(self):
         return self._provider_registry
+
+    def list_skills(self) -> List[Dict[str, Any]]:
+        if self._skill_manager is None:
+            return []
+        rows = self._skill_manager.list_skills()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            out.append(
+                {
+                    "skill_id": row.skill_id,
+                    "name": row.name,
+                    "description": row.description,
+                    "keywords": list(row.keywords),
+                    "tools": list(row.tools),
+                    "requires_env": list(row.requires_env),
+                    "enabled": bool(row.enabled),
+                    "source": row.source,
+                    "trusted": bool(row.trusted),
+                }
+            )
+        return out
+
+    def install_skill_from_url(self, source_url: str) -> Dict[str, Any]:
+        if self._skill_manager is None:
+            raise ValueError("Skill manager is not configured.")
+        row = self._skill_manager.install_from_url(source_url)
+        return {
+            "skill_id": row.skill_id,
+            "name": row.name,
+            "description": row.description,
+            "keywords": list(row.keywords),
+            "tools": list(row.tools),
+            "requires_env": list(row.requires_env),
+            "enabled": bool(row.enabled),
+            "source": row.source,
+            "trusted": bool(row.trusted),
+        }
+
+    def set_skill_enabled(self, skill_id: str, enabled: bool) -> Dict[str, Any]:
+        if self._skill_manager is None:
+            raise ValueError("Skill manager is not configured.")
+        row = self._skill_manager.enable(skill_id=skill_id, enabled=enabled)
+        if row is None:
+            raise ValueError("Skill not found.")
+        return {
+            "skill_id": row.skill_id,
+            "name": row.name,
+            "description": row.description,
+            "keywords": list(row.keywords),
+            "tools": list(row.tools),
+            "requires_env": list(row.requires_env),
+            "enabled": bool(row.enabled),
+            "source": row.source,
+            "trusted": bool(row.trusted),
+        }
 
     def available_provider_names(self) -> List[str]:
         registry = self._provider_registry

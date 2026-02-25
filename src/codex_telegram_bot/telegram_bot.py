@@ -641,6 +641,12 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             )
         elif event == "loop.autoplan.none":
             await set_status("Running: no tool actions needed, answering directly...")
+        elif event == "skills.activated":
+            skills = ", ".join([str(x) for x in list(update_payload.get("skills") or [])][:4])
+            await set_status(f"Running: activated skill(s): {skills or 'n/a'}")
+        elif event == "skills.deactivated":
+            skills = ", ".join([str(x) for x in list(update_payload.get("skills") or [])][:4])
+            await set_status(f"Running: deactivated skill(s): {skills or 'n/a'}")
         elif event == "loop.step.started":
             run_state[update.effective_chat.id]["active_step"] = int(update_payload.get("step", 0) or 0)
             await set_status(f"Running: step {update_payload.get('step')} -> {update_payload.get('command', '')[:120]}")

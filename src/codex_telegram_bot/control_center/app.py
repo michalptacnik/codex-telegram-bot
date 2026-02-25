@@ -48,6 +48,10 @@ class PluginUpdateRequest(BaseModel):
     manifest_path: str
 
 
+class SkillInstallRequest(BaseModel):
+    source_url: str
+
+
 def _run_to_dict(run) -> Dict[str, Any]:
     data = asdict(run)
     for key in ("created_at", "started_at", "completed_at"):
@@ -599,6 +603,7 @@ def create_app_with_config(
                 "job_get": {"path": "/api/v1/jobs/{job_id}", "scope": "jobs:read"},
                 "job_cancel": {"path": "/api/v1/jobs/{job_id}/cancel", "scope": "jobs:write"},
                 "plugins_list": {"path": "/api/v1/plugins", "scope": "plugins:read"},
+                "skills_list": {"path": "/api/v1/skills", "scope": "plugins:read"},
             },
         }
 
@@ -641,6 +646,11 @@ def create_app_with_config(
         _require_local_api_scope(request, "plugins:read")
         items = [_plugin_to_dict(p) for p in plugin_manager.list_plugins()]
         return {"items": items}
+
+    @app.get("/api/v1/skills")
+    async def api_v1_skills(request: Request) -> Dict[str, Any]:
+        _require_local_api_scope(request, "plugins:read")
+        return {"items": agent_service.list_skills()}
 
     @app.get("/api/plugins")
     async def api_plugins(request: Request) -> List[Dict[str, Any]]:
@@ -693,6 +703,35 @@ def create_app_with_config(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return _plugin_to_dict(plugin)
+
+    @app.get("/api/skills")
+    async def api_skills(request: Request) -> List[Dict[str, Any]]:
+        _opt_api_scope(request)
+        return agent_service.list_skills()
+
+    @app.post("/api/skills/install")
+    async def api_skills_install(request: Request, req: SkillInstallRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.install_skill_from_url(req.source_url)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/skills/{skill_id}/enable")
+    async def api_skills_enable(request: Request, skill_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.set_skill_enabled(skill_id=skill_id, enabled=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/skills/{skill_id}/disable")
+    async def api_skills_disable(request: Request, skill_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.set_skill_enabled(skill_id=skill_id, enabled=False)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
@@ -1000,6 +1039,38 @@ def create_app_with_config(
     async def plugins_uninstall_form(plugin_id: str):
         plugin_manager.uninstall_plugin(plugin_id)
         return RedirectResponse(url="/plugins", status_code=303)
+
+    @app.get("/skills", response_class=HTMLResponse)
+    async def skills_page(request: Request, error: str = ""):
+        skills = agent_service.list_skills()
+        return templates.TemplateResponse(
+            "skills.html",
+            {"request": request, "nav": "skills", "skills": skills, "error": error},
+        )
+
+    @app.post("/skills/install")
+    async def skills_install_form(source_url: str = Form(...)):
+        try:
+            agent_service.install_skill_from_url(source_url)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
+
+    @app.post("/skills/{skill_id}/enable")
+    async def skills_enable_form(skill_id: str):
+        try:
+            agent_service.set_skill_enabled(skill_id=skill_id, enabled=True)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
+
+    @app.post("/skills/{skill_id}/disable")
+    async def skills_disable_form(skill_id: str):
+        try:
+            agent_service.set_skill_enabled(skill_id=skill_id, enabled=False)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
 
     @app.get("/sessions", response_class=HTMLResponse)
     async def sessions_page(request: Request):

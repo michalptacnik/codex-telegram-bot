@@ -197,6 +197,8 @@ Environment variables override `.env`:
 - `WORKSPACE_MAX_FILE_COUNT` (default: `5000`; per-session workspace file-count quota)
 - `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default: `30`; idle sessions archived after this many days)
 - `SESSION_DELETE_AFTER_DAYS` (default: `90`; archived sessions hard-deleted after this many days)
+- `SKILL_TRUSTED_HOSTS` (optional comma-separated allowlist for remote skill manifests; default: `raw.githubusercontent.com,github.com`)
+- `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_APP_PASSWORD`, `SMTP_FROM` (used by `smtp_email` skill)
 
 Print active config summary (never prints token):
 
@@ -518,6 +520,9 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
 - Optional autonomous planning bridge:
   - set `AUTONOMOUS_TOOL_LOOP=1` to let text-only API providers (`deepseek`, `openai`, `gemini`, etc.) propose tool-loop steps automatically
   - keep disabled for `codex_cli` in most setups (Codex already has native agentic tool execution)
+- Skills can extend tool availability per task:
+  - skills are auto-activated ad hoc from prompt intent + env prerequisites
+  - skills are auto-deactivated after the run
 - The agent executes listed actions, captures observations, and injects them into the provider prompt.
 - High-risk actions require explicit approval:
   - `/pending` to list pending approvals
@@ -538,6 +543,17 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
 - Safe replay guardrails:
   - high-risk replays require explicit confirmation (`/continue yes`)
   - completed tool steps can be checkpoint-skipped on identical replay to avoid duplicate execution
+
+## Skills (Universal)
+
+- Skills are provider-agnostic: same skill runtime works with `codex_cli`, `deepseek`, `openai`, `gemini`, etc.
+- Built-in seeded skills:
+  - `smtp_email` (enabled by default): provides `send_email_smtp` tool
+  - `github_outbound` (disabled by default): provides GitHub outbound tools
+- Skill lifecycle:
+  - install from trusted manifest URL (`/skills` page or `POST /api/skills/install`)
+  - enable/disable manually (`/skills` page or `/api/skills/{id}/enable|disable`)
+  - auto-activate/deactivate per run based on prompt keywords and required env vars
 
 ## Capability Registry
 

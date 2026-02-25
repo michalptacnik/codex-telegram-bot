@@ -14,6 +14,7 @@ class ToolRequest:
 @dataclass(frozen=True)
 class ToolContext:
     workspace_root: Path
+    policy_profile: str = "balanced"
 
 
 @dataclass(frozen=True)

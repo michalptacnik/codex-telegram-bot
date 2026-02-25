@@ -22,9 +22,10 @@ from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.skill_manager import SkillManager
 
 
-def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
+def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Optional[Path] = None) -> AgentService:
     workspace_root = _read_workspace_root_env("EXECUTION_WORKSPACE_ROOT", Path.cwd())
     capabilities_root = _read_workspace_root_env("CAPABILITIES_DIR", workspace_root / "capabilities")
     session_workspaces_root = _read_workspace_root_env(
@@ -59,6 +60,12 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
         max_file_count=_read_int_env("WORKSPACE_MAX_FILE_COUNT", 5000),
     )
     access_controller = AccessController()
+    resolved_config_dir = (
+        config_dir.expanduser().resolve()
+        if config_dir is not None
+        else ((state_db_path.parent if state_db_path else (Path.home() / ".config" / "codex-telegram-bot")).expanduser().resolve())
+    )
+    skill_manager = SkillManager(config_dir=resolved_config_dir)
 
     if state_db_path is None:
         return AgentService(
@@ -76,6 +83,7 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
             workspace_manager=workspace_manager,
             access_controller=access_controller,
             capability_router=capability_router,
+            skill_manager=skill_manager,
         )
     run_store = SqliteRunStore(db_path=state_db_path)
     run_store.recover_interrupted_runs()
@@ -106,6 +114,7 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
         access_controller=access_controller,
         retention_policy=retention_policy,
         capability_router=capability_router,
+        skill_manager=skill_manager,
     )
 
 

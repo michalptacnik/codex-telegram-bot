@@ -1,4 +1,5 @@
 from codex_telegram_bot.tools.base import ToolContext, ToolRegistry, ToolRequest, ToolResult
+from codex_telegram_bot.tools.email import SendEmailSmtpTool
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
 from codex_telegram_bot.tools.git import (
     GitAddTool,
@@ -39,6 +40,7 @@ __all__ = [
     "ToolRegistry",
     "ToolRequest",
     "ToolResult",
+    "SendEmailSmtpTool",
     "ReadFileTool",
     "WriteFileTool",
     "GitStatusTool",

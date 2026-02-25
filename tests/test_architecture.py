@@ -979,3 +979,36 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         raw = "```json\n{\"steps\":[],\"final_prompt\":\"done\"}\n```"
         parsed = _parse_planner_output(raw)
         self.assertEqual(parsed.get("final_prompt"), "done")
+
+    async def test_registered_tool_action_supports_async_arun(self):
+        class _AsyncTool:
+            name = "async_tool"
+
+            async def arun(self, request, context):
+                return type("R", (), {"ok": True, "output": "async-ok"})()
+
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "ok"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        service = AgentService(provider=_Provider())
+        out = await service._execute_registered_tool_action(
+            action_id="tool-1",
+            tool_name="async_tool",
+            tool_args={},
+            workspace_root=Path("."),
+            policy_profile="trusted",
+            extra_tools={"async_tool": _AsyncTool()},
+        )
+        self.assertTrue(out.ok)
+        self.assertIn("async-ok", out.output)
+        await service.shutdown()

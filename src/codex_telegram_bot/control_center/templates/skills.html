@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Skills</h1>
+    <p class="subtitle">Trusted install + manual enable/disable + automatic per-run activation</p>
+  </div>
+</div>
+
+{% if error %}
+<section class="card table-card">
+  <div class="error-banner">
+    <div class="error-title">Action failed</div>
+    <div class="error-message">{{ error }}</div>
+  </div>
+</section>
+{% endif %}
+
+<section class="card table-card">
+  <div class="k">Install Skill From Trusted URL</div>
+  <form class="toolbar" method="post" action="/skills/install">
+    <input type="text" name="source_url" placeholder="https://raw.githubusercontent.com/.../skill.json" required />
+    <button class="btn" type="submit">Install</button>
+  </form>
+  <div class="dim">Only hosts in trusted list are accepted.</div>
+</section>
+
+<section class="card table-card">
+  <div class="k">Installed Skills</div>
+  <table>
+    <caption class="sr-only">Installed skills</caption>
+    <thead>
+      <tr>
+        <th scope="col">Skill</th>
+        <th scope="col">Description</th>
+        <th scope="col">Tools</th>
+        <th scope="col">Req Env</th>
+        <th scope="col">Source</th>
+        <th scope="col">Enabled</th>
+        <th scope="col">Actions</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if skills %}
+      {% for s in skills %}
+      <tr>
+        <td class="mono">{{ s.skill_id }}</td>
+        <td>{{ s.description or s.name }}</td>
+        <td class="mono">{{ ", ".join(s.tools) }}</td>
+        <td class="mono">{{ ", ".join(s.requires_env) }}</td>
+        <td class="mono">{{ s.source }}</td>
+        <td>{{ "yes" if s.enabled else "no" }}</td>
+        <td>
+          {% if s.enabled %}
+          <form method="post" action="/skills/{{ s.skill_id }}/disable">
+            <button class="btn ghost" type="submit">Disable</button>
+          </form>
+          {% else %}
+          <form method="post" action="/skills/{{ s.skill_id }}/enable">
+            <button class="btn" type="submit">Enable</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="7" class="dim">No skills installed.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
