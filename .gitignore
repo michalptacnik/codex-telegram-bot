@@ -8,3 +8,5 @@ venv/
 .mypy_cache/
 .DS_Store
 dist/
+.codex-telegram-bot/
+.session_workspaces/

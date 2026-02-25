@@ -3,8 +3,20 @@ import uuid
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
+from codex_telegram_bot.connectors.base import IngestionCursor, LeadRecord
+from codex_telegram_bot.domain.memory import (
+    ArtifactRecord,
+    MemoryEntry,
+    MissionSummary,
+)
+from codex_telegram_bot.domain.missions import (
+    MISSION_STATE_IDLE,
+    MissionEventRecord,
+    MissionRecord,
+    validate_transition,
+)
 from codex_telegram_bot.domain.runs import (
     RUN_STATUS_COMPLETED,
     RUN_STATUS_FAILED,
@@ -140,6 +152,143 @@ class SqliteRunStore:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_loop_checkpoint_key
                 ON tool_loop_checkpoints (session_id, prompt_fingerprint, step_index)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS missions (
+                    mission_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    goal TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    schedule_interval_sec INTEGER,
+                    retry_limit INTEGER NOT NULL DEFAULT 3,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    max_concurrency INTEGER NOT NULL DEFAULT 1,
+                    context_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    mission_id TEXT NOT NULL,
+                    from_state TEXT NOT NULL,
+                    to_state TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_missions_state
+                ON missions (state)
+                """
+            )
+            # EPIC 7: intake leads and connector cursors.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS intake_leads (
+                    lead_id TEXT PRIMARY KEY,
+                    connector_id TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    body TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 50,
+                    labels_json TEXT NOT NULL DEFAULT '[]',
+                    score REAL NOT NULL DEFAULT 0.0,
+                    score_factors_json TEXT NOT NULL DEFAULT '{}',
+                    extra_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    ingested_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_intake_leads_connector
+                ON intake_leads (connector_id, score DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS connector_cursors (
+                    connector_id TEXT PRIMARY KEY,
+                    cursor_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            # EPIC 8: mission memory, artifacts, and summaries.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_memory (
+                    entry_id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    key TEXT NOT NULL,
+                    value TEXT NOT NULL,
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    importance INTEGER NOT NULL DEFAULT 5,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mission_memory_lookup
+                ON mission_memory (mission_id, kind, key)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_artifacts (
+                    artifact_id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    step_index INTEGER,
+                    kind TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    uri TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    meta_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mission_artifacts_lookup
+                ON mission_artifacts (mission_id, kind)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mission_summaries (
+                    summary_id TEXT PRIMARY KEY,
+                    mission_id TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    memory_count INTEGER NOT NULL DEFAULT 0,
+                    artifact_count INTEGER NOT NULL DEFAULT 0,
+                    compacted INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_mission_summaries_mission
+                ON mission_summaries (mission_id)
                 """
             )
             # Lightweight migration for existing DBs created before max_concurrency existed.
@@ -801,6 +950,592 @@ class SqliteRunStore:
             for r in rows
         ]
 
+    # ------------------------------------------------------------------
+    # Mission persistence (EPIC 6)
+    # ------------------------------------------------------------------
+
+    def create_mission(
+        self,
+        title: str,
+        goal: str,
+        schedule_interval_sec: Optional[int] = None,
+        retry_limit: int = 3,
+        max_concurrency: int = 1,
+        context: Optional[Dict] = None,
+    ) -> str:
+        mission_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO missions
+                    (mission_id, title, goal, state, schedule_interval_sec,
+                     retry_limit, retry_count, max_concurrency, context_json,
+                     created_at, updated_at, started_at, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    mission_id,
+                    title,
+                    goal,
+                    MISSION_STATE_IDLE,
+                    schedule_interval_sec,
+                    retry_limit,
+                    max_concurrency,
+                    json.dumps(context or {}),
+                    now,
+                    now,
+                ),
+            )
+        return mission_id
+
+    def get_mission(self, mission_id: str) -> Optional[MissionRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_mission(row)
+
+    def list_missions(self, state: Optional[str] = None) -> List[MissionRecord]:
+        with self._connect() as conn:
+            if state:
+                rows = conn.execute(
+                    "SELECT * FROM missions WHERE state = ? ORDER BY created_at ASC",
+                    (state,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM missions ORDER BY created_at ASC"
+                ).fetchall()
+        return [_row_to_mission(r) for r in rows]
+
+    def transition_mission(
+        self, mission_id: str, to_state: str, reason: str = ""
+    ) -> MissionRecord:
+        """Validate and apply a state transition, writing an audit event."""
+        mission = self.get_mission(mission_id)
+        if mission is None:
+            raise ValueError(f"Mission not found: {mission_id}")
+        validate_transition(mission.state, to_state)
+        now = _utc_now()
+        started_at = mission.started_at
+        completed_at = mission.completed_at
+        if to_state == "running" and started_at is None:
+            started_at = datetime.fromisoformat(now)
+        if to_state in {"completed", "failed"}:
+            completed_at = datetime.fromisoformat(now)
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE missions
+                SET state = ?, updated_at = ?,
+                    started_at = COALESCE(started_at, ?),
+                    completed_at = ?
+                WHERE mission_id = ?
+                """,
+                (
+                    to_state,
+                    now,
+                    started_at.isoformat() if started_at else None,
+                    completed_at.isoformat() if completed_at else None,
+                    mission_id,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO mission_events (mission_id, from_state, to_state, reason, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (mission_id, mission.state, to_state, reason or "", now),
+            )
+        return self.get_mission(mission_id)  # type: ignore[return-value]
+
+    def increment_mission_retry(self, mission_id: str) -> int:
+        """Increment retry_count and return the new value."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE missions SET retry_count = retry_count + 1, updated_at = ? WHERE mission_id = ?",
+                (_utc_now(), mission_id),
+            )
+            row = conn.execute(
+                "SELECT retry_count FROM missions WHERE mission_id = ?", (mission_id,)
+            ).fetchone()
+        return int(row["retry_count"]) if row else 0
+
+    def reset_mission_retry(self, mission_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE missions SET retry_count = 0, updated_at = ? WHERE mission_id = ?",
+                (_utc_now(), mission_id),
+            )
+
+    def list_mission_events(self, mission_id: str) -> List[MissionEventRecord]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM mission_events WHERE mission_id = ?
+                ORDER BY id ASC
+                """,
+                (mission_id,),
+            ).fetchall()
+        return [_row_to_mission_event(r) for r in rows]
+
+    def count_mission_events_since(self, transition: str, since_iso: str) -> int:
+        """Count events matching a 'from→to' transition string since a timestamp.
+
+        Used by the observability layer to compute windowed throughput/error-rate.
+        Transition format: 'running→completed', 'pending→running', etc.
+        """
+        parts = transition.split("→", 1)
+        if len(parts) != 2:
+            return 0
+        from_state, to_state = parts
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM mission_events
+                WHERE from_state = ? AND to_state = ? AND created_at >= ?
+                """,
+                (from_state, to_state, since_iso),
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
+    # ------------------------------------------------------------------
+    # Intake leads + connector cursors (EPIC 7)
+    # ------------------------------------------------------------------
+
+    def upsert_lead(
+        self,
+        lead: LeadRecord,
+        score: float = 0.0,
+        score_factors_json: str = "{}",
+    ) -> None:
+        """Insert or update a lead record."""
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO intake_leads
+                    (lead_id, connector_id, source_id, title, body, url,
+                     priority, labels_json, score, score_factors_json,
+                     extra_json, created_at, updated_at, ingested_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(lead_id) DO UPDATE SET
+                    title=excluded.title,
+                    body=excluded.body,
+                    url=excluded.url,
+                    priority=excluded.priority,
+                    labels_json=excluded.labels_json,
+                    score=excluded.score,
+                    score_factors_json=excluded.score_factors_json,
+                    extra_json=excluded.extra_json,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    lead.lead_id,
+                    lead.connector_id,
+                    lead.source_id,
+                    lead.title,
+                    lead.body,
+                    lead.url,
+                    lead.priority,
+                    json.dumps(lead.labels),
+                    score,
+                    score_factors_json,
+                    json.dumps(lead.extra),
+                    lead.created_at.isoformat(),
+                    lead.updated_at.isoformat(),
+                    now,
+                ),
+            )
+
+    def lead_exists(self, lead_id: str) -> bool:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM intake_leads WHERE lead_id = ?", (lead_id,)
+            ).fetchone()
+        return row is not None
+
+    def get_lead(self, lead_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM intake_leads WHERE lead_id = ?", (lead_id,)
+            ).fetchone()
+        if row is None:
+            return None
+        return _row_to_lead(row)
+
+    def list_leads(
+        self,
+        connector_id: Optional[str] = None,
+        limit: int = 100,
+        min_score: float = 0.0,
+    ) -> List[dict]:
+        with self._connect() as conn:
+            if connector_id:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM intake_leads
+                    WHERE connector_id = ? AND score >= ?
+                    ORDER BY score DESC LIMIT ?
+                    """,
+                    (connector_id, min_score, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM intake_leads
+                    WHERE score >= ?
+                    ORDER BY score DESC LIMIT ?
+                    """,
+                    (min_score, limit),
+                ).fetchall()
+        return [_row_to_lead(r) for r in rows]
+
+    def get_connector_cursor(self, connector_id: str) -> Optional[IngestionCursor]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM connector_cursors WHERE connector_id = ?",
+                (connector_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return IngestionCursor(
+            connector_id=row["connector_id"],
+            value=row["cursor_value"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def save_connector_cursor(self, cursor: IngestionCursor) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO connector_cursors (connector_id, cursor_value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(connector_id) DO UPDATE SET
+                    cursor_value=excluded.cursor_value,
+                    updated_at=excluded.updated_at
+                """,
+                (cursor.connector_id, cursor.value, cursor.updated_at.isoformat()),
+            )
+
+    # ------------------------------------------------------------------
+    # Mission memory (EPIC 8)
+    # ------------------------------------------------------------------
+
+    def upsert_memory_entry(
+        self,
+        mission_id: str,
+        kind: str,
+        key: str,
+        value: str,
+        tags: Optional[List[str]] = None,
+        importance: int = 5,
+        expires_at: Optional["datetime"] = None,
+    ) -> MemoryEntry:
+        entry_id = str(uuid.uuid4())
+        now = _utc_now()
+        expires_iso = expires_at.isoformat() if expires_at else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mission_memory
+                    (entry_id, mission_id, kind, key, value, tags_json,
+                     importance, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry_id, mission_id, kind, key, value,
+                    json.dumps(tags or []), importance, now, expires_iso,
+                ),
+            )
+        return MemoryEntry(
+            entry_id=entry_id, mission_id=mission_id, kind=kind, key=key,
+            value=value, tags=tags or [], importance=importance,
+            created_at=datetime.fromisoformat(now),
+            expires_at=expires_at,
+        )
+
+    def list_memory_entries(
+        self,
+        mission_id: str,
+        kind: Optional[str] = None,
+        key: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 50,
+        include_expired: bool = False,
+    ) -> List[MemoryEntry]:
+        clauses = ["mission_id = ?"]
+        params: list = [mission_id]
+        if kind:
+            clauses.append("kind = ?"); params.append(kind)
+        if key:
+            clauses.append("key = ?"); params.append(key)
+        if not include_expired:
+            clauses.append("(expires_at IS NULL OR expires_at > ?)")
+            params.append(_utc_now())
+        where = " AND ".join(clauses)
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM mission_memory WHERE {where} "
+                f"ORDER BY importance DESC, created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        results = [_row_to_memory_entry(r) for r in rows]
+        if tag:
+            results = [e for e in results if tag in e.tags]
+        return results
+
+    def delete_memory_entry(self, entry_id: str) -> bool:
+        with self._connect() as conn:
+            c = conn.execute(
+                "DELETE FROM mission_memory WHERE entry_id = ?", (entry_id,)
+            )
+        return c.rowcount > 0
+
+    def delete_mission_memory(self, mission_id: str) -> int:
+        with self._connect() as conn:
+            c = conn.execute(
+                "DELETE FROM mission_memory WHERE mission_id = ?", (mission_id,)
+            )
+        return c.rowcount
+
+    def count_memory_entries(self, mission_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM mission_memory WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+        return int(row["c"])
+
+    def trim_memory_entries(self, mission_id: str, drop_count: int) -> int:
+        """Drop the ``drop_count`` lowest-importance + oldest entries."""
+        with self._connect() as conn:
+            ids = conn.execute(
+                """
+                SELECT entry_id FROM mission_memory
+                WHERE mission_id = ?
+                ORDER BY importance ASC, created_at ASC
+                LIMIT ?
+                """,
+                (mission_id, drop_count),
+            ).fetchall()
+            if not ids:
+                return 0
+            placeholders = ",".join("?" * len(ids))
+            c = conn.execute(
+                f"DELETE FROM mission_memory WHERE entry_id IN ({placeholders})",
+                [r["entry_id"] for r in ids],
+            )
+        return c.rowcount
+
+    def expire_memory_entries(self, before_iso: str) -> int:
+        with self._connect() as conn:
+            c = conn.execute(
+                "DELETE FROM mission_memory WHERE expires_at IS NOT NULL AND expires_at <= ?",
+                (before_iso,),
+            )
+        return c.rowcount
+
+    # ------------------------------------------------------------------
+    # Artifact index (EPIC 8)
+    # ------------------------------------------------------------------
+
+    def upsert_artifact(
+        self,
+        mission_id: str,
+        kind: str,
+        name: str,
+        uri: str,
+        size_bytes: int = 0,
+        sha256: str = "",
+        step_index: Optional[int] = None,
+        tags: Optional[List[str]] = None,
+        meta: Optional[Dict] = None,
+    ) -> str:
+        artifact_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mission_artifacts
+                    (artifact_id, mission_id, step_index, kind, name, uri,
+                     size_bytes, sha256, tags_json, meta_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id, mission_id, step_index, kind, name, uri,
+                    size_bytes, sha256,
+                    json.dumps(tags or []), json.dumps(meta or {}), now,
+                ),
+            )
+        return artifact_id
+
+    def get_artifact(self, artifact_id: str) -> Optional[ArtifactRecord]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM mission_artifacts WHERE artifact_id = ?",
+                (artifact_id,),
+            ).fetchone()
+        return _row_to_artifact(row) if row else None
+
+    def list_artifacts(
+        self,
+        mission_id: str,
+        kind: Optional[str] = None,
+        tag: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[ArtifactRecord]:
+        clauses = ["mission_id = ?"]
+        params: list = [mission_id]
+        if kind:
+            clauses.append("kind = ?"); params.append(kind)
+        where = " AND ".join(clauses)
+        params.append(limit)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM mission_artifacts WHERE {where} "
+                f"ORDER BY created_at DESC LIMIT ?",
+                params,
+            ).fetchall()
+        results = [_row_to_artifact(r) for r in rows]
+        if tag:
+            results = [a for a in results if tag in a.tags]
+        return results
+
+    def count_artifacts(self, mission_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM mission_artifacts WHERE mission_id = ?",
+                (mission_id,),
+            ).fetchone()
+        return int(row["c"])
+
+    def delete_artifact(self, artifact_id: str) -> bool:
+        with self._connect() as conn:
+            c = conn.execute(
+                "DELETE FROM mission_artifacts WHERE artifact_id = ?", (artifact_id,)
+            )
+        return c.rowcount > 0
+
+    def delete_mission_artifacts(self, mission_id: str) -> int:
+        with self._connect() as conn:
+            c = conn.execute(
+                "DELETE FROM mission_artifacts WHERE mission_id = ?", (mission_id,)
+            )
+        return c.rowcount
+
+    # ------------------------------------------------------------------
+    # Mission summaries (EPIC 8)
+    # ------------------------------------------------------------------
+
+    def save_mission_summary(
+        self,
+        mission_id: str,
+        text: str,
+        memory_count: int = 0,
+        artifact_count: int = 0,
+        compacted: bool = False,
+    ) -> MissionSummary:
+        summary_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mission_summaries
+                    (summary_id, mission_id, text, memory_count, artifact_count,
+                     compacted, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (summary_id, mission_id, text, memory_count, artifact_count,
+                 1 if compacted else 0, now),
+            )
+        return MissionSummary(
+            summary_id=summary_id, mission_id=mission_id, text=text,
+            memory_count=memory_count, artifact_count=artifact_count,
+            compacted=compacted, created_at=datetime.fromisoformat(now),
+        )
+
+    def list_mission_summaries(self, mission_id: str) -> List[MissionSummary]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM mission_summaries WHERE mission_id = ? ORDER BY created_at DESC",
+                (mission_id,),
+            ).fetchall()
+        return [_row_to_summary(r) for r in rows]
+
+    def get_latest_summary(self, mission_id: str) -> Optional[MissionSummary]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM mission_summaries WHERE mission_id = ? ORDER BY created_at DESC LIMIT 1",
+                (mission_id,),
+            ).fetchone()
+        return _row_to_summary(row) if row else None
+
+
+def _row_to_memory_entry(row: sqlite3.Row) -> MemoryEntry:
+    return MemoryEntry(
+        entry_id=row["entry_id"],
+        mission_id=row["mission_id"],
+        kind=row["kind"],
+        key=row["key"],
+        value=row["value"],
+        tags=json.loads(row["tags_json"] or "[]"),
+        importance=int(row["importance"] or 5),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
+    )
+
+
+def _row_to_artifact(row: sqlite3.Row) -> ArtifactRecord:
+    return ArtifactRecord(
+        artifact_id=row["artifact_id"],
+        mission_id=row["mission_id"],
+        step_index=row["step_index"],
+        kind=row["kind"],
+        name=row["name"],
+        uri=row["uri"],
+        size_bytes=int(row["size_bytes"] or 0),
+        sha256=row["sha256"] or "",
+        tags=json.loads(row["tags_json"] or "[]"),
+        created_at=datetime.fromisoformat(row["created_at"]),
+        meta_json=row["meta_json"] or "{}",
+    )
+
+
+def _row_to_summary(row: sqlite3.Row) -> MissionSummary:
+    return MissionSummary(
+        summary_id=row["summary_id"],
+        mission_id=row["mission_id"],
+        text=row["text"],
+        memory_count=int(row["memory_count"] or 0),
+        artifact_count=int(row["artifact_count"] or 0),
+        compacted=bool(row["compacted"]),
+        created_at=datetime.fromisoformat(row["created_at"]),
+    )
+
+
+def _row_to_lead(row: sqlite3.Row) -> dict:
+    return {
+        "lead_id": row["lead_id"],
+        "connector_id": row["connector_id"],
+        "source_id": row["source_id"],
+        "title": row["title"],
+        "body": row["body"],
+        "url": row["url"],
+        "priority": int(row["priority"]),
+        "labels": json.loads(row["labels_json"] or "[]"),
+        "score": float(row["score"] or 0),
+        "score_factors": json.loads(row["score_factors_json"] or "{}"),
+        "extra": json.loads(row["extra_json"] or "{}"),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "ingested_at": row["ingested_at"],
+    }
+
 
 def _parse_dt(raw: Optional[str]) -> Optional[datetime]:
     if not raw:
@@ -845,6 +1580,35 @@ def _row_to_session(row: sqlite3.Row) -> TelegramSessionRecord:
         last_run_id=row["last_run_id"],
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
+    )
+
+
+def _row_to_mission(row: sqlite3.Row) -> MissionRecord:
+    return MissionRecord(
+        mission_id=row["mission_id"],
+        title=row["title"],
+        goal=row["goal"],
+        state=row["state"],
+        schedule_interval_sec=row["schedule_interval_sec"],
+        retry_limit=int(row["retry_limit"] or 3),
+        retry_count=int(row["retry_count"] or 0),
+        max_concurrency=int(row["max_concurrency"] or 1),
+        context_json=row["context_json"] or "{}",
+        created_at=datetime.fromisoformat(row["created_at"]),
+        updated_at=datetime.fromisoformat(row["updated_at"]),
+        started_at=datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
+        completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+    )
+
+
+def _row_to_mission_event(row: sqlite3.Row) -> MissionEventRecord:
+    return MissionEventRecord(
+        id=int(row["id"]),
+        mission_id=row["mission_id"],
+        from_state=row["from_state"],
+        to_state=row["to_state"],
+        reason=row["reason"],
+        created_at=datetime.fromisoformat(row["created_at"]),
     )
 
 

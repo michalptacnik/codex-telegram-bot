@@ -1,9 +1,13 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Optional
 
 from codex_telegram_bot.agent_core.router import AgentRouter
 from codex_telegram_bot.domain.sessions import TelegramSessionRecord
-from codex_telegram_bot.services.agent_service import AgentService
+
+if TYPE_CHECKING:
+    from codex_telegram_bot.services.agent_service import AgentService
 
 
 @dataclass(frozen=True)
@@ -15,7 +19,7 @@ class AgentResponse:
 class Agent:
     """Agent Core entrypoint for transport layers."""
 
-    def __init__(self, agent_service: AgentService, router: Optional[AgentRouter] = None):
+    def __init__(self, agent_service: "AgentService", router: Optional[AgentRouter] = None):
         self._agent_service = agent_service
         self._router = router or AgentRouter(agent_service=agent_service)
 
