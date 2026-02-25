@@ -1020,4 +1020,39 @@ def create_app_with_config(
         snapshot = metrics_collector.snapshot()
         return _PlainTextResponse(snapshot.format_text())
 
+    # ------------------------------------------------------------------
+    # Parity 1: Session detail API (list is already at /api/sessions)
+    # ------------------------------------------------------------------
+
+    @app.get("/api/sessions/{session_id}/detail")
+    async def api_session_detail(session_id: str):
+        """Return metadata and recent messages for a specific session."""
+        session = agent_service.get_session(session_id)
+        if session is None:
+            from fastapi import HTTPException as _HTTPException
+            raise _HTTPException(status_code=404, detail="Session not found")
+        messages = agent_service.list_session_messages(session_id, limit=20)
+        return {
+            "session": {
+                "session_id": session.session_id,
+                "chat_id": session.chat_id,
+                "user_id": session.user_id,
+                "status": session.status,
+                "current_agent_id": session.current_agent_id,
+                "last_run_id": session.last_run_id,
+                "summary": (session.summary or "")[:500],
+                "created_at": session.created_at.isoformat() if session.created_at else "",
+                "updated_at": session.updated_at.isoformat() if session.updated_at else "",
+            },
+            "recent_messages": [
+                {
+                    "role": m.role,
+                    "content": (m.content or "")[:500],
+                    "run_id": m.run_id,
+                    "created_at": m.created_at.isoformat() if m.created_at else "",
+                }
+                for m in messages
+            ],
+        }
+
     return app

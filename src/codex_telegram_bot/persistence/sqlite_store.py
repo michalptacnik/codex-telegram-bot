@@ -764,6 +764,61 @@ class SqliteRunStore:
             )
             return remove_count
 
+    # ------------------------------------------------------------------
+    # Session retention helpers (Parity Epic 1)
+    # ------------------------------------------------------------------
+
+    def archive_idle_sessions(self, idle_days: int = 30) -> int:
+        """Archive ``active`` sessions not updated in ``idle_days`` days.
+
+        Returns the number of sessions transitioned to ``archived``.
+        """
+        from datetime import timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(idle_days)))
+        ).isoformat()
+        with self._connect() as conn:
+            result = conn.execute(
+                """
+                UPDATE telegram_sessions
+                SET status = ?, updated_at = ?
+                WHERE status = ? AND updated_at < ?
+                """,
+                (SESSION_STATUS_ARCHIVED, _utc_now(), SESSION_STATUS_ACTIVE, cutoff),
+            )
+            return result.rowcount if result.rowcount is not None else 0
+
+    def prune_archived_sessions(self, older_than_days: int = 90) -> int:
+        """Hard-delete archived sessions (and their messages) older than
+        ``older_than_days`` days.
+
+        Returns the number of sessions deleted.
+        """
+        from datetime import timedelta
+
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=max(1, int(older_than_days)))
+        ).isoformat()
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT session_id FROM telegram_sessions WHERE status = ? AND updated_at < ?",
+                (SESSION_STATUS_ARCHIVED, cutoff),
+            ).fetchall()
+            if not rows:
+                return 0
+            ids = [r["session_id"] for r in rows]
+            placeholders = ",".join(["?"] * len(ids))
+            conn.execute(
+                f"DELETE FROM telegram_session_messages WHERE session_id IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM telegram_sessions WHERE session_id IN ({placeholders})",
+                ids,
+            )
+            return len(ids)
+
     def create_tool_approval(
         self,
         chat_id: int,
