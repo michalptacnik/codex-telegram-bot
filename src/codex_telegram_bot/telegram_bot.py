@@ -146,7 +146,7 @@ def _parse_gh_command_spec(args: List[str]) -> tuple[Optional[dict], str]:
 def _parse_email_check_spec(args: List[str]) -> tuple[Optional[dict], str]:
     email = str((args[0] if args else "") or "").strip()
     if not email:
-        return None, "Usage: /email-check <email>"
+        return None, "Usage: /email_check <email>"
     return {"name": "email_validate", "args": {"email": email}}, ""
 
 
@@ -202,10 +202,10 @@ def _parse_template_spec(args: List[str]) -> tuple[Optional[dict], str]:
 def _parse_email_template_spec(args: List[str]) -> tuple[Optional[dict], str]:
     tokens = [str(a or "").strip() for a in args if str(a or "").strip()]
     if len(tokens) < 2:
-        return None, "Usage: /email-template [--dry-run] <template_id> <to_email>"
+        return None, "Usage: /email_template [--dry-run] <template_id> <to_email>"
     tokens, dry_run = _strip_flag(tokens, "--dry-run")
     if len(tokens) < 2:
-        return None, "Usage: /email-template [--dry-run] <template_id> <to_email>"
+        return None, "Usage: /email_template [--dry-run] <template_id> <to_email>"
     return {
         "name": "send_email_template",
         "args": {"template_id": tokens[0], "to": tokens[1], "dry_run": bool(dry_run)},
@@ -535,7 +535,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 profile = agent.policy_profile
         text = (
             "Commands:\n"
-            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /email, /gh, /email-check, /contact, /template, /email-template\n"
+            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /email, /gh, /email_check, /contact, /template, /email_template\n"
             "\n"
             "Examples:\n"
             "- `!exec /bin/ls -la`\n"
@@ -544,7 +544,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "- `/gh comment owner/repo 123 looks good`\n"
             "- `/contact add me@example.com Michal`\n"
             "- `/template save welcome | Welcome | Hello from template.`\n"
-            "- `/email-template welcome me@example.com`\n"
+            "- `/email_template welcome me@example.com`\n"
             "\n"
             f"Active policy profile: `{profile}`\n"
             "High-risk actions require approval and are auditable."
@@ -647,7 +647,7 @@ async def handle_email_check(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         spec, err = _parse_email_check_spec(context.args or [])
         if not spec:
-            await update.message.reply_text(err or "Invalid /email-check command.")
+            await update.message.reply_text(err or "Invalid /email_check command.")
             return
         text = "!tool " + json.dumps(spec, ensure_ascii=True)
         await _process_prompt(update=update, context=context, text=text, user_id=user_id)
@@ -701,7 +701,7 @@ async def handle_email_template(update: Update, context: ContextTypes.DEFAULT_TY
             return
         spec, err = _parse_email_template_spec(context.args or [])
         if not spec:
-            await update.message.reply_text(err or "Invalid /email-template command.")
+            await update.message.reply_text(err or "Invalid /email_template command.")
             return
         text = "!tool " + json.dumps(spec, ensure_ascii=True)
         await _process_prompt(update=update, context=context, text=text, user_id=user_id)
@@ -1088,10 +1088,10 @@ def build_application(
     app.add_handler(CommandHandler("skills", handle_skills))
     app.add_handler(CommandHandler("email", handle_email))
     app.add_handler(CommandHandler("gh", handle_gh))
-    app.add_handler(CommandHandler("email-check", handle_email_check))
+    app.add_handler(CommandHandler("email_check", handle_email_check))
     app.add_handler(CommandHandler("contact", handle_contact))
     app.add_handler(CommandHandler("template", handle_template))
-    app.add_handler(CommandHandler("email-template", handle_email_template))
+    app.add_handler(CommandHandler("email_template", handle_email_template))
     app.add_handler(CommandHandler("reinstall", handle_reinstall))
     app.add_handler(CommandHandler("purge", handle_purge))
     app.add_handler(CommandHandler("restart", handle_restart))

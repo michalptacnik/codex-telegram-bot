@@ -829,10 +829,10 @@ class TestParity10CommandSurface:
             "/continue",
             "/email",
             "/gh",
-            "/email-check",
+            "/email_check",
             "/contact",
             "/template",
-            "/email-template",
+            "/email_template",
         ]
         for cmd in expected_commands:
             assert cmd in source, f"Command {cmd} not found in telegram_bot source"

@@ -36,8 +36,8 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - `/resume`
   - `/branch`
   - `/email`
-  - `/email-check`
-  - `/email-template`
+  - `/email_check`
+  - `/email_template`
   - `/contact`
   - `/template`
   - `/gh`
@@ -549,10 +549,10 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
 - `/continue` reuses latest user prompt and asks the agent to continue the task.
 - Shortcut command surface for common workflows:
   - `/email [--dry-run] to@example.com | Subject | Body`
-  - `/email-check <email>`
+  - `/email_check <email>`
   - `/contact add <email> [name...] | list | remove <email>`
   - `/template save <id> | <subject> | <body> | list | show <id> | delete <id>`
-  - `/email-template [--dry-run] <template_id> <to_email>`
+  - `/email_template [--dry-run] <template_id> <to_email>`
   - `/gh comment|create|close ...`
 - Safe replay guardrails:
   - high-risk replays require explicit confirmation (`/continue yes`)
