@@ -272,12 +272,42 @@ def _is_valid_command_name(name: str) -> bool:
     return bool(COMMAND_NAME_RE.match((name or "").strip()))
 
 
+def _sanitize_command_name(name: str) -> str:
+    sanitized = re.sub(r"[^a-z0-9_]", "_", (name or "").strip().lower())
+    sanitized = re.sub(r"_+", "_", sanitized).strip("_")
+    return sanitized[:32]
+
+
 def _validate_command_registry(command_specs: List[tuple[str, object]]) -> None:
     for command_name, _ in command_specs:
         if not _is_valid_command_name(command_name):
             raise RuntimeError(
                 f"Invalid Telegram command '{command_name}'. Use lowercase letters, digits, and underscore only."
             )
+
+
+def _build_command_registry() -> List[tuple[str, object]]:
+    command_specs: List[tuple[str, object]] = []
+    used_names = set()
+    for raw_command_name, handler_name in _COMMAND_HANDLERS:
+        handler = globals().get(handler_name)
+        if not callable(handler):
+            logger.error("Skipping Telegram command '%s': handler '%s' is missing.", raw_command_name, handler_name)
+            continue
+        command_name = _sanitize_command_name(raw_command_name)
+        if not _is_valid_command_name(command_name):
+            logger.error("Skipping Telegram command '%s': sanitized value '%s' is invalid.", raw_command_name, command_name)
+            continue
+        if command_name in used_names:
+            logger.error("Skipping Telegram command '%s': duplicate command '%s'.", raw_command_name, command_name)
+            continue
+        if command_name != raw_command_name:
+            logger.warning("Normalized Telegram command '%s' to '%s'.", raw_command_name, command_name)
+        used_names.add(command_name)
+        command_specs.append((command_name, handler))
+    if not command_specs:
+        raise RuntimeError("No Telegram commands were registered. Check command registry configuration.")
+    return command_specs
 
 
 async def _delete_message_later(bot, chat_id: int, message_id: int, delay_sec: int = EPHEMERAL_STATUS_TTL_SEC) -> None:
@@ -1112,8 +1142,7 @@ def build_application(
     app.bot_data["agent_service"] = agent_service
     app.bot_data["agent"] = agent
     app.bot_data.update(callbacks)
-    command_specs: List[tuple[str, object]] = [(name, globals()[handler]) for name, handler in _COMMAND_HANDLERS]
-    _validate_command_registry(command_specs)
+    command_specs = _build_command_registry()
     for command_name, handler in command_specs:
         app.add_handler(CommandHandler(command_name, handler))
     app.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r"^approval:"))

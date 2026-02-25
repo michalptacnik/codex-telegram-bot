@@ -2,7 +2,9 @@ import unittest
 
 from codex_telegram_bot.telegram_bot import (
     _COMMAND_HANDLERS,
+    _build_command_registry,
     _is_valid_command_name,
+    _sanitize_command_name,
     _validate_command_registry,
     _parse_contact_spec,
     _parse_email_check_spec,
@@ -76,3 +78,10 @@ class TestCommandRegistryValidation(unittest.TestCase):
     def test_registry_rejects_hyphenated_command(self):
         with self.assertRaises(RuntimeError):
             _validate_command_registry([("email-check", object())])
+
+    def test_sanitize_command_name_normalizes_hyphen(self):
+        self.assertEqual(_sanitize_command_name("email-check"), "email_check")
+
+    def test_build_registry_normalizes_and_skips_broken_entries(self):
+        registry = _build_command_registry()
+        self.assertTrue(any(name == "email_check" for name, _ in registry))
