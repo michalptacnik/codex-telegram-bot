@@ -1123,6 +1123,58 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Autonomous recovery", out)
             await service.shutdown()
 
+    async def test_email_send_claim_in_actions_path_triggers_recovery(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "I'll send the email now.\n\n**Subject:** Intro from Michal\nHi Amber Group Team,\nBody text."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        class _FakeEmailTool:
+            name = "send_email_smtp"
+
+            def run(self, request, context):
+                return type("R", (), {"ok": True, "output": f"Email sent to {request.args.get('to')}"})()
+
+        class _Skill:
+            skill_id = "smtp_email"
+
+        class _SkillManager:
+            def auto_activate(self, _prompt):
+                return [_Skill()]
+
+            def tools_for_skills(self, _skills):
+                return {"send_email_smtp": _FakeEmailTool()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(db_path=Path(tmp) / "state.db")
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            service = AgentService(
+                provider=_Provider(),
+                run_store=store,
+                event_bus=EventBus(),
+                execution_runner=runner,
+                skill_manager=_SkillManager(),
+            )
+            session = service.get_or_create_session(chat_id=14, user_id=25)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="!exec /bin/echo hello\nPlease send to partnerships@ambergroup.io",
+                chat_id=14,
+                user_id=25,
+                session_id=session.session_id,
+                agent_id="default",
+            )
+            self.assertIn("Email sent to partnerships@ambergroup.io", out)
+            self.assertIn("Autonomous recovery", out)
+            await service.shutdown()
+
 
 class TestEmailIntentGuards(unittest.TestCase):
     def test_detects_email_send_intent(self):

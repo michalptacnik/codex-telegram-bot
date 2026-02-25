@@ -945,6 +945,22 @@ class AgentService:
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
         output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+        if _output_claims_email_sent(output):
+            recovered = await self._attempt_autonomous_email_send_recovery(
+                output=output,
+                prompt=(cleaned_prompt or prompt),
+                session_id=session_id,
+                workspace_root=session_workspace,
+                policy_profile=policy_profile,
+                extra_tools=extra_tools,
+            )
+            if recovered is None:
+                output = (
+                    "Error: email send was claimed, but no SMTP tool action was executed.\n"
+                    "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                )
+            else:
+                output = recovered
         await self._notify_progress(
             progress_callback,
             {"event": "loop.finished", "steps_total": len(actions)},
