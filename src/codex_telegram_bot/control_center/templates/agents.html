@@ -20,12 +20,9 @@
     <input type="text" name="agent_id" placeholder="agent_id (e.g. planner)" required />
     <input type="text" name="name" placeholder="Agent Name" required />
     <select name="provider">
-      <option value="codex_cli">codex_cli</option>
-      <option value="openai">openai</option>
-      <option value="anthropic">anthropic</option>
-      <option value="deepseek">deepseek</option>
-      <option value="qwen">qwen</option>
-      <option value="gemini">gemini</option>
+      {% for provider_name in provider_options %}
+      <option value="{{ provider_name }}" {% if provider_name == default_provider %}selected{% endif %}>{{ provider_name }}</option>
+      {% endfor %}
     </select>
     <select name="policy_profile">
       <option value="strict">strict</option>

@@ -13,6 +13,7 @@ from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterConfig
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.agent_service import _model_job_phase_hint
 
 
 class FakeRunner:
@@ -925,3 +926,14 @@ class TestAlertDispatcher(unittest.TestCase):
             delivered = dispatcher.flush_dead_letters()
             self.assertEqual(delivered, 1)
             self.assertEqual(len(dispatcher._dead_letters), 0)
+
+
+class TestModelJobPhaseHints(unittest.TestCase):
+    def test_phase_hint_progression(self):
+        self.assertEqual(_model_job_phase_hint(5, 0), "analyzing request and workspace context")
+        self.assertEqual(_model_job_phase_hint(40, 1), "planning next concrete steps")
+        self.assertEqual(_model_job_phase_hint(120, 2), "performing repository edits/checks")
+        self.assertIn(
+            _model_job_phase_hint(240, 3),
+            {"performing repository edits/checks", "verifying output and preparing response"},
+        )

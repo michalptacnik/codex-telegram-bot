@@ -167,12 +167,16 @@ def create_app_with_config(
     provider_registry=None,
     metrics_collector=None,
 ) -> FastAPI:
+    if provider_registry is None:
+        provider_registry = agent_service.provider_registry()
     base_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=str(base_dir / "templates"))
     app = FastAPI(title="Codex Control Center", version="0.2.0")
     app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
     onboarding = OnboardingStore(config_dir=config_dir)
     plugin_manager = PluginLifecycleManager(config_dir=config_dir or (Path.cwd() / ".codex-telegram-bot"))
+    onboarding_key_env = (os.environ.get("ONBOARDING_PROVIDER_KEY_ENV") or "OPENAI_API_KEY").strip() or "OPENAI_API_KEY"
+    provider_key_hint = f"Optional: set {onboarding_key_env} for provider runtime."
     local_api_version = "v1"
     local_api_keys = _parse_local_api_keys(os.environ.get("LOCAL_API_KEYS", ""))
     local_api_enabled = bool(local_api_keys)
@@ -218,6 +222,21 @@ def create_app_with_config(
         required = read_scope if request.method in {"GET", "HEAD", "OPTIONS"} else write_scope
         if required not in scopes:
             raise HTTPException(status_code=403, detail=f"Missing scope: {required}")
+
+    def _provider_options() -> List[str]:
+        if provider_registry is not None:
+            try:
+                raw = provider_registry.list_providers()
+            except Exception:
+                raw = []
+            names = [str(item.get("name") or "").strip() for item in raw if isinstance(item, dict)]
+            names = [n for n in names if n]
+            if names:
+                return names
+        names = [n for n in agent_service.available_provider_names() if n]
+        if names:
+            return names
+        return [agent_service.default_provider_name()]
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:
@@ -707,7 +726,7 @@ def create_app_with_config(
                 "onboarding_state": onboarding.load(),
                 "workspace_root": workspace_root,
                 "policy_profile": profile,
-                "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                "provider_key_hint": provider_key_hint,
                 "error": "",
                 "result": "",
             },
@@ -735,7 +754,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace),
                     "policy_profile": profile,
-                    "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                    "provider_key_hint": provider_key_hint,
                     "error": "Invalid safety profile.",
                     "result": "",
                 },
@@ -751,7 +770,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace),
                     "policy_profile": profile,
-                    "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                    "provider_key_hint": provider_key_hint,
                     "error": "Workspace path must exist and be a directory.",
                     "result": "",
                 },
@@ -767,7 +786,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace),
                     "policy_profile": profile,
-                    "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                    "provider_key_hint": provider_key_hint,
                     "error": "Provider key format looks invalid.",
                     "result": "",
                 },
@@ -779,7 +798,7 @@ def create_app_with_config(
             env = load_env_file(env_path)
             env["EXECUTION_WORKSPACE_ROOT"] = str(workspace.resolve())
             if key:
-                env["OPENAI_API_KEY"] = key
+                env[onboarding_key_env] = key
             write_env_file(env_path, env)
 
         default_agent = agent_service.get_agent("default")
@@ -808,7 +827,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace.resolve()),
                     "policy_profile": profile,
-                    "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                    "provider_key_hint": provider_key_hint,
                     "error": f"Test run failed: {str(exc)[:200]}",
                     "result": "",
                 },
@@ -825,7 +844,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace.resolve()),
                     "policy_profile": profile,
-                    "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                    "provider_key_hint": provider_key_hint,
                     "error": "Test run did not succeed. Review settings and try again.",
                     "result": output[:220],
                 },
@@ -842,7 +861,7 @@ def create_app_with_config(
                 "onboarding_state": onboarding.load(),
                 "workspace_root": str(workspace.resolve()),
                 "policy_profile": profile,
-                "provider_key_hint": "Optional: set OPENAI_API_KEY for provider runtime.",
+                "provider_key_hint": provider_key_hint,
                 "error": "",
                 "result": output[:220],
             },
@@ -895,9 +914,17 @@ def create_app_with_config(
     @app.get("/agents", response_class=HTMLResponse)
     async def agents_page(request: Request, error: str = ""):
         agents = agent_service.list_agents()
+        provider_options = _provider_options()
         return templates.TemplateResponse(
             "agents.html",
-            {"request": request, "nav": "agents", "agents": agents, "error": error},
+            {
+                "request": request,
+                "nav": "agents",
+                "agents": agents,
+                "provider_options": provider_options,
+                "default_provider": provider_options[0] if provider_options else "codex_cli",
+                "error": error,
+            },
         )
 
     @app.get("/plugins", response_class=HTMLResponse)
@@ -981,9 +1008,17 @@ def create_app_with_config(
             )
         except ValueError as exc:
             agents = agent_service.list_agents()
+            provider_options = _provider_options()
             return templates.TemplateResponse(
                 "agents.html",
-                {"request": request, "nav": "agents", "agents": agents, "error": str(exc)},
+                {
+                    "request": request,
+                    "nav": "agents",
+                    "agents": agents,
+                    "provider_options": provider_options,
+                    "default_provider": provider_options[0] if provider_options else "codex_cli",
+                    "error": str(exc),
+                },
                 status_code=400,
             )
         return RedirectResponse(url="/agents", status_code=303)

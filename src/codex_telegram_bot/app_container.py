@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
 from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
 from codex_telegram_bot.agent_core.memory import resolve_memory_config
@@ -39,8 +39,6 @@ def build_agent_service(state_db_path: Optional[Path] = None) -> AgentService:
     )
     runner = LocalShellRunner(profile_resolver=ExecutionProfileResolver(workspace_root))
     provider_backend = _read_provider_backend()
-    if provider_backend not in {"codex-cli", "codex_cli", "openai", "deepseek", "qwen", "anthropic", "gemini"}:
-        raise ValueError(f"Unsupported provider backend: {provider_backend}")
     provider_registry = _build_provider_registry(runner=runner, preferred_backend=provider_backend)
     capability_router = CapabilityRouter(provider_registry)
 
@@ -146,9 +144,20 @@ def _read_provider_backend() -> str:
 
 def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -> ProviderRegistry:
     active = _registry_name_for_backend(preferred_backend)
-    registry = ProviderRegistry(default_provider_name=active)
-    registry.register("codex_cli", CodexCliProvider(runner=runner), make_active=(active == "codex_cli"))
-    registry.register("anthropic", AnthropicProvider(), make_active=(active == "anthropic"))
+    extra_specs = _read_extra_openai_compatible_specs()
+    known_names = {
+        "codex_cli",
+        "anthropic",
+        "openai",
+        "deepseek",
+        "qwen",
+        "gemini",
+        *[spec["name"] for spec in extra_specs],
+    }
+    default_name = active if active in known_names else "codex_cli"
+    registry = ProviderRegistry(default_provider_name=default_name)
+    registry.register("codex_cli", CodexCliProvider(runner=runner), make_active=(default_name == "codex_cli"))
+    registry.register("anthropic", AnthropicProvider(), make_active=(default_name == "anthropic"))
     registry.register(
         "openai",
         OpenAICompatibleProvider(
@@ -157,7 +166,7 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
             default_base_url="https://api.openai.com/v1",
             default_model="gpt-4.1-mini",
         ),
-        make_active=(active == "openai"),
+        make_active=(default_name == "openai"),
     )
     registry.register(
         "deepseek",
@@ -167,7 +176,7 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
             default_base_url="https://api.deepseek.com/v1",
             default_model="deepseek-chat",
         ),
-        make_active=(active == "deepseek"),
+        make_active=(default_name == "deepseek"),
     )
     registry.register(
         "qwen",
@@ -178,13 +187,69 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
             default_model="qwen-plus",
             api_key=os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY") or "",
         ),
-        make_active=(active == "qwen"),
+        make_active=(default_name == "qwen"),
     )
-    registry.register("gemini", GeminiProvider(), make_active=(active == "gemini"))
+    registry.register("gemini", GeminiProvider(), make_active=(default_name == "gemini"))
+    for spec in extra_specs:
+        name = spec["name"]
+        registry.register(
+            name,
+            OpenAICompatibleProvider(
+                provider_name=name,
+                api_key_env=spec["api_key_env"],
+                default_base_url=spec["base_url"],
+                default_model=spec["model"],
+                model_env=spec["model_env"],
+                base_url_env=spec["base_url_env"],
+                timeout_env=spec["timeout_env"],
+            ),
+            make_active=(default_name == name),
+        )
     return registry
 
 
 def _registry_name_for_backend(value: str) -> str:
     if value == "codex-cli":
         return "codex_cli"
-    return value
+    return (value or "").strip().lower().replace("-", "_")
+
+
+def _read_extra_openai_compatible_specs() -> List[Dict[str, str]]:
+    raw = (os.environ.get("OPENAI_COMPATIBLE_PROVIDERS") or "").strip()
+    if not raw:
+        return []
+    names: List[str] = []
+    for chunk in raw.split(","):
+        name = _normalize_provider_name(chunk)
+        if not name or name in names:
+            continue
+        names.append(name)
+    specs: List[Dict[str, str]] = []
+    for name in names:
+        env_prefix = name.upper()
+        model_env = f"{env_prefix}_MODEL"
+        base_url_env = f"{env_prefix}_BASE_URL"
+        timeout_env = f"{env_prefix}_TIMEOUT_SEC"
+        specs.append(
+            {
+                "name": name,
+                "api_key_env": f"{env_prefix}_API_KEY",
+                "model_env": model_env,
+                "base_url_env": base_url_env,
+                "timeout_env": timeout_env,
+                "model": (os.environ.get(model_env) or "gpt-4.1-mini").strip(),
+                "base_url": (os.environ.get(base_url_env) or "").strip().rstrip("/"),
+            }
+        )
+    return specs
+
+
+def _normalize_provider_name(value: str) -> str:
+    name = (value or "").strip().lower().replace("-", "_")
+    if not name:
+        return ""
+    clean = []
+    for ch in name:
+        if ("a" <= ch <= "z") or ("0" <= ch <= "9") or ch == "_":
+            clean.append(ch)
+    return "".join(clean)

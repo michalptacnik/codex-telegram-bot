@@ -1,4 +1,5 @@
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+import asyncio
 import logging
 import re
 import shlex
@@ -30,12 +31,13 @@ from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, Too
 
 logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
+PROVIDER_NAME_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
 ALLOWED_POLICY_PROFILES = {"strict", "balanced", "trusted"}
-ALLOWED_AGENT_PROVIDERS = {"codex_cli", "openai", "anthropic", "gemini", "deepseek", "qwen"}
 CONTEXT_BUDGET_TOTAL_CHARS = 12000
 CONTEXT_HISTORY_BUDGET_CHARS = 6500
 CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
 CONTEXT_SUMMARY_BUDGET_CHARS = 1200
+MODEL_JOB_HEARTBEAT_SEC = 15
 
 
 @dataclass(frozen=True)
@@ -624,7 +626,7 @@ class AgentService:
             contextual = self.build_session_prompt(session_id=session_id, user_prompt=cleaned_prompt or prompt)
             job_id = await self.queue_prompt(prompt=contextual, agent_id=agent_id)
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
-            output = await self.wait_job(job_id)
+            output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
             return output
 
@@ -873,7 +875,7 @@ class AgentService:
         contextual = self.build_session_prompt(session_id=session_id, user_prompt=enriched)
         job_id = await self.queue_prompt(prompt=contextual, agent_id=agent_id)
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
-        output = await self.wait_job(job_id)
+        output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
         await self._notify_progress(
             progress_callback,
@@ -957,10 +959,13 @@ class AgentService:
             raise ValueError("Invalid agent_id. Use 2-40 chars: lowercase letters, numbers, '_' or '-'.")
         if not name:
             raise ValueError("Agent name is required.")
-        if provider == "quen":
-            provider = "qwen"
-        if provider not in ALLOWED_AGENT_PROVIDERS:
-            raise ValueError("Unsupported provider.")
+        provider = self._normalize_provider_name(provider)
+        if not provider or not PROVIDER_NAME_RE.match(provider):
+            raise ValueError("Invalid provider name.")
+        allowed = self.available_provider_names()
+        if allowed and provider not in allowed:
+            known = ", ".join(sorted(allowed))
+            raise ValueError(f"Unsupported provider. Available: {known}")
         if policy_profile not in ALLOWED_POLICY_PROFILES:
             raise ValueError("Invalid policy profile.")
         if max_concurrency < 1 or max_concurrency > 10:
@@ -999,16 +1004,16 @@ class AgentService:
         return profile
 
     def _agent_provider(self, agent_id: str) -> str:
+        default_provider = self.default_provider_name()
         if not self._run_store:
-            return "codex_cli"
+            return default_provider
         agent = self._run_store.get_agent(agent_id)
         if not agent or not agent.enabled:
-            return "codex_cli"
-        value = (agent.provider or "").strip().lower()
-        if value == "quen":
-            value = "qwen"
-        if value not in ALLOWED_AGENT_PROVIDERS:
-            return "codex_cli"
+            return default_provider
+        value = self._normalize_provider_name(agent.provider or "")
+        allowed = self.available_provider_names()
+        if allowed and value not in allowed:
+            return default_provider
         return value
 
     def _provider_for_agent(self, agent_id: str):
@@ -1174,6 +1179,39 @@ class AgentService:
         except Exception:
             logger.exception("tool loop progress callback failed")
 
+    async def _wait_job_with_progress(
+        self,
+        job_id: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+    ) -> str:
+        wait_task = asyncio.create_task(self.wait_job(job_id))
+        started = asyncio.get_running_loop().time()
+        tick = 0
+        try:
+            while not wait_task.done():
+                await asyncio.sleep(MODEL_JOB_HEARTBEAT_SEC)
+                if wait_task.done():
+                    break
+                tick += 1
+                elapsed_sec = int(max(0, asyncio.get_running_loop().time() - started))
+                await self._notify_progress(
+                    progress_callback,
+                    {
+                        "event": "model.job.heartbeat",
+                        "job_id": job_id,
+                        "elapsed_sec": elapsed_sec,
+                        "phase": _model_job_phase_hint(elapsed_sec=elapsed_sec, tick=tick),
+                    },
+                )
+            return await wait_task
+        finally:
+            if not wait_task.done():
+                wait_task.cancel()
+                try:
+                    await wait_task
+                except asyncio.CancelledError:
+                    pass
+
     def _send_alert(self, category: str, severity: str, message: str, **fields: Any) -> None:
         if not self._alert_dispatcher.enabled:
             return
@@ -1200,6 +1238,52 @@ class AgentService:
 
     def provider_registry(self):
         return self._provider_registry
+
+    def available_provider_names(self) -> List[str]:
+        registry = self._provider_registry
+        if registry is None:
+            return []
+        lister = getattr(registry, "list_providers", None)
+        if not callable(lister):
+            return []
+        try:
+            providers = lister()
+        except Exception:
+            return []
+        names: List[str] = []
+        for item in providers or []:
+            if not isinstance(item, dict):
+                continue
+            value = self._normalize_provider_name(str(item.get("name") or ""))
+            if value and value not in names:
+                names.append(value)
+        return names
+
+    def default_provider_name(self) -> str:
+        registry = self._provider_registry
+        if registry is not None:
+            getter = getattr(registry, "get_active_name", None)
+            if callable(getter):
+                try:
+                    value = self._normalize_provider_name(str(getter() or ""))
+                except Exception:
+                    value = ""
+                if value:
+                    return value
+        return "codex_cli"
+
+    @staticmethod
+    def _normalize_provider_name(raw: str) -> str:
+        value = (raw or "").strip().lower()
+        aliases = {
+            "codex-cli": "codex_cli",
+            "codex": "codex_cli",
+            "quen": "qwen",
+            "qwen-openai": "qwen",
+            "deepseek-openai": "deepseek",
+        }
+        value = aliases.get(value, value)
+        return value.replace("-", "_")
 
 
 def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
@@ -1359,3 +1443,19 @@ def _p95(values: List[float]) -> float:
     ordered = sorted(values)
     idx = max(0, int((len(ordered) * 0.95) - 1))
     return ordered[idx]
+
+
+def _model_job_phase_hint(elapsed_sec: int, tick: int) -> str:
+    phases = [
+        "analyzing request and workspace context",
+        "planning next concrete steps",
+        "performing repository edits/checks",
+        "verifying output and preparing response",
+    ]
+    if elapsed_sec < 30:
+        return phases[0]
+    if elapsed_sec < 90:
+        return phases[1]
+    if elapsed_sec < 180:
+        return phases[2]
+    return phases[min(len(phases) - 1, 2 + (tick % 2))]

@@ -75,6 +75,37 @@ class TestMultiProviderEnablement(unittest.IsolatedAsyncioTestCase):
                 expected = "qwen" if provider == "quen" else provider
                 self.assertEqual(saved.provider, expected)
 
+    async def test_agent_validation_uses_registry_provider_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(Path(tmp) / "state.db")
+            registry = ProviderRegistry(default_provider_name="codex_cli")
+            registry.register("codex_cli", _FakeProvider("codex_cli"), make_active=True)
+            registry.register("llama", _FakeProvider("llama"))
+            service = AgentService(
+                provider=registry,
+                provider_registry=registry,
+                run_store=store,
+                event_bus=EventBus(),
+            )
+            saved = service.upsert_agent(
+                agent_id="agent_llama",
+                name="Agent llama",
+                provider="llama",
+                policy_profile="balanced",
+                max_concurrency=1,
+                enabled=True,
+            )
+            self.assertEqual(saved.provider, "llama")
+            with self.assertRaisesRegex(ValueError, "Unsupported provider."):
+                service.upsert_agent(
+                    agent_id="agent_unknown",
+                    name="Agent unknown",
+                    provider="unknown",
+                    policy_profile="balanced",
+                    max_concurrency=1,
+                    enabled=True,
+                )
+
     async def test_service_routes_by_agent_provider_when_registry_available(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SqliteRunStore(Path(tmp) / "state.db")
@@ -112,6 +143,26 @@ class TestMultiProviderEnablement(unittest.IsolatedAsyncioTestCase):
             registry = service.provider_registry()
             self.assertIsNotNone(registry)
             self.assertEqual(registry.get_active_name(), "qwen")
+            await service.shutdown()
+
+    async def test_build_agent_service_registers_extra_openai_compatible_provider(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "OPENAI_COMPATIBLE_PROVIDERS": "llama",
+                "LLAMA_BASE_URL": "https://llama.example/v1",
+                "LLAMA_MODEL": "llama-4",
+                "PROVIDER_BACKEND": "llama",
+            },
+            clear=False,
+        ):
+            service = build_agent_service()
+            registry = service.provider_registry()
+            self.assertIsNotNone(registry)
+            assert registry is not None
+            self.assertEqual(registry.get_active_name(), "llama")
+            names = [p["name"] for p in registry.list_providers()]
+            self.assertIn("llama", names)
             await service.shutdown()
 
     def test_provider_backend_alias_quen(self):

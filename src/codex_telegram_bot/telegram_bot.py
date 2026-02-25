@@ -20,6 +20,7 @@ MAX_INPUT_CHARS = 6000
 MAX_OUTPUT_CHARS = 3800
 EPHEMERAL_STATUS_TTL_SEC = 12
 STATUS_HEARTBEAT_SEC = 15
+STATUS_HEARTBEAT_PUSH_SEC = 45
 USER_WINDOW_SEC = 60
 MAX_USER_COMMANDS_PER_WINDOW = 20
 
@@ -655,17 +656,27 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         elif event == "model.job.queued":
             active_jobs[update.effective_chat.id] = update_payload.get("job_id", "")
             await set_status(f"Running: model job queued `{str(update_payload.get('job_id', ''))[:8]}`...")
+        elif event == "model.job.heartbeat":
+            phase = str(update_payload.get("phase", "") or "processing")
+            elapsed = int(update_payload.get("elapsed_sec", 0) or 0)
+            jid = str(update_payload.get("job_id", "") or "")
+            await set_status(
+                f"Running: {phase} ({elapsed}s elapsed), job `{jid[:8]}`..."
+            )
         elif event == "loop.finished":
             await set_status("Running: tool loop finished, finalizing response...")
 
     async def heartbeat() -> None:
         chat_id = update.effective_chat.id
+        loop = asyncio.get_running_loop()
+        last_push = 0.0
         while True:
             await asyncio.sleep(STATUS_HEARTBEAT_SEC)
             state = run_state.get(chat_id, {})
             if not state:
                 return
-            elapsed = int(max(0, asyncio.get_running_loop().time() - float(state.get("started_at", 0.0))))
+            now = loop.time()
+            elapsed = int(max(0, now - float(state.get("started_at", 0.0))))
             active_step = int(state.get("active_step", 0) or 0)
             total_steps = int(state.get("steps_total", 0) or 0)
             job_id = str(active_jobs.get(chat_id, "") or "")
@@ -676,6 +687,20 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             else:
                 msg = f"Running: still processing ({elapsed}s elapsed)..."
             await set_status(msg)
+            if now - last_push >= STATUS_HEARTBEAT_PUSH_SEC:
+                try:
+                    sent = await context.bot.send_message(chat_id=chat_id, text=msg)
+                    asyncio.create_task(
+                        _delete_message_later(
+                            bot=context.bot,
+                            chat_id=chat_id,
+                            message_id=sent.message_id,
+                            delay_sec=EPHEMERAL_STATUS_TTL_SEC,
+                        )
+                    )
+                except Exception:
+                    pass
+                last_push = now
 
     heartbeat_task = asyncio.create_task(heartbeat())
     try:

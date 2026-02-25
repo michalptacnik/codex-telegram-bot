@@ -166,7 +166,8 @@ Environment variables override `.env`:
 - `PROVIDER_FAILURE_THRESHOLD` (default: `2`)
 - `PROVIDER_RECOVERY_SEC` (default: `30`)
 - `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
-- `PROVIDER_BACKEND` (default: `codex-cli`; current supported value: `codex-cli`)
+- `PROVIDER_BACKEND` (default: `codex-cli`; supported built-ins: `codex-cli`, `openai`, `anthropic`, `gemini`, `deepseek`, `qwen`; also accepts names from `OPENAI_COMPATIBLE_PROVIDERS`)
+- `OPENAI_COMPATIBLE_PROVIDERS` (optional comma-separated provider names; each provider reads `<NAME>_API_KEY`, `<NAME>_BASE_URL`, `<NAME>_MODEL`, `<NAME>_TIMEOUT_SEC`)
 - `CODEX_EXEC_TIMEOUT_SEC` (default: `900`, bounded by policy profile max timeout)
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `CODEX_TIMEOUT_CONTINUE_RETRIES` (default: `1`; auto-continue attempts after timeout `124`)
@@ -488,7 +489,7 @@ Attempts to write beyond quota raise `WorkspaceQuotaExceeded`.
 3. Among matching providers, prefer the currently active provider
 4. Falls back to the active provider when no match is found
 
-At startup, `CodexCliProvider` is registered as `codex_cli` and is active by default.
+At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic`, `gemini`, `deepseek`, `qwen`) and optional OpenAI-compatible providers from `OPENAI_COMPATIBLE_PROVIDERS` are added. The active provider is selected by `PROVIDER_BACKEND` (falls back to `codex_cli`).
 
 ## Telegram Session Runtime
 

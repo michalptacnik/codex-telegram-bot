@@ -7,6 +7,7 @@ from codex_telegram_bot.domain.contracts import CommandResult
 from codex_telegram_bot.events.event_bus import EventBus
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.providers.codex_cli import CodexCliProvider
+from codex_telegram_bot.providers.registry import ProviderRegistry
 from codex_telegram_bot.services.agent_service import AgentService
 
 try:
@@ -29,6 +30,26 @@ class _FakeRunner:
         if len(self._results) > 1:
             return self._results.pop(0)
         return self._results[0]
+
+
+class _FakeProvider:
+    def __init__(self, name: str):
+        self._name = name
+
+    async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced") -> str:
+        return f"{self._name}:ok"
+
+    async def execute(self, prompt: str, correlation_id: str = "", policy_profile: str = "balanced") -> str:
+        return f"{self._name}:ok"
+
+    async def version(self) -> str:
+        return f"{self._name}/v1"
+
+    async def health(self):
+        return {"status": "healthy", "provider": self._name}
+
+    def capabilities(self):
+        return {"provider": self._name}
 
 
 @unittest.skipIf(TestClient is None or create_app is None, "fastapi test deps unavailable")
@@ -271,3 +292,26 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
                 os.environ.pop("LOCAL_API_KEYS", None)
             else:
                 os.environ["LOCAL_API_KEYS"] = old_keys
+
+    async def test_agents_page_uses_registry_provider_options(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db_path = Path(tmp.name) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            registry = ProviderRegistry(default_provider_name="codex_cli")
+            registry.register("codex_cli", _FakeProvider("codex_cli"), make_active=True)
+            registry.register("llama", _FakeProvider("llama"))
+            service = AgentService(
+                provider=registry,
+                provider_registry=registry,
+                run_store=store,
+                event_bus=bus,
+            )
+            app = create_app(service)
+            client = TestClient(app)
+            page = client.get("/agents")
+            self.assertEqual(page.status_code, 200)
+            self.assertIn('option value="llama"', page.text)
+        finally:
+            tmp.cleanup()
