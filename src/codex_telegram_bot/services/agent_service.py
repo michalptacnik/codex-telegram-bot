@@ -673,6 +673,16 @@ class AgentService:
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+            executed_tool = await self._attempt_autonomous_tool_invocation(
+                output=output,
+                session_id=session_id,
+                workspace_root=self.session_workspace(session_id=session_id),
+                policy_profile=self._agent_policy_profile(agent_id=agent_id),
+                extra_tools=extra_tools,
+            )
+            has_executed_tool = executed_tool is not None
+            if has_executed_tool:
+                output = executed_tool
             executed_slash = await self._attempt_autonomous_email_slash_command(
                 output=output,
                 session_id=session_id,
@@ -682,7 +692,7 @@ class AgentService:
             )
             if executed_slash is not None:
                 output = executed_slash
-            elif _output_claims_email_sent(output):
+            elif (not has_executed_tool) and _output_claims_email_sent(output):
                 recovered = await self._attempt_autonomous_email_send_recovery(
                     output=output,
                     prompt=(cleaned_prompt or prompt),
@@ -954,6 +964,16 @@ class AgentService:
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
         output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+        executed_tool = await self._attempt_autonomous_tool_invocation(
+            output=output,
+            session_id=session_id,
+            workspace_root=session_workspace,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        has_executed_tool = executed_tool is not None
+        if has_executed_tool:
+            output = executed_tool
         executed_slash = await self._attempt_autonomous_email_slash_command(
             output=output,
             session_id=session_id,
@@ -963,7 +983,7 @@ class AgentService:
         )
         if executed_slash is not None:
             output = executed_slash
-        elif _output_claims_email_sent(output):
+        elif (not has_executed_tool) and _output_claims_email_sent(output):
             recovered = await self._attempt_autonomous_email_send_recovery(
                 output=output,
                 prompt=(cleaned_prompt or prompt),
@@ -1279,6 +1299,35 @@ class AgentService:
         if not result.ok:
             return f"Error: attempted /email execution but failed.\n{result.output}"
         return _compact_email_tool_output(result.output)
+
+    async def _attempt_autonomous_tool_invocation(
+        self,
+        output: str,
+        session_id: str,
+        workspace_root: Path,
+        policy_profile: str,
+        extra_tools: Dict[str, Any],
+    ) -> Optional[str]:
+        parsed = _extract_tool_invocation_from_output(output)
+        if not parsed:
+            return None
+        tool_name, tool_args = parsed
+        action_id = "tool-" + uuid.uuid4().hex[:8]
+        result = await self._execute_registered_tool_action(
+            action_id=action_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            workspace_root=workspace_root,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        self.append_session_assistant_message(
+            session_id=session_id,
+            content=f"tool.action.completed action_id={action_id} rc={0 if result.ok else 1}",
+        )
+        if not result.ok:
+            return f"Error: attempted autonomous tool execution but failed.\n{result.output}"
+        return _compact_tool_output(result.output)
 
     async def _execute_tool_action_with_telemetry(
         self,
@@ -1867,6 +1916,86 @@ def _extract_email_triplet_from_slash_command(text: str) -> tuple[str, str, str]
     return to_addr, subject, body
 
 
+def _extract_tool_invocation_from_output(text: str) -> Optional[tuple[str, Dict[str, Any]]]:
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    parsed_json = _parse_tool_invocation_json(raw)
+    if parsed_json:
+        return parsed_json
+    return _parse_tool_invocation_slash(raw)
+
+
+def _parse_tool_invocation_json(text: str) -> Optional[tuple[str, Dict[str, Any]]]:
+    candidates: List[str] = []
+    stripped = (text or "").strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        candidates.append(stripped)
+    for match in re.finditer(r"```(?:json)?\s*(\{.*?\})\s*```", text or "", flags=re.S | re.I):
+        candidates.append(match.group(1))
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        name = str(obj.get("name") or obj.get("tool") or "").strip().lower()
+        args = obj.get("args")
+        if name and isinstance(args, dict):
+            return name, dict(args)
+    return None
+
+
+def _parse_tool_invocation_slash(text: str) -> Optional[tuple[str, Dict[str, Any]]]:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip().startswith("/")]
+    for line in lines:
+        if line.lower().startswith("/email "):
+            to_addr, subject, body = _extract_email_triplet_from_slash_command(line)
+            if to_addr and subject and body:
+                return "send_email_smtp", {"to": to_addr, "subject": subject, "body": body}
+        if line.lower().startswith("/email_check "):
+            addr = _extract_email_address(line)
+            if addr:
+                return "email_validate", {"email": addr}
+        if line.lower().startswith("/contact "):
+            tail = line[len("/contact ") :].strip()
+            parts = tail.split()
+            if not parts:
+                continue
+            op = parts[0].lower()
+            if op == "list":
+                return "contact_list", {}
+            if op == "add" and len(parts) >= 2:
+                return "contact_upsert", {"email": parts[1], "name": " ".join(parts[2:]).strip()}
+            if op == "remove" and len(parts) >= 2:
+                return "contact_remove", {"email": parts[1]}
+        if line.lower().startswith("/template "):
+            tail = line[len("/template ") :].strip()
+            if tail.lower() == "list":
+                return "template_list", {}
+            if tail.lower().startswith("show "):
+                template_id = tail.split(maxsplit=1)[1].strip() if " " in tail else ""
+                if template_id:
+                    return "template_get", {"template_id": template_id}
+            if tail.lower().startswith("delete "):
+                template_id = tail.split(maxsplit=1)[1].strip() if " " in tail else ""
+                if template_id:
+                    return "template_delete", {"template_id": template_id}
+            if tail.lower().startswith("save "):
+                payload = tail[len("save ") :].strip()
+                parts = [p.strip() for p in payload.split("|", 2)]
+                if len(parts) == 3 and parts[0] and parts[1] and parts[2]:
+                    return "template_upsert", {"template_id": parts[0], "subject": parts[1], "body": parts[2]}
+        if line.lower().startswith("/email_template "):
+            tail = line[len("/email_template ") :].strip()
+            dry_run = "--dry-run" in tail
+            tokens = [t for t in tail.split() if t != "--dry-run"]
+            if len(tokens) >= 2:
+                return "send_email_template", {"template_id": tokens[0], "to": tokens[1], "dry_run": dry_run}
+    return None
+
+
 def _compact_email_tool_output(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
@@ -1874,6 +2003,16 @@ def _compact_email_tool_output(text: str) -> str:
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     if not lines:
         return "Email sent."
+    if len(lines) >= 2 and lines[0].startswith("tool-"):
+        return lines[-1]
+    return raw
+
+
+def _compact_tool_output(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return "Done."
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     if len(lines) >= 2 and lines[0].startswith("tool-"):
         return lines[-1]
     return raw

@@ -15,6 +15,7 @@ from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.agent_service import _extract_email_address
 from codex_telegram_bot.services.agent_service import _extract_email_triplet_from_slash_command
+from codex_telegram_bot.services.agent_service import _extract_tool_invocation_from_output
 from codex_telegram_bot.services.agent_service import _extract_subject_and_body_from_email_text
 from codex_telegram_bot.services.agent_service import _model_job_phase_hint
 from codex_telegram_bot.services.agent_service import _is_email_send_intent
@@ -1227,6 +1228,55 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Email sent to partnerships@ambergroup.io", out)
             await service.shutdown()
 
+    async def test_generic_slash_tool_invocation_executes(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "/contact list"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        class _ContactListTool:
+            name = "contact_list"
+
+            def run(self, request, context):
+                return type("R", (), {"ok": True, "output": "contacts: none"})()
+
+        class _Skill:
+            skill_id = "email_ops"
+
+        class _SkillManager:
+            def auto_activate(self, _prompt):
+                return [_Skill()]
+
+            def tools_for_skills(self, _skills):
+                return {"contact_list": _ContactListTool()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(db_path=Path(tmp) / "state.db")
+            service = AgentService(
+                provider=_Provider(),
+                run_store=store,
+                event_bus=EventBus(),
+                skill_manager=_SkillManager(),
+            )
+            session = service.get_or_create_session(chat_id=16, user_id=27)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Do what is needed.",
+                chat_id=16,
+                user_id=27,
+                session_id=session.session_id,
+                agent_id="default",
+            )
+            self.assertEqual(out, "contacts: none")
+            await service.shutdown()
+
 
 class TestEmailIntentGuards(unittest.TestCase):
     def test_detects_email_send_intent(self):
@@ -1259,3 +1309,15 @@ class TestEmailIntentGuards(unittest.TestCase):
         self.assertEqual(to_addr, "partnerships@ambergroup.io")
         self.assertEqual(subject, "Intro")
         self.assertEqual(body, "Hello team")
+
+    def test_extract_tool_invocation_from_json(self):
+        parsed = _extract_tool_invocation_from_output(
+            '{"name":"send_email_smtp","args":{"to":"a@b.com","subject":"S","body":"B"}}'
+        )
+        self.assertEqual(parsed[0], "send_email_smtp")
+        self.assertEqual(parsed[1]["to"], "a@b.com")
+
+    def test_extract_tool_invocation_from_slash_contact(self):
+        parsed = _extract_tool_invocation_from_output("/contact add user@example.com John Doe")
+        self.assertEqual(parsed[0], "contact_upsert")
+        self.assertEqual(parsed[1]["email"], "user@example.com")
