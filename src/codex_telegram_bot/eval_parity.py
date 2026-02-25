@@ -20,6 +20,7 @@ class BenchmarkCase:
     expected_contains: List[str]
     forbidden_contains: List[str]
     max_latency_sec: float
+    category: str = ""
 
 
 def _normalize(text: str) -> str:
@@ -106,6 +107,7 @@ def load_cases(path: Path) -> List[BenchmarkCase]:
         expected_contains = [str(x) for x in (row.get("expected_contains") or [])]
         forbidden_contains = [str(x) for x in (row.get("forbidden_contains") or [])]
         max_latency_sec = float(row.get("max_latency_sec") or 45.0)
+        category = str(row.get("category") or "")
         out.append(
             BenchmarkCase(
                 case_id=case_id,
@@ -113,6 +115,7 @@ def load_cases(path: Path) -> List[BenchmarkCase]:
                 expected_contains=expected_contains,
                 forbidden_contains=forbidden_contains,
                 max_latency_sec=max_latency_sec,
+                category=category,
             )
         )
     return out
@@ -293,22 +296,45 @@ def render_markdown(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _offline_baseline(case: BenchmarkCase) -> Tuple[str, int, float]:
+    """Return a synthetic baseline output for offline/CI mode.
+
+    The synthetic output simply echoes back the expected_contains tokens joined
+    by spaces, giving a baseline that always passes its own gate checks.  The
+    similarity score against this baseline will reflect how well the Telegram
+    runner reproduces the expected tokens.
+    """
+    text = " ".join(case.expected_contains) if case.expected_contains else "ok"
+    return text, 0, 0.0
+
+
 async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
     cases = load_cases(Path(args.cases))
+    category_filter = getattr(args, "category", "")
+    if category_filter:
+        cases = [c for c in cases if c.category == category_filter]
     if args.max_cases and args.max_cases > 0:
         cases = cases[: args.max_cases]
 
+    offline = getattr(args, "offline_baseline", False)
+    offline_telegram = getattr(args, "offline_telegram", False)
+
     rows: List[Dict[str, Any]] = []
-    async with TelegramAgentRunner(
-        workspace_root=Path(args.workspace_root).expanduser().resolve(),
-        policy_profile=args.policy_profile,
-    ) as telegram_runner:
+
+    async def _collect_rows(telegram_runner) -> None:
         for case in cases:
-            baseline_output, _, baseline_latency = await run_codex_direct(
-                prompt=case.prompt,
-                timeout_sec=args.timeout_sec,
-            )
-            telegram_output, telegram_latency = await telegram_runner.run_prompt(case.prompt)
+            if offline:
+                baseline_output, _, baseline_latency = _offline_baseline(case)
+            else:
+                baseline_output, _, baseline_latency = await run_codex_direct(
+                    prompt=case.prompt,
+                    timeout_sec=args.timeout_sec,
+                )
+            if offline_telegram:
+                telegram_output = " ".join(case.expected_contains) if case.expected_contains else "ok"
+                telegram_latency = 0.5
+            else:
+                telegram_output, telegram_latency = await telegram_runner.run_prompt(case.prompt)
             baseline_eval = evaluate_output(case=case, output=baseline_output, latency_sec=baseline_latency)
             telegram_eval = evaluate_output(case=case, output=telegram_output, latency_sec=telegram_latency)
             sim = text_similarity(baseline_output, telegram_output)
@@ -328,6 +354,15 @@ async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
                 }
             )
 
+    if offline_telegram:
+        await _collect_rows(None)
+    else:
+        async with TelegramAgentRunner(
+            workspace_root=Path(args.workspace_root).expanduser().resolve(),
+            policy_profile=args.policy_profile,
+        ) as telegram_runner:
+            await _collect_rows(telegram_runner)
+
     summary = aggregate_case_rows(rows)
     gates = evaluate_gates(
         summary=summary,
@@ -342,6 +377,9 @@ async def run_parity_eval(args: argparse.Namespace) -> Dict[str, Any]:
         "cases_file": str(Path(args.cases).resolve()),
         "workspace_root": str(Path(args.workspace_root).expanduser().resolve()),
         "policy_profile": args.policy_profile,
+        "offline_baseline": offline,
+        "offline_telegram": offline_telegram,
+        "category_filter": category_filter,
         "summary": summary,
         "gates": gates,
         "cases": rows,
@@ -362,6 +400,32 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-similarity", type=float, default=0.6)
     parser.add_argument("--max-p95-latency-sec", type=float, default=45.0)
     parser.add_argument("--max-corrections", type=int, default=2)
+    parser.add_argument(
+        "--offline-baseline",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip codex CLI baseline calls and use synthetic expected-token "
+            "output as the baseline. Useful in CI environments where the codex "
+            "CLI is not installed."
+        ),
+    )
+    parser.add_argument(
+        "--offline-telegram",
+        action="store_true",
+        default=False,
+        help=(
+            "Skip the live TelegramAgentRunner and use synthetic expected-token "
+            "output as the telegram runner output. Combine with --offline-baseline "
+            "for a fully offline CI run that validates gate logic without any "
+            "external dependencies."
+        ),
+    )
+    parser.add_argument(
+        "--category",
+        default="",
+        help="If set, only run cases whose 'category' field matches this value.",
+    )
     return parser
 
 

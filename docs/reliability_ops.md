@@ -50,3 +50,72 @@ Alert categories currently emitted:
    - fallback to default agent/profile
    - halt high-risk approvals
    - notify operators via alert sink.
+
+---
+
+## Monitoring Integration
+
+### Prometheus / Grafana
+
+The Control Center exposes metrics at `GET /api/metrics` and `GET /api/reliability`.
+To scrape these with Prometheus, poll the endpoints with a custom exporter or sidecar.
+
+Example cURL scrape:
+
+```bash
+curl -s -H "x-local-api-key: $TOKEN" http://localhost:8080/api/reliability
+```
+
+Key fields to monitor:
+
+| Field | Suggested metric name | Alert threshold |
+|-------|-----------------------|-----------------|
+| `failure_rate` | `codex_bot_run_failure_rate` | > 0.20 |
+| `latency_p95_sec` | `codex_bot_run_latency_p95` | > 45 |
+| `total_runs` | `codex_bot_runs_total` | — |
+
+### Sample Grafana Dashboard (panels)
+
+1. **Run outcomes** (completed / failed / running) — stacked bar from `/api/metrics`
+2. **P95 latency** — line chart from `latency_p95_sec`
+3. **Failure rate** — gauge with threshold at 0.20
+4. **Active sessions** — stat from `/api/sessions` count
+5. **Pending approvals** — stat from `/api/approvals` count
+
+### Alert Rules (Alertmanager-style)
+
+```yaml
+groups:
+  - name: codex-bot
+    rules:
+      - alert: HighRunFailureRate
+        expr: codex_bot_run_failure_rate > 0.20
+        for: 5m
+        labels:
+          severity: warning
+      - alert: CriticalRunFailureRate
+        expr: codex_bot_run_failure_rate > 0.50
+        for: 2m
+        labels:
+          severity: critical
+      - alert: HighP95Latency
+        expr: codex_bot_run_latency_p95 > 45
+        for: 5m
+        labels:
+          severity: warning
+```
+
+### Webhook Alert Payload
+
+When `ALERT_WEBHOOK_URL` is configured, payloads look like:
+
+```json
+{
+  "alert_type": "run.failed",
+  "severity": "high",
+  "run_id": "...",
+  "agent_id": "default",
+  "error_code": "ERR_CODEX_EXIT_NONZERO",
+  "ts": "2026-02-25T12:00:00Z"
+}
+```

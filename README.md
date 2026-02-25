@@ -13,30 +13,46 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
 - Safety guardrails:
   - Input length cap
   - Output chunking
-  - Secret redaction pattern for `sk-*` tokens
+  - Secret redaction (AWS keys, GitHub tokens, Stripe keys, bearer tokens, generic API keys)
   - Optional user allowlist
+  - Role-based access control (viewer / user / admin)
+  - Per-user daily spend ceilings
+- Session management:
+  - Persistent sessions per chat/user pair
+  - Automatic idle-session archival and pruning
+  - Per-session isolated workspace directories with disk-byte and file-count quotas
+- Multi-provider architecture:
+  - Runtime provider registry with hot-switch support
+  - Capability-based provider routing
+  - Circuit-breaker with configurable echo fallback
+- Parity evaluation harness with CI-safe offline baseline mode
 - Admin commands:
-- `/ping`
-- `/status`
-- `/help`
-- `/workspace`
-- `/new`
-- `/resume`
-- `/branch`
-- `/pending`
-- `/approve <approval_id>`
-- `/deny <approval_id>`
-- `/interrupt`
-- `/continue`
-- `/continue yes` (required when replaying a prior high-risk tool prompt)
-- `/reset`
-- `/reinstall`
-- `/purge`
-- `/restart`
+  - `/ping`
+  - `/status`
+  - `/help`
+  - `/workspace`
+  - `/new`
+  - `/resume`
+  - `/branch`
+  - `/pending`
+  - `/approve <approval_id>`
+  - `/deny <approval_id>`
+  - `/interrupt`
+  - `/continue`
+  - `/continue yes` (required when replaying a prior high-risk tool prompt)
+  - `/reset`
+  - `/reinstall`
+  - `/purge`
+  - `/restart`
 
 ## Architecture
 
-`Telegram -> Agent Core -> Provider -> Tool Registry -> Execution Runner -> codex CLI`
+```
+Telegram -> Agent Core -> AccessController -> AgentService -> CapabilityRouter
+                                                           -> ProviderRegistry -> codex CLI
+                                                           -> WorkspaceManager
+                                                           -> Tool Registry -> Execution Runner
+```
 
 Current module boundaries:
 
@@ -45,6 +61,11 @@ Current module boundaries:
 - `agent_core/router.py`: agent-to-service routing boundary
 - `agent_core/memory.py`: bounded memory defaults (`SESSION_MAX_TURNS=20`)
 - `services/agent_service.py`: orchestration, session, approvals, tool loop
+- `services/access_control.py`: role-based action authorization, spend ceilings, secret scanning
+- `services/capability_router.py`: selects best provider by capability requirements
+- `services/workspace_manager.py`: per-session disk workspaces with quota enforcement
+- `services/session_retention.py`: idle-session archival and pruning policy
+- `providers/registry.py`: runtime provider registry with hot-switch
 - `providers/*.py`: provider abstraction + codex-cli implementation
 - `tools/*.py`: explicit tool registry (`read_file`, `write_file`, `git_status`)
 - `execution/local_shell.py`: local subprocess execution boundary
@@ -54,12 +75,22 @@ The runtime is stateful per chat/user session with bounded memory and explicit r
 ## Roadmap Tracking
 
 - Roadmap execution is tracked in GitHub Issues and milestones.
-- Current EPIC tracking issues:
+- Completed EPICs (merged to main):
   - `#64` Agent Core Foundation
   - `#65` Secure Computer Interaction Layer
   - `#66` Multi-Provider Architecture
   - `#67` Streaming and CLI-like Feedback
   - `#68` Lightweight Web Control Center
+  - Parity 1: Session Retention Policy
+  - Parity 2: Tool Approval Gate (SQLite-backed)
+  - Parity 3: Streaming Updater
+  - Parity 4: Repo Context Retrieval
+  - Parity 5: Workspace Quota Enforcement
+  - Parity 6: Observability & Alerts
+  - Parity 7: Runbook Registry
+  - Parity 8: Capability-Based Provider Routing
+  - Parity 9: Role/Spend Access Control
+  - Parity 10: Control Center Session API
 
 ## Requirements
 
@@ -159,6 +190,10 @@ Environment variables override `.env`:
 - `ALERT_DEAD_LETTER_MAX` (default: `200`)
 - `LOCAL_API_KEYS` (optional; enables scoped `/api/v1` integration API)
 - `PLUGIN_TRUST_POLICY` (`require_signature` or `allow_local_unsigned`, default: `require_signature`)
+- `WORKSPACE_MAX_DISK_BYTES` (default: `104857600` = 100 MB; per-session workspace disk quota)
+- `WORKSPACE_MAX_FILE_COUNT` (default: `5000`; per-session workspace file-count quota)
+- `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default: `30`; idle sessions archived after this many days)
+- `SESSION_DELETE_AFTER_DAYS` (default: `90`; archived sessions hard-deleted after this many days)
 
 Print active config summary (never prints token):
 
@@ -270,8 +305,10 @@ If your `codex` binary is in a different location, update the volume in `docker-
 - `GET /health`
 - `GET /api/metrics`
 - `GET /api/onboarding/status`
+- `GET /api/onboarding/readiness` (first-run checks: workspace, codex CLI, telegram token)
 - `GET /api/runs?limit=20`
 - `GET /api/sessions?limit=50`
+- `GET /api/sessions/{session_id}/detail`
 - `GET /api/approvals?limit=200`
 - `POST /api/approvals/approve`
 - `POST /api/approvals/deny`
@@ -314,7 +351,16 @@ Exit code:
 - `0` parity gates passed
 - `2` one or more parity gates failed
 
-Weekly automation (local cron/systemd-friendly):
+CI-safe offline baseline (no `codex` CLI required):
+
+```bash
+./scripts/run_parity_offline.sh
+```
+
+The offline baseline echoes `expected_contains` tokens as synthetic output and always scores 1.0
+`expected_match`. Use it in CI pipelines to verify the harness and benchmark file remain valid.
+
+Weekly automation against a live `codex` deployment (local cron/systemd-friendly):
 
 ```bash
 ./scripts/run_parity_weekly.sh
@@ -325,6 +371,19 @@ Example cron entry (Sundays at 09:00):
 ```cron
 0 9 * * 0 cd /path/to/codex-telegram-bot && ./scripts/run_parity_weekly.sh >> /tmp/codex-parity.log 2>&1
 ```
+
+Category filter (run only a subset of cases):
+
+```bash
+PYTHONPATH=src python3 -m codex_telegram_bot.eval_parity \
+  --cases docs/benchmarks/parity_cases.json \
+  --category safety
+```
+
+Available categories: `smoke`, `code_editing`, `debugging`, `domain_knowledge`, `multi_step`,
+`safety`, `security`, `output_format`, `latency`, `session`.
+
+Current benchmark: **20 cases** across all categories (minimum 15 required by gate).
 
 Parity gates and milestone plan:
 
@@ -382,6 +441,48 @@ Agent concurrency:
 - Scheduler enforces per-agent concurrency limits
 - Queued jobs support cancellation by `job_id`
 
+## Access Control
+
+Role-based action authorization is enforced by `AccessController`:
+
+| Role | Actions |
+|------|---------|
+| `viewer` | `view_status`, `view_help` |
+| `user` *(default)* | all viewer actions + `send_prompt`, `approve_tool`, `deny_tool`, `reset_session`, `branch_session`, `interrupt_run`, `continue_run` |
+| `admin` | all user actions + `switch_provider`, `manage_agents`, `view_logs`, `prune_sessions` |
+
+Additional enforcement:
+- **Per-user daily spend ceiling** (default `$10.00/day`, configurable per `UserProfile`)
+- **Secret scanning** on inbound text detects AWS access keys, GitHub tokens, Stripe keys, bearer tokens, and generic API keys before forwarding to the provider
+
+## Workspace Quotas
+
+Each session gets an isolated workspace directory under `SESSION_WORKSPACES_ROOT`.
+Quotas are enforced by `WorkspaceManager`:
+
+- `WORKSPACE_MAX_DISK_BYTES` (default 100 MB) — total bytes across all files in the workspace
+- `WORKSPACE_MAX_FILE_COUNT` (default 5000) — total number of files
+
+Attempts to write beyond quota raise `WorkspaceQuotaExceeded`.
+
+## Session Retention
+
+`SessionRetentionPolicy` runs on demand (e.g. via a cron job calling `AgentService.run_retention_sweep()`):
+
+- Sessions idle for `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default 30) are moved to `archived` status
+- Archived sessions older than `SESSION_DELETE_AFTER_DAYS` (default 90) are hard-deleted along with their messages
+
+## Capability-Based Provider Routing
+
+`CapabilityRouter` wraps the `ProviderRegistry` and selects the best provider per request:
+
+1. Filter registered providers by `required_caps` dict (e.g. `{"supports_streaming": True}`)
+2. Among matching providers, prefer one with `supports_streaming` if `prefer_streaming=True`
+3. Among matching providers, prefer the currently active provider
+4. Falls back to the active provider when no match is found
+
+At startup, `CodexCliProvider` is registered as `codex_cli` and is active by default.
+
 ## Telegram Session Runtime
 
 - Each Telegram chat/user pair gets a persisted active session.
@@ -391,7 +492,7 @@ Agent concurrency:
 - `/branch` creates a new session branched from current recent history.
 - Session metadata is visible in Control Center (`/sessions` and `/api/sessions`).
 - Retention policy compacts old session history when message count exceeds configured limits.
-- Tool execution uses isolated per-session workspace roots under `SESSION_WORKSPACES_ROOT`.
+- Tool execution uses isolated per-session workspace directories managed by `WorkspaceManager`.
 
 ## Tool Loop (MVP)
 
@@ -465,6 +566,11 @@ Handoff lifecycle events (attached to `parent_run_id` timeline when provided):
 - `handoff.failed`
 
 ## Troubleshooting
+
+See [docs/support.md](docs/support.md) for the full troubleshooting playbook, FAQ,
+and bug reporting instructions.
+
+Quick checks:
 
 - `Error: codex CLI not found.`
   - Ensure `codex` is installed and available in `PATH` for the runtime user.
