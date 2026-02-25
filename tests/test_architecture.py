@@ -79,6 +79,23 @@ class TestCodexCliProvider(unittest.IsolatedAsyncioTestCase):
         self.assertIn("--sandbox=danger-full-access", runner.last_argv)
         self.assertEqual(runner.last_policy_profile, "trusted")
 
+    async def test_execute_retries_once_on_timeout_124(self):
+        runner = FakeRunner(CommandResult(returncode=124, stdout="", stderr="Execution timeout."))
+        runner.set_results(
+            [
+                CommandResult(returncode=124, stdout="partial output", stderr="Execution timeout."),
+                CommandResult(returncode=0, stdout="final output", stderr=""),
+            ]
+        )
+        provider = CodexCliProvider(runner=runner, timeout_continue_retries=1)
+
+        output = await provider.execute("long task", policy_profile="trusted")
+
+        self.assertEqual(output, "final output")
+        self.assertEqual(len(runner.calls), 2)
+        self.assertIn("--sandbox=danger-full-access", runner.calls[0]["argv"])
+        self.assertIn("System recovery note", runner.calls[1]["stdin_text"])
+
     async def test_generate_uses_messages_contract(self):
         runner = FakeRunner(CommandResult(returncode=0, stdout="hello", stderr=""))
         provider = CodexCliProvider(runner=runner)

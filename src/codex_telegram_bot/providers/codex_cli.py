@@ -8,8 +8,9 @@ from codex_telegram_bot.util import redact
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_EXEC_TIMEOUT_SEC = 180
+DEFAULT_EXEC_TIMEOUT_SEC = 900
 DEFAULT_VERSION_TIMEOUT_SEC = 10
+DEFAULT_TIMEOUT_CONTINUE_RETRIES = 1
 
 
 def _normalize_policy_profile(policy_profile: str) -> str:
@@ -41,12 +42,24 @@ def _read_timeout_env(name: str, default: int) -> int:
     return max(1, value)
 
 
+def _read_retry_env(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(0, min(value, 5))
+
+
 class CodexCliProvider(ProviderAdapter):
     def __init__(
         self,
         runner: ExecutionRunner,
         exec_timeout_sec: int | None = None,
         version_timeout_sec: int | None = None,
+        timeout_continue_retries: int | None = None,
     ):
         self._runner = runner
         self._exec_timeout_sec = exec_timeout_sec or _read_timeout_env(
@@ -56,6 +69,11 @@ class CodexCliProvider(ProviderAdapter):
         self._version_timeout_sec = version_timeout_sec or _read_timeout_env(
             "CODEX_VERSION_TIMEOUT_SEC",
             DEFAULT_VERSION_TIMEOUT_SEC,
+        )
+        self._timeout_continue_retries = (
+            timeout_continue_retries
+            if timeout_continue_retries is not None
+            else _read_retry_env("CODEX_TIMEOUT_CONTINUE_RETRIES", DEFAULT_TIMEOUT_CONTINUE_RETRIES)
         )
 
     async def generate(
@@ -90,11 +108,10 @@ class CodexCliProvider(ProviderAdapter):
             policy_profile=policy_profile,
         )
         try:
-            result = await self._runner.run(
-                _build_exec_argv(policy_profile=policy_profile),
-                stdin_text=safe_prompt,
-                timeout_sec=self._exec_timeout_sec,
+            result = await self._run_with_timeout_recovery(
+                prompt=safe_prompt,
                 policy_profile=policy_profile,
+                correlation_id=correlation_id,
             )
         except FileNotFoundError:
             log_json(
@@ -146,6 +163,40 @@ class CodexCliProvider(ProviderAdapter):
             policy_profile=policy_profile,
         )
         return redact(result.stdout) if result.stdout.strip() else "(no output)"
+
+    async def _run_with_timeout_recovery(
+        self,
+        prompt: str,
+        policy_profile: str,
+        correlation_id: str,
+    ):
+        current_prompt = prompt
+        attempt = 0
+        while True:
+            result = await self._runner.run(
+                _build_exec_argv(policy_profile=policy_profile),
+                stdin_text=current_prompt,
+                timeout_sec=self._exec_timeout_sec,
+                policy_profile=policy_profile,
+            )
+            if result.returncode != 124:
+                return result
+            if attempt >= self._timeout_continue_retries:
+                return result
+            attempt += 1
+            log_json(
+                logger,
+                "provider.execute.retry",
+                provider="codex_cli",
+                run_id=correlation_id,
+                reason="timeout_124",
+                retry_attempt=attempt,
+            )
+            current_prompt = _timeout_continue_prompt(
+                previous_prompt=current_prompt,
+                stdout_tail=(result.stdout or "").strip()[-200:],
+                stderr_tail=(result.stderr or "").strip()[-200:],
+            )
 
     async def version(self) -> str:
         try:
@@ -212,3 +263,19 @@ def _messages_to_prompt(messages: Sequence[Dict[str, str]]) -> str:
         else:
             lines.append(f"{role}: {content}")
     return "\n\n".join(lines).strip()
+
+
+def _timeout_continue_prompt(previous_prompt: str, stdout_tail: str, stderr_tail: str) -> str:
+    hints: list[str] = []
+    if stdout_tail:
+        hints.append(f"Previous stdout tail:\n{stdout_tail}")
+    if stderr_tail:
+        hints.append(f"Previous stderr tail:\n{stderr_tail}")
+    hint_block = "\n\n".join(hints)
+    return (
+        f"{previous_prompt}\n\n"
+        "System recovery note: The previous execution timed out. "
+        "Continue from current repository/workspace state without repeating completed work. "
+        "First summarize what is already done, then continue with remaining steps.\n\n"
+        f"{hint_block}"
+    ).strip()

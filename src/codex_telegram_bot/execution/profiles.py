@@ -28,7 +28,7 @@ class ExecutionProfileResolver:
         if profile == "trusted":
             return ExecutionProfile(
                 name=profile,
-                max_timeout_sec=300,
+                max_timeout_sec=1800,
                 enforce_workspace_root=False,
                 workspace_root=self._workspace_root,
             )

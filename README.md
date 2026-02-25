@@ -167,8 +167,9 @@ Environment variables override `.env`:
 - `PROVIDER_RECOVERY_SEC` (default: `30`)
 - `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
 - `PROVIDER_BACKEND` (default: `codex-cli`; current supported value: `codex-cli`)
-- `CODEX_EXEC_TIMEOUT_SEC` (default: `180`, bounded by policy profile max timeout)
+- `CODEX_EXEC_TIMEOUT_SEC` (default: `900`, bounded by policy profile max timeout)
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
+- `CODEX_TIMEOUT_CONTINUE_RETRIES` (default: `1`; auto-continue attempts after timeout `124`)
 - `EXECUTION_WORKSPACE_ROOT` (default: current working directory)
 - `CAPABILITIES_DIR` (default: `<EXECUTION_WORKSPACE_ROOT>/capabilities`)
 - `REDACTION_EXTRA_PATTERNS` (optional regex list separated by `;;`)
@@ -431,7 +432,7 @@ Execution profile behavior:
 
 - `strict`: command allowlist + workspace-root path enforcement + timeout cap `45s`
 - `balanced`: command allowlist + workspace-root path enforcement + timeout cap `120s`
-- `trusted`: relaxed command scope + timeout cap `300s`
+- `trusted`: relaxed command scope + timeout cap `1800s`
 
 Codex CLI sandbox mode is forced by policy profile to avoid read-only startup defaults:
 
