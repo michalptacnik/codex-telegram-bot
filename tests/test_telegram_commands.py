@@ -1,6 +1,9 @@
 import unittest
 
 from codex_telegram_bot.telegram_bot import (
+    _COMMAND_HANDLERS,
+    _is_valid_command_name,
+    _validate_command_registry,
     _parse_contact_spec,
     _parse_email_check_spec,
     _parse_email_command_spec,
@@ -63,3 +66,13 @@ class TestEmailOpsParsers(unittest.TestCase):
         self.assertEqual(err, "")
         self.assertEqual(spec["name"], "send_email_template")
         self.assertTrue(spec["args"]["dry_run"])
+
+
+class TestCommandRegistryValidation(unittest.TestCase):
+    def test_all_registered_commands_are_valid(self):
+        for command_name, _handler_name in _COMMAND_HANDLERS:
+            self.assertTrue(_is_valid_command_name(command_name), command_name)
+
+    def test_registry_rejects_hyphenated_command(self):
+        with self.assertRaises(RuntimeError):
+            _validate_command_registry([("email-check", object())])

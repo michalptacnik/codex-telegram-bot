@@ -3,6 +3,7 @@ import logging
 import os
 import shlex
 import json
+import re
 from typing import Optional, List
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -24,6 +25,32 @@ STATUS_HEARTBEAT_SEC = 15
 STATUS_HEARTBEAT_PUSH_SEC = 45
 USER_WINDOW_SEC = 60
 MAX_USER_COMMANDS_PER_WINDOW = 20
+COMMAND_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+_COMMAND_HANDLERS = [
+    ("ping", "handle_ping"),
+    ("new", "handle_new"),
+    ("resume", "handle_resume"),
+    ("branch", "handle_branch"),
+    ("pending", "handle_pending"),
+    ("approve", "handle_approve"),
+    ("deny", "handle_deny"),
+    ("reset", "handle_reset"),
+    ("status", "handle_status"),
+    ("help", "handle_help"),
+    ("workspace", "handle_workspace"),
+    ("skills", "handle_skills"),
+    ("email", "handle_email"),
+    ("gh", "handle_gh"),
+    ("email_check", "handle_email_check"),
+    ("contact", "handle_contact"),
+    ("template", "handle_template"),
+    ("email_template", "handle_email_template"),
+    ("reinstall", "handle_reinstall"),
+    ("purge", "handle_purge"),
+    ("restart", "handle_restart"),
+    ("interrupt", "handle_interrupt"),
+    ("continue", "handle_continue"),
+]
 
 
 def is_allowed(user_id: int, allowlist: Optional[List[int]]) -> bool:
@@ -239,6 +266,18 @@ def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> boo
     stamps.append(now)
     limiter[key] = stamps
     return True
+
+
+def _is_valid_command_name(name: str) -> bool:
+    return bool(COMMAND_NAME_RE.match((name or "").strip()))
+
+
+def _validate_command_registry(command_specs: List[tuple[str, object]]) -> None:
+    for command_name, _ in command_specs:
+        if not _is_valid_command_name(command_name):
+            raise RuntimeError(
+                f"Invalid Telegram command '{command_name}'. Use lowercase letters, digits, and underscore only."
+            )
 
 
 async def _delete_message_later(bot, chat_id: int, message_id: int, delay_sec: int = EPHEMERAL_STATUS_TTL_SEC) -> None:
@@ -1073,30 +1112,10 @@ def build_application(
     app.bot_data["agent_service"] = agent_service
     app.bot_data["agent"] = agent
     app.bot_data.update(callbacks)
-
-    app.add_handler(CommandHandler("ping", handle_ping))
-    app.add_handler(CommandHandler("new", handle_new))
-    app.add_handler(CommandHandler("resume", handle_resume))
-    app.add_handler(CommandHandler("branch", handle_branch))
-    app.add_handler(CommandHandler("pending", handle_pending))
-    app.add_handler(CommandHandler("approve", handle_approve))
-    app.add_handler(CommandHandler("deny", handle_deny))
-    app.add_handler(CommandHandler("reset", handle_reset))
-    app.add_handler(CommandHandler("status", handle_status))
-    app.add_handler(CommandHandler("help", handle_help))
-    app.add_handler(CommandHandler("workspace", handle_workspace))
-    app.add_handler(CommandHandler("skills", handle_skills))
-    app.add_handler(CommandHandler("email", handle_email))
-    app.add_handler(CommandHandler("gh", handle_gh))
-    app.add_handler(CommandHandler("email_check", handle_email_check))
-    app.add_handler(CommandHandler("contact", handle_contact))
-    app.add_handler(CommandHandler("template", handle_template))
-    app.add_handler(CommandHandler("email_template", handle_email_template))
-    app.add_handler(CommandHandler("reinstall", handle_reinstall))
-    app.add_handler(CommandHandler("purge", handle_purge))
-    app.add_handler(CommandHandler("restart", handle_restart))
-    app.add_handler(CommandHandler("interrupt", handle_interrupt))
-    app.add_handler(CommandHandler("continue", handle_continue))
+    command_specs: List[tuple[str, object]] = [(name, globals()[handler]) for name, handler in _COMMAND_HANDLERS]
+    _validate_command_registry(command_specs)
+    for command_name, handler in command_specs:
+        app.add_handler(CommandHandler(command_name, handler))
     app.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r"^approval:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(handle_error)
