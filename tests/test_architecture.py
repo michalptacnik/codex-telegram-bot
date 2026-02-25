@@ -14,6 +14,7 @@ from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterCo
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.agent_service import _model_job_phase_hint
+from codex_telegram_bot.services.agent_service import _parse_planner_output
 
 
 class FakeRunner:
@@ -937,3 +938,44 @@ class TestModelJobPhaseHints(unittest.TestCase):
             _model_job_phase_hint(240, 3),
             {"performing repository edits/checks", "verifying output and preparing response"},
         )
+
+
+class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
+    async def test_autonomous_tool_loop_executes_planned_step(self):
+        class _PlannerProvider:
+            def __init__(self):
+                self._calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self._calls += 1
+                if self._calls == 1:
+                    return '{"steps":[{"kind":"exec","command":"echo hello"}],"final_prompt":"Summarize result."}'
+                return "final answer"
+
+            async def version(self):
+                return "planner/1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "planner", "supports_tool_calls": False}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="hello\n", stderr=""))
+        service = AgentService(provider=_PlannerProvider(), execution_runner=runner)
+        with patch.dict("os.environ", {"AUTONOMOUS_TOOL_LOOP": "1"}):
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Please inspect and fix files.",
+                chat_id=1,
+                user_id=1,
+                session_id="sess-1",
+                agent_id="default",
+            )
+        self.assertEqual(runner.last_argv, ["echo", "hello"])
+        self.assertIn("final answer", out)
+        await service.shutdown()
+
+    def test_parse_planner_output_accepts_fenced_json(self):
+        raw = "```json\n{\"steps\":[],\"final_prompt\":\"done\"}\n```"
+        parsed = _parse_planner_output(raw)
+        self.assertEqual(parsed.get("final_prompt"), "done")

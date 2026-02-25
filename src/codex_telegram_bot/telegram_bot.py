@@ -632,6 +632,15 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         if event == "loop.started":
             run_state[update.effective_chat.id]["steps_total"] = int(update_payload.get("steps_total", 0) or 0)
             await set_status(f"Running: tool loop started ({update_payload.get('steps_total', 0)} step(s))...")
+        elif event == "loop.autoplan.started":
+            await set_status("Running: planning tool actions from model...")
+        elif event == "loop.autoplan.ready":
+            run_state[update.effective_chat.id]["steps_total"] = int(update_payload.get("steps_total", 0) or 0)
+            await set_status(
+                f"Running: planner prepared {update_payload.get('steps_total', 0)} executable step(s)..."
+            )
+        elif event == "loop.autoplan.none":
+            await set_status("Running: no tool actions needed, answering directly...")
         elif event == "loop.step.started":
             run_state[update.effective_chat.id]["active_step"] = int(update_payload.get("step", 0) or 0)
             await set_status(f"Running: step {update_payload.get('step')} -> {update_payload.get('command', '')[:120]}")

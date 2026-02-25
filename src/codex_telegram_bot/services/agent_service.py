@@ -6,6 +6,7 @@ import shlex
 import uuid
 import json
 import hashlib
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -38,6 +39,7 @@ CONTEXT_HISTORY_BUDGET_CHARS = 6500
 CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
 CONTEXT_SUMMARY_BUDGET_CHARS = 1200
 MODEL_JOB_HEARTBEAT_SEC = 15
+AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
 
 
 @dataclass(frozen=True)
@@ -622,6 +624,23 @@ class AgentService:
                 {"event": "loop.failed", "reason": "budget_exceeded", "steps_total": len(actions)},
             )
             return msg
+        if not actions and self._autonomous_tool_loop_enabled():
+            await self._notify_progress(progress_callback, {"event": "loop.autoplan.started"})
+            planned_actions, planned_final_prompt = await self._plan_tool_loop_actions(
+                prompt=(cleaned_prompt or prompt),
+                agent_id=agent_id,
+            )
+            if planned_actions:
+                actions = planned_actions
+                if planned_final_prompt:
+                    final_prompt = planned_final_prompt
+                await self._notify_progress(
+                    progress_callback,
+                    {"event": "loop.autoplan.ready", "steps_total": len(actions)},
+                )
+            else:
+                await self._notify_progress(progress_callback, {"event": "loop.autoplan.none"})
+
         if not actions:
             contextual = self.build_session_prompt(session_id=session_id, user_prompt=cleaned_prompt or prompt)
             job_id = await self.queue_prompt(prompt=contextual, agent_id=agent_id)
@@ -1236,6 +1255,76 @@ class AgentService:
                     return value
         return selected.__class__.__name__.lower()
 
+    def _autonomous_tool_loop_enabled(self) -> bool:
+        raw = (os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV) or "").strip().lower()
+        return raw in {"1", "true", "yes", "on"}
+
+    async def _plan_tool_loop_actions(
+        self,
+        prompt: str,
+        agent_id: str,
+    ) -> tuple[List[LoopAction], str]:
+        provider_for_plan = self._provider_for_agent(agent_id=agent_id)
+        tool_names = ", ".join(self._tool_registry.names())
+        planner_prompt = (
+            "You are an execution planner.\n"
+            "Decide whether local tool/shell actions are required before answering the user.\n"
+            "Return STRICT JSON only, no markdown, no prose:\n"
+            "{\"steps\":[...],\"final_prompt\":\"...\"}\n"
+            "Rules:\n"
+            f"- max steps: {self._tool_loop_max_steps}\n"
+            "- if no actions are needed, return {\"steps\":[],\"final_prompt\":\"\"}\n"
+            "- step kinds:\n"
+            "  - {\"kind\":\"exec\",\"command\":\"...\"}\n"
+            "  - {\"kind\":\"tool\",\"tool\":\"<name>\",\"args\":{...}}\n"
+            f"- available tool names: {tool_names}\n"
+            "- prefer read-only checks first; keep steps minimal and deterministic.\n"
+            "- do not include dangerous/destructive cleanup commands unless explicitly requested.\n"
+            f"User request:\n{(prompt or '').strip()}"
+        )
+        try:
+            raw = await provider_for_plan.generate(
+                [{"role": "user", "content": planner_prompt}],
+                stream=False,
+                policy_profile="balanced",
+            )
+        except Exception:
+            return [], ""
+        if isinstance(raw, str) and raw.strip().lower().startswith("error:"):
+            return [], ""
+        parsed = _parse_planner_output(raw or "")
+        if not parsed:
+            return [], ""
+        steps = parsed.get("steps")
+        if not isinstance(steps, list):
+            return [], ""
+        planned_actions: List[LoopAction] = []
+        for item in steps:
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get("kind") or item.get("type") or "").strip().lower()
+            if kind == "exec":
+                command = str(item.get("command") or "").strip()
+                if not command:
+                    continue
+                try:
+                    argv = shlex.split(command)
+                except ValueError:
+                    argv = []
+                if argv:
+                    planned_actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+            elif kind == "tool":
+                tool_name = str(item.get("tool") or item.get("name") or "").strip().lower()
+                tool_args = item.get("args")
+                if tool_name and isinstance(tool_args, dict):
+                    planned_actions.append(
+                        LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(tool_args))
+                    )
+            if len(planned_actions) >= self._tool_loop_max_steps:
+                break
+        final_prompt = str(parsed.get("final_prompt") or "").strip()
+        return planned_actions, final_prompt
+
     def provider_registry(self):
         return self._provider_registry
 
@@ -1351,6 +1440,32 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
             continue
         keep_lines.append(raw)
     return actions, "\n".join(keep_lines).strip(), final_prompt
+
+
+def _parse_planner_output(raw: str) -> Dict[str, Any]:
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        payload = json.loads(text)
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        pass
+
+    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S | re.I)
+    candidate = fenced.group(1) if fenced else ""
+    if not candidate:
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end > start:
+            candidate = text[start : end + 1]
+    if not candidate:
+        return {}
+    try:
+        payload = json.loads(candidate)
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _tool_loop_fingerprint(actions: List[LoopAction], cleaned_prompt: str, final_prompt: str) -> str:
