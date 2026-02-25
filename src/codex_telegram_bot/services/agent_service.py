@@ -22,6 +22,10 @@ from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
+from codex_telegram_bot.services.access_control import AccessController
+from codex_telegram_bot.services.capability_router import CapabilityRouter
+from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
+from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 
 logger = logging.getLogger(__name__)
@@ -65,6 +69,11 @@ class AgentService:
         alert_dispatcher: Optional[AlertDispatcher] = None,
         tool_registry: Optional[ToolRegistry] = None,
         capability_registry: Optional[MarkdownCapabilityRegistry] = None,
+        # Parity services
+        workspace_manager: Optional[WorkspaceManager] = None,
+        access_controller: Optional[AccessController] = None,
+        retention_policy: Optional[SessionRetentionPolicy] = None,
+        capability_router: Optional[CapabilityRouter] = None,
     ):
         self._provider = provider
         self._run_store = run_store
@@ -84,6 +93,11 @@ class AgentService:
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry()
         self._capability_registry = capability_registry
+        # Parity services (optional — degrade gracefully when not provided)
+        self._workspace_manager = workspace_manager
+        self._access_controller = access_controller
+        self._retention_policy = retention_policy
+        self._capability_router = capability_router
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -303,10 +317,37 @@ class AgentService:
         return ""
 
     def session_workspace(self, session_id: str) -> Path:
+        if self._workspace_manager is not None:
+            return self._workspace_manager.provision(session_id)
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", (session_id or "").strip())[:64] or "default"
         root = self._session_workspaces_root / safe
         root.mkdir(parents=True, exist_ok=True)
         return root
+
+    def run_retention_sweep(self) -> Dict[str, Any]:
+        """Run session retention policy sweep. Returns a summary dict."""
+        if self._retention_policy is None:
+            return {"skipped": True, "reason": "no_retention_policy"}
+        result = self._retention_policy.apply()
+        return {
+            "archived_idle": result.archived_idle,
+            "pruned_old": result.pruned_old,
+            "elapsed_ms": result.elapsed_ms,
+        }
+
+    def scan_for_secrets(self, text: str) -> List[str]:
+        """Return list of secret pattern names found in text (empty when no controller)."""
+        if self._access_controller is None:
+            return []
+        return self._access_controller.scan_for_secrets(text)
+
+    @property
+    def capability_router(self) -> Optional[CapabilityRouter]:
+        return self._capability_router
+
+    @property
+    def access_controller(self) -> Optional[AccessController]:
+        return self._access_controller
 
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
@@ -475,6 +516,11 @@ class AgentService:
         return self._run_store.list_all_pending_tool_approvals(limit=limit)
 
     def deny_tool_action(self, approval_id: str, chat_id: int, user_id: int) -> str:
+        if self._access_controller is not None:
+            try:
+                self._access_controller.check_action(user_id, "deny_tool", chat_id)
+            except Exception as exc:
+                return f"Error: {exc}"
         if not self._run_store:
             return "Error: approval registry unavailable."
         approval = self._run_store.get_tool_approval(approval_id)
@@ -493,6 +539,11 @@ class AgentService:
         return "Denied."
 
     async def approve_tool_action(self, approval_id: str, chat_id: int, user_id: int) -> str:
+        if self._access_controller is not None:
+            try:
+                self._access_controller.check_action(user_id, "approve_tool", chat_id)
+            except Exception as exc:
+                return f"Error: {exc}"
         if not self._run_store:
             return "Error: approval registry unavailable."
         approval = self._run_store.get_tool_approval(approval_id)
@@ -547,6 +598,11 @@ class AgentService:
         agent_id: str = "default",
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> str:
+        if self._access_controller is not None:
+            try:
+                self._access_controller.check_action(user_id, "send_prompt", chat_id)
+            except Exception as exc:
+                return f"Error: {exc}"
         actions, cleaned_prompt, final_prompt = _extract_loop_actions(prompt)
         if len(actions) > self._tool_loop_max_steps:
             msg = (
