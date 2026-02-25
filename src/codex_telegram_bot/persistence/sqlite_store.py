@@ -1082,6 +1082,26 @@ class SqliteRunStore:
             ).fetchall()
         return [_row_to_mission_event(r) for r in rows]
 
+    def count_mission_events_since(self, transition: str, since_iso: str) -> int:
+        """Count events matching a 'from→to' transition string since a timestamp.
+
+        Used by the observability layer to compute windowed throughput/error-rate.
+        Transition format: 'running→completed', 'pending→running', etc.
+        """
+        parts = transition.split("→", 1)
+        if len(parts) != 2:
+            return 0
+        from_state, to_state = parts
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM mission_events
+                WHERE from_state = ? AND to_state = ? AND created_at >= ?
+                """,
+                (from_state, to_state, since_iso),
+            ).fetchone()
+        return int(row["c"]) if row else 0
+
     # ------------------------------------------------------------------
     # Intake leads + connector cursors (EPIC 7)
     # ------------------------------------------------------------------
