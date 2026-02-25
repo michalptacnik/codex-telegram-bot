@@ -673,6 +673,11 @@ class AgentService:
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+            if _is_email_send_intent(cleaned_prompt or prompt) and _output_claims_email_sent(output):
+                output = (
+                    "Error: email send was requested, but no SMTP tool action was executed.\n"
+                    "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                )
             if active_skills:
                 await self._notify_progress(
                     progress_callback,
@@ -1658,6 +1663,33 @@ def _planning_guidance_lines(user_prompt: str) -> List[str]:
         "3) RISKS: list behavior/regression risks before claiming done.",
         "4) VERIFY: list concrete tests/commands run or missing.",
     ]
+
+
+def _is_email_send_intent(text: str) -> bool:
+    low = (text or "").lower()
+    has_send = any(
+        k in low for k in ("send", "sending", "sent", "resend", "deliver")
+    )
+    if not (("email" in low or "mail" in low) and has_send):
+        return False
+    negative = ("do not send", "don't send", "dont send", "not send", "draft only")
+    return not any(n in low for n in negative)
+
+
+def _output_claims_email_sent(text: str) -> bool:
+    low = (text or "").lower()
+    if "email" not in low and "mail" not in low:
+        return False
+    phrases = (
+        "i sent",
+        "i've sent",
+        "email sent",
+        "i'll send",
+        "sending now",
+        "sent to",
+        "delivered",
+    )
+    return any(p in low for p in phrases)
 
 
 def _p95(values: List[float]) -> float:
