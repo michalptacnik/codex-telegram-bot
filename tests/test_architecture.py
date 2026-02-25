@@ -1040,7 +1040,35 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 session_id=session.session_id,
                 agent_id="default",
             )
-            self.assertTrue(out.startswith("Error: email send was requested"))
+            self.assertTrue(out.startswith("Error: email send was claimed"))
+            await service.shutdown()
+
+    async def test_email_send_claim_without_send_intent_still_returns_error(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "I'll send this email now."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(db_path=Path(tmp) / "state.db")
+            service = AgentService(provider=_Provider(), run_store=store, event_bus=EventBus())
+            session = service.get_or_create_session(chat_id=12, user_id=23)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Please polish this draft so it sounds more personal.",
+                chat_id=12,
+                user_id=23,
+                session_id=session.session_id,
+                agent_id="default",
+            )
+            self.assertTrue(out.startswith("Error: email send was claimed"))
             await service.shutdown()
 
 
