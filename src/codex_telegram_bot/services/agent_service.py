@@ -674,10 +674,21 @@ class AgentService:
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
             if _output_claims_email_sent(output):
-                output = (
-                    "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                    "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                recovered = await self._attempt_autonomous_email_send_recovery(
+                    output=output,
+                    prompt=(cleaned_prompt or prompt),
+                    session_id=session_id,
+                    workspace_root=self.session_workspace(session_id=session_id),
+                    policy_profile=self._agent_policy_profile(agent_id=agent_id),
+                    extra_tools=extra_tools,
                 )
+                if recovered is None:
+                    output = (
+                        "Error: email send was claimed, but no SMTP tool action was executed.\n"
+                        "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                    )
+                else:
+                    output = recovered
             if active_skills:
                 await self._notify_progress(
                     progress_callback,
@@ -1162,6 +1173,44 @@ class AgentService:
             ok=result.ok,
             output=f"{action_id} tool={tool_name} status={status}\n{result.output}",
         )
+
+    async def _attempt_autonomous_email_send_recovery(
+        self,
+        output: str,
+        prompt: str,
+        session_id: str,
+        workspace_root: Path,
+        policy_profile: str,
+        extra_tools: Dict[str, Any],
+    ) -> Optional[str]:
+        tool_name = "send_email_smtp"
+        if tool_name not in (extra_tools or {}) and self._tool_registry.get(tool_name) is None:
+            return None
+        subject, body = _extract_subject_and_body_from_email_text(output)
+        if not subject or not body:
+            return None
+        to_addr = _extract_email_address(prompt)
+        if not to_addr and self._run_store:
+            history = self._run_store.list_session_messages(session_id=session_id, limit=40)
+            to_addr = _extract_email_address_from_messages(history)
+        if not to_addr:
+            return None
+        action_id = "tool-" + uuid.uuid4().hex[:8]
+        result = await self._execute_registered_tool_action(
+            action_id=action_id,
+            tool_name=tool_name,
+            tool_args={"to": to_addr, "subject": subject, "body": body},
+            workspace_root=workspace_root,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        self.append_session_assistant_message(
+            session_id=session_id,
+            content=f"tool.action.completed action_id={action_id} rc={0 if result.ok else 1}",
+        )
+        if not result.ok:
+            return f"Error: attempted autonomous email send but failed.\n{result.output}"
+        return f"{result.output}\n\nAutonomous recovery: executed send_email_smtp after provider claimed send."
 
     async def _execute_tool_action_with_telemetry(
         self,
@@ -1690,6 +1739,48 @@ def _output_claims_email_sent(text: str) -> bool:
         "delivered",
     )
     return any(p in low for p in phrases)
+
+
+def _extract_email_address(text: str) -> str:
+    hit = re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", text or "")
+    return hit.group(0).strip() if hit else ""
+
+
+def _extract_email_address_from_messages(messages: List[Any]) -> str:
+    for msg in reversed(messages or []):
+        role = str(getattr(msg, "role", "") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(getattr(msg, "content", "") or "")
+        addr = _extract_email_address(content)
+        if addr:
+            return addr
+    return ""
+
+
+def _extract_subject_and_body_from_email_text(text: str) -> tuple[str, str]:
+    raw = (text or "").strip()
+    if not raw:
+        return "", ""
+    subject = ""
+    lines = raw.splitlines()
+    body_start = 0
+    for idx, line in enumerate(lines):
+        match = re.match(r"^\s*\*{0,2}\s*subject\s*:\s*\*{0,2}\s*(.+?)\s*$", line, flags=re.I)
+        if match:
+            subject = match.group(1).strip()
+            body_start = idx + 1
+            break
+    if not subject:
+        return "", ""
+    body_lines = []
+    for line in lines[body_start:]:
+        if line.strip().startswith("```"):
+            continue
+        body_lines.append(line.rstrip())
+    body = "\n".join(body_lines).strip()
+    body = re.sub(r"^Autonomous recovery:.*$", "", body, flags=re.I | re.M).strip()
+    return subject, body
 
 
 def _p95(values: List[float]) -> float:

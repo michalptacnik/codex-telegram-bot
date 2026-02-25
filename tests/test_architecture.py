@@ -13,6 +13,8 @@ from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterConfig
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.agent_service import _extract_email_address
+from codex_telegram_bot.services.agent_service import _extract_subject_and_body_from_email_text
 from codex_telegram_bot.services.agent_service import _model_job_phase_hint
 from codex_telegram_bot.services.agent_service import _is_email_send_intent
 from codex_telegram_bot.services.agent_service import _output_claims_email_sent
@@ -1071,6 +1073,56 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(out.startswith("Error: email send was claimed"))
             await service.shutdown()
 
+    async def test_email_send_claim_triggers_autonomous_tool_recovery(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "I'll send the email now.\n\n**Subject:** Intro from Michal\nHi Amber Group Team,\nBody text."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        class _FakeEmailTool:
+            name = "send_email_smtp"
+
+            def run(self, request, context):
+                return type("R", (), {"ok": True, "output": f"Email sent to {request.args.get('to')}"})()
+
+        class _Skill:
+            skill_id = "smtp_email"
+
+        class _SkillManager:
+            def auto_activate(self, _prompt):
+                return [_Skill()]
+
+            def tools_for_skills(self, _skills):
+                return {"send_email_smtp": _FakeEmailTool()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(db_path=Path(tmp) / "state.db")
+            service = AgentService(
+                provider=_Provider(),
+                run_store=store,
+                event_bus=EventBus(),
+                skill_manager=_SkillManager(),
+            )
+            session = service.get_or_create_session(chat_id=13, user_id=24)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Please finalize and send to partnerships@ambergroup.io",
+                chat_id=13,
+                user_id=24,
+                session_id=session.session_id,
+                agent_id="default",
+            )
+            self.assertIn("Email sent to partnerships@ambergroup.io", out)
+            self.assertIn("Autonomous recovery", out)
+            await service.shutdown()
+
 
 class TestEmailIntentGuards(unittest.TestCase):
     def test_detects_email_send_intent(self):
@@ -1082,3 +1134,16 @@ class TestEmailIntentGuards(unittest.TestCase):
         self.assertTrue(_output_claims_email_sent("I'll send the email now."))
         self.assertTrue(_output_claims_email_sent("Email sent to team@example.com"))
         self.assertFalse(_output_claims_email_sent("Here is a draft email you can send"))
+
+    def test_extract_email_address(self):
+        self.assertEqual(
+            _extract_email_address("Use [Amber Group] [partnerships@ambergroup.io] contact"),
+            "partnerships@ambergroup.io",
+        )
+
+    def test_extract_subject_and_body(self):
+        subject, body = _extract_subject_and_body_from_email_text(
+            "I will send it.\n\n**Subject:** Intro from Michal\nHi Team,\nThis is body."
+        )
+        self.assertEqual(subject, "Intro from Michal")
+        self.assertIn("Hi Team", body)
