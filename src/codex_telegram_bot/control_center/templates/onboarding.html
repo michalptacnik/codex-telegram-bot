@@ -65,6 +65,16 @@
       </select>
       <div class="dim">Applied to default agent and used for validation run.</div>
     </label>
+    <label>
+      <div class="k">Autonomous Tool Planning</div>
+      <input type="checkbox" name="autonomous_tool_loop" {% if autonomous_tool_loop %}checked{% endif %} />
+      <div class="dim">Opt-in bridge: model can plan !exec/!tool steps automatically under the same policy and approval gates.</div>
+    </label>
+    <div class="dim">
+      Recommendation:
+      enable for text-only API providers (`deepseek`, `openai`, `gemini`, etc.) when you want file/script control;
+      keep disabled for `codex_cli` unless you explicitly want an extra planning layer.
+    </div>
     <button class="btn" type="submit">Validate & Complete Onboarding</button>
   </form>
 </section>

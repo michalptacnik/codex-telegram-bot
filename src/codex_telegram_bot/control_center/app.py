@@ -10,7 +10,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.agent_service import AgentService, AUTONOMOUS_TOOL_LOOP_ENV
 from codex_telegram_bot.services.error_codes import ERROR_CATALOG, detect_error_code, get_catalog_entry
 from codex_telegram_bot.services.onboarding import OnboardingStore
 from codex_telegram_bot.services.plugin_lifecycle import PluginLifecycleManager
@@ -150,6 +150,14 @@ def _parse_local_api_keys(raw: str) -> Dict[str, Set[str]]:
             scopes = {"runs:read"}
         out[token] = scopes
     return out
+
+
+def _env_flag_enabled(value: str) -> bool:
+    return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_checkbox_flag(value: str) -> str:
+    return "1" if _env_flag_enabled(value) else "0"
 
 
 def create_app(agent_service: AgentService, provider_registry=None, metrics_collector=None) -> FastAPI:
@@ -713,8 +721,14 @@ def create_app_with_config(
     async def onboarding_page(request: Request):
         onboarding.record(step="wizard.view", outcome="visit")
         env = load_env_file(get_env_path(config_dir)) if config_dir else {}
+        runtime_env = load_env_file(config_dir / "runtime.env") if config_dir else {}
         workspace_root = env.get("EXECUTION_WORKSPACE_ROOT", str(Path.cwd()))
         profile = "trusted"
+        autonomous_tool_loop = _env_flag_enabled(
+            runtime_env.get(AUTONOMOUS_TOOL_LOOP_ENV)
+            or env.get(AUTONOMOUS_TOOL_LOOP_ENV)
+            or os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV, "")
+        )
         default_agent = agent_service.get_agent("default")
         if default_agent:
             profile = default_agent.policy_profile
@@ -726,6 +740,7 @@ def create_app_with_config(
                 "onboarding_state": onboarding.load(),
                 "workspace_root": workspace_root,
                 "policy_profile": profile,
+                "autonomous_tool_loop": autonomous_tool_loop,
                 "provider_key_hint": provider_key_hint,
                 "error": "",
                 "result": "",
@@ -738,11 +753,14 @@ def create_app_with_config(
         provider_key: str = Form(""),
         workspace_root: str = Form(""),
         policy_profile: str = Form("trusted"),
+        autonomous_tool_loop: str = Form(""),
     ):
         onboarding.record(step="wizard.submit", outcome="attempt")
         key = (provider_key or "").strip()
         workspace = Path((workspace_root or "").strip()).expanduser()
         profile = (policy_profile or "").strip().lower()
+        autonomous_value = _normalize_checkbox_flag(autonomous_tool_loop)
+        autonomous_enabled = autonomous_value == "1"
 
         if profile not in {"strict", "balanced", "trusted"}:
             onboarding.record(step="wizard.validate", outcome="invalid_profile")
@@ -754,6 +772,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace),
                     "policy_profile": profile,
+                    "autonomous_tool_loop": autonomous_enabled,
                     "provider_key_hint": provider_key_hint,
                     "error": "Invalid safety profile.",
                     "result": "",
@@ -770,6 +789,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace),
                     "policy_profile": profile,
+                    "autonomous_tool_loop": autonomous_enabled,
                     "provider_key_hint": provider_key_hint,
                     "error": "Workspace path must exist and be a directory.",
                     "result": "",
@@ -786,6 +806,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace),
                     "policy_profile": profile,
+                    "autonomous_tool_loop": autonomous_enabled,
                     "provider_key_hint": provider_key_hint,
                     "error": "Provider key format looks invalid.",
                     "result": "",
@@ -797,9 +818,15 @@ def create_app_with_config(
             env_path = get_env_path(config_dir)
             env = load_env_file(env_path)
             env["EXECUTION_WORKSPACE_ROOT"] = str(workspace.resolve())
+            env[AUTONOMOUS_TOOL_LOOP_ENV] = autonomous_value
             if key:
                 env[onboarding_key_env] = key
             write_env_file(env_path, env)
+            runtime_env_path = config_dir / "runtime.env"
+            runtime_env = load_env_file(runtime_env_path) if runtime_env_path.exists() else {}
+            runtime_env[AUTONOMOUS_TOOL_LOOP_ENV] = autonomous_value
+            write_env_file(runtime_env_path, runtime_env)
+            os.environ[AUTONOMOUS_TOOL_LOOP_ENV] = autonomous_value
 
         default_agent = agent_service.get_agent("default")
         if default_agent:
@@ -827,6 +854,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace.resolve()),
                     "policy_profile": profile,
+                    "autonomous_tool_loop": autonomous_enabled,
                     "provider_key_hint": provider_key_hint,
                     "error": f"Test run failed: {str(exc)[:200]}",
                     "result": "",
@@ -844,6 +872,7 @@ def create_app_with_config(
                     "onboarding_state": onboarding.load(),
                     "workspace_root": str(workspace.resolve()),
                     "policy_profile": profile,
+                    "autonomous_tool_loop": autonomous_enabled,
                     "provider_key_hint": provider_key_hint,
                     "error": "Test run did not succeed. Review settings and try again.",
                     "result": output[:220],
@@ -861,6 +890,7 @@ def create_app_with_config(
                 "onboarding_state": onboarding.load(),
                 "workspace_root": str(workspace.resolve()),
                 "policy_profile": profile,
+                "autonomous_tool_loop": autonomous_enabled,
                 "provider_key_hint": provider_key_hint,
                 "error": "",
                 "result": output[:220],

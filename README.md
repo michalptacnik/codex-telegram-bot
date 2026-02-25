@@ -178,6 +178,7 @@ Environment variables override `.env`:
 - `SESSION_MAX_MESSAGES` (default: `40`, derived from turns)
 - `SESSION_COMPACT_KEEP` (default: `20`)
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
+- `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
@@ -514,6 +515,9 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - `!tool {"name":"git_status","args":{"short":true}}`
 - Structured loop objects are also supported:
   - `!loop {"steps":[{"kind":"exec","command":"/bin/ls -la"},{"kind":"tool","tool":"git_status","args":{"short":true}}],"final_prompt":"Summarize findings"}`
+- Optional autonomous planning bridge:
+  - set `AUTONOMOUS_TOOL_LOOP=1` to let text-only API providers (`deepseek`, `openai`, `gemini`, etc.) propose tool-loop steps automatically
+  - keep disabled for `codex_cli` in most setups (Codex already has native agentic tool execution)
 - The agent executes listed actions, captures observations, and injects them into the provider prompt.
 - High-risk actions require explicit approval:
   - `/pending` to list pending approvals
