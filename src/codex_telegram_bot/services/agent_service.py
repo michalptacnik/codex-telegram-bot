@@ -797,7 +797,11 @@ class AgentService:
                 agent_id=agent_id,
                 available_tool_names=available_tool_names,
             )
-            if probe.mode != PROBE_NEED_TOOLS and _prompt_expects_action(cleaned_prompt or prompt):
+            if (
+                probe.mode != PROBE_NEED_TOOLS
+                and _prompt_expects_action(cleaned_prompt or prompt)
+                and (not _reply_contains_executable_action(probe.reply))
+            ):
                 fallback_tools = _default_probe_tools_for_prompt(cleaned_prompt or prompt, available_tool_names)
                 if fallback_tools:
                     probe = ProbeDecision(
@@ -809,12 +813,33 @@ class AgentService:
                     )
             if probe.mode == PROBE_NO_TOOLS and probe.reply:
                 await self._notify_progress(progress_callback, {"event": "loop.probe.no_tools"})
+                resolved_reply = probe.reply
+                must_resolve_reply = (
+                    _prompt_expects_action(cleaned_prompt or prompt)
+                    or bool(_extract_exec_candidate_from_output(probe.reply))
+                    or any(marker in probe.reply for marker in ("!exec", "!tool", "!loop"))
+                )
+                if must_resolve_reply:
+                    resolved_reply = await self._resolve_autonomous_output(
+                        output=probe.reply,
+                        base_prompt=(cleaned_prompt or prompt),
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        progress_callback=progress_callback,
+                        autonomy_depth=autonomy_depth,
+                        workspace_root=self.session_workspace(session_id=session_id),
+                        policy_profile=self._agent_policy_profile(agent_id=agent_id),
+                        extra_tools=extra_tools,
+                        goal=(cleaned_prompt or prompt),
+                    )
                 if active_skills:
                     await self._notify_progress(
                         progress_callback,
                         {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
                     )
-                return probe.reply
+                return resolved_reply
             if probe.mode == PROBE_NEED_TOOLS and probe.tools:
                 await self._notify_progress(progress_callback, {"event": "loop.probe.need_tools", "tools": probe.tools})
                 need_tools_output = await self._run_need_tools_inference(
@@ -2869,6 +2894,18 @@ def _extract_exec_candidate_from_output(text: str) -> str:
     if len(single) == 1 and _looks_like_shell_command_line(single[0]):
         return single[0].lstrip("$").strip()
     return ""
+
+
+def _reply_contains_executable_action(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    actions, _, _ = _extract_loop_actions(raw)
+    if actions:
+        return True
+    if _extract_exec_candidate_from_output(raw):
+        return True
+    return _extract_tool_invocation_from_output(raw) is not None
 
 
 def _extract_email_address(text: str) -> str:

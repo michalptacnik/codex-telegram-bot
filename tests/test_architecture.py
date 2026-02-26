@@ -1030,6 +1030,39 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Git capability", need_tools_prompt)
             await service.shutdown()
 
+    async def test_probe_no_tools_with_exec_block_is_still_executed(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "NO_TOOLS\n!exec\necho probe-step"
+                return "Done. probe-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="probe-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Create the file now.",
+            chat_id=1,
+            user_id=1,
+            session_id="sess-probe-no-tools-exec",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "probe-step"])
+        self.assertIn("probe-step executed", out)
+        await service.shutdown()
+
     async def test_action_prompt_overrides_no_tools_probe_and_executes(self):
         class _Provider:
             def __init__(self):
