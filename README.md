@@ -186,6 +186,7 @@ Environment variables override `.env`:
 - `SESSION_COMPACT_KEEP` (default: `20`)
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
+- `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, registers `send_email_smtp` in default tool registry and enforces approval before sending)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
@@ -205,7 +206,7 @@ Environment variables override `.env`:
 - `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default: `30`; idle sessions archived after this many days)
 - `SESSION_DELETE_AFTER_DAYS` (default: `90`; archived sessions hard-deleted after this many days)
 - `SKILL_TRUSTED_HOSTS` (optional comma-separated allowlist for remote skill manifests; default: `raw.githubusercontent.com,github.com`)
-- `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_APP_PASSWORD`, `SMTP_FROM` (used by `smtp_email` skill)
+- `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_APP_PASSWORD`, `SMTP_FROM` (used by `smtp_email` skill and `send_email_smtp`)
 
 Print active config summary (never prints token):
 
@@ -512,18 +513,20 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
 - Retention policy compacts old session history when message count exceeds configured limits.
 - Tool execution uses isolated per-session workspace directories managed by `WorkspaceManager`.
 
-## Tool Loop (MVP)
+## Tool Loop (Probe -> Expand)
 
-- Messages can include deterministic shell actions using `!exec ...` lines.
-- Example:
-  - `!exec /bin/ls -la`
-  - `!exec /usr/bin/git status`
-- Registered tools are available via explicit `!tool` JSON:
-  - `!tool {"name":"read_file","args":{"path":"README.md"}}`
-  - `!tool {"name":"write_file","args":{"path":"notes.txt","content":"hello"}}`
-  - `!tool {"name":"git_status","args":{"short":true}}`
-- Structured loop objects are also supported:
-  - `!loop {"steps":[{"kind":"exec","command":"/bin/ls -la"},{"kind":"tool","tool":"git_status","args":{"short":true}}],"final_prompt":"Summarize findings"}`
+- Core principle: tools are assistant-invoked, not user-invoked.
+- The user asks for outcomes. The assistant decides and emits `!exec` / `!tool` / `!loop` internally when needed.
+- Request handling uses a cheap probe first:
+  - `NO_TOOLS`
+  - `<final assistant reply>`
+  - `NEED_TOOLS {"tools":["read_file","shell_exec"],"goal":"...","max_steps":3}`
+- `NO_TOOLS` returns immediately (no tool schemas/capability bundles injected).
+- `NEED_TOOLS` activates lazy injection:
+  - strict behavior rules
+  - only selected tool schemas
+  - only selected capability summaries
+  - tool loop execution
 - Optional autonomous planning bridge:
   - set `AUTONOMOUS_TOOL_LOOP=1` to let text-only API providers (`deepseek`, `openai`, `gemini`, etc.) propose tool-loop steps automatically
   - keep disabled for `codex_cli` in most setups (Codex already has native agentic tool execution)
@@ -535,6 +538,7 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - `/pending` to list pending approvals
   - `/approve <approval_id>` to execute approved action
   - `/deny <approval_id>` to reject pending action
+- `send_email_smtp` requires approval when `ENABLE_EMAIL_TOOL=1`.
 - Tool loop enforces per-message max step budget (`TOOL_LOOP_MAX_STEPS`).
 - Pending approvals expire automatically after `APPROVAL_TTL_SEC`.
 - Pending approvals are capped per user (`MAX_PENDING_APPROVALS_PER_USER`) to reduce abuse risk.

@@ -18,3 +18,14 @@ class TestCapabilityRegistry(unittest.TestCase):
 
             self.assertTrue(items)
             self.assertIn("git", [it.name for it in items])
+
+    def test_registry_selects_capabilities_from_tools_without_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            registry = MarkdownCapabilityRegistry(root)
+            items = registry.summarize_for_tools(["read_file", "shell_exec"], max_capabilities=4)
+            names = [it.name for it in items]
+            self.assertIn("files", names)
+            self.assertIn("shell", names)
+            none = registry.summarize_for_tools(["unknown_tool"], max_capabilities=4)
+            self.assertEqual(none, [])

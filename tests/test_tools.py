@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from codex_telegram_bot.tools import build_default_tool_registry
@@ -44,3 +45,13 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
         self.assertIn("git_status", names)
+
+    def test_email_tool_disabled_by_default(self):
+        with patch.dict("os.environ", {}, clear=True):
+            registry = build_default_tool_registry()
+            self.assertIsNone(registry.get("send_email_smtp"))
+
+    def test_email_tool_enabled_by_env(self):
+        with patch.dict("os.environ", {"ENABLE_EMAIL_TOOL": "1"}, clear=True):
+            registry = build_default_tool_registry()
+            self.assertIsNotNone(registry.get("send_email_smtp"))

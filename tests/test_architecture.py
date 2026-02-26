@@ -21,6 +21,7 @@ from codex_telegram_bot.services.agent_service import _model_job_phase_hint
 from codex_telegram_bot.services.agent_service import _is_email_send_intent
 from codex_telegram_bot.services.agent_service import _output_claims_email_sent
 from codex_telegram_bot.services.agent_service import _parse_planner_output
+from codex_telegram_bot.tools.base import ToolRegistry
 
 
 class FakeRunner:
@@ -947,6 +948,88 @@ class TestModelJobPhaseHints(unittest.TestCase):
 
 
 class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
+    async def test_probe_no_tools_returns_immediately(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "NO_TOOLS\nParis is the capital of France."
+                return "unexpected second model call"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        provider = _Provider()
+        service = AgentService(provider=provider)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="What is the capital of France?",
+            chat_id=1,
+            user_id=1,
+            session_id="sess-probe-1",
+            agent_id="default",
+        )
+        self.assertEqual(out, "Paris is the capital of France.")
+        self.assertEqual(provider.calls, 1)
+        await service.shutdown()
+
+    async def test_probe_need_tools_injects_selected_tool_schemas_only(self):
+        class _Provider:
+            def __init__(self):
+                self.prompts = []
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                content = str(messages[0].get("content") or "")
+                self.prompts.append(content)
+                if len(self.prompts) == 1:
+                    return 'NEED_TOOLS {"tools":["read_file","shell_exec"],"goal":"Inspect a file","max_steps":2}'
+                return "Done without tool execution."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cap_root = Path(tmp) / "caps"
+            cap_root.mkdir(parents=True, exist_ok=True)
+            (cap_root / "system.md").write_text("# System\n- baseline\n", encoding="utf-8")
+            provider = _Provider()
+            service = AgentService(
+                provider=provider,
+                capability_registry=MarkdownCapabilityRegistry(cap_root),
+            )
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Inspect README and tell me what's inside.",
+                chat_id=1,
+                user_id=1,
+                session_id="sess-probe-2",
+                agent_id="default",
+            )
+            self.assertEqual(out, "Done without tool execution.")
+            self.assertGreaterEqual(len(provider.prompts), 2)
+            need_tools_prompt = provider.prompts[1]
+            self.assertIn('"name": "read_file"', need_tools_prompt)
+            self.assertIn('"name": "shell_exec"', need_tools_prompt)
+            self.assertNotIn('"name": "git_commit"', need_tools_prompt)
+            self.assertIn("Capability hints (tool-selected):", need_tools_prompt)
+            self.assertIn("Files capability", need_tools_prompt)
+            self.assertIn("Shell capability", need_tools_prompt)
+            self.assertNotIn("Git capability", need_tools_prompt)
+            await service.shutdown()
+
     async def test_autonomous_tool_loop_executes_planned_step(self):
         class _PlannerProvider:
             def __init__(self):
@@ -1226,6 +1309,65 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 agent_id="default",
             )
             self.assertIn("Email sent to partnerships@ambergroup.io", out)
+            await service.shutdown()
+
+    async def test_email_tool_action_requires_approval_when_enabled(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "ok"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        class _FakeEmailTool:
+            name = "send_email_smtp"
+
+            def __init__(self):
+                self.calls = 0
+
+            def run(self, request, context):
+                self.calls += 1
+                return type("R", (), {"ok": True, "output": "sent"})()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            fake_tool = _FakeEmailTool()
+            registry = ToolRegistry()
+            registry.register(fake_tool)
+            service = AgentService(
+                provider=_Provider(),
+                run_store=store,
+                event_bus=bus,
+                tool_registry=registry,
+            )
+            with patch.dict("os.environ", {"ENABLE_EMAIL_TOOL": "1"}):
+                session = service.get_or_create_session(chat_id=21, user_id=22)
+                out = await service.run_prompt_with_tool_loop(
+                    prompt='!tool {"name":"send_email_smtp","args":{"to":"a@b.com","subject":"S","body":"B"}}',
+                    chat_id=21,
+                    user_id=22,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("Approval required for high-risk tool action", out)
+                self.assertEqual(fake_tool.calls, 0)
+                pending = service.list_pending_tool_approvals(chat_id=21, user_id=22, limit=5)
+                self.assertEqual(len(pending), 1)
+                approved = await service.approve_tool_action(
+                    approval_id=pending[0]["approval_id"],
+                    chat_id=21,
+                    user_id=22,
+                )
+                self.assertIn("[tool:", approved)
+                self.assertEqual(fake_tool.calls, 1)
             await service.shutdown()
 
     async def test_generic_slash_tool_invocation_executes(self):

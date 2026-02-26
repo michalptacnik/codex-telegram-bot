@@ -1,4 +1,4 @@
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 import asyncio
 import logging
 import re
@@ -40,6 +40,87 @@ CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
 CONTEXT_SUMMARY_BUDGET_CHARS = 1200
 MODEL_JOB_HEARTBEAT_SEC = 15
 AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
+EMAIL_TOOL_ENV = "ENABLE_EMAIL_TOOL"
+TOOL_APPROVAL_SENTINEL = "__tool__"
+PROBE_NO_TOOLS = "NO_TOOLS"
+PROBE_NEED_TOOLS = "NEED_TOOLS"
+MICRO_STYLE_GUIDE = (
+    "Be direct and human. If user wants action, do it via tools. Don't narrate internal steps. "
+    "After actions: what you did + result + next options. Ask only if blocked. Never say 'as an AI'."
+)
+TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
+    "exec": {
+        "name": "exec",
+        "protocol": "!exec <command>",
+        "args": {"command": "string (required)"},
+    },
+    "read_file": {
+        "name": "read_file",
+        "protocol": "!tool",
+        "args": {"path": "string (required)", "max_bytes": "int (optional, default=50000)"},
+    },
+    "write_file": {
+        "name": "write_file",
+        "protocol": "!tool",
+        "args": {"path": "string (required)", "content": "string (required)"},
+    },
+    "shell_exec": {
+        "name": "shell_exec",
+        "protocol": "!tool",
+        "args": {"cmd": "string (required)", "timeout_sec": "int (optional)"},
+    },
+    "git_status": {
+        "name": "git_status",
+        "protocol": "!tool",
+        "args": {"short": "bool (optional, default=true)"},
+    },
+    "git_diff": {
+        "name": "git_diff",
+        "protocol": "!tool",
+        "args": {"staged": "bool (optional, default=false)"},
+    },
+    "git_log": {
+        "name": "git_log",
+        "protocol": "!tool",
+        "args": {"n": "int (optional, default=10, max=50)"},
+    },
+    "git_add": {
+        "name": "git_add",
+        "protocol": "!tool",
+        "args": {"paths": "list[string] or string (required)"},
+    },
+    "git_commit": {
+        "name": "git_commit",
+        "protocol": "!tool",
+        "args": {"message": "string (required)"},
+    },
+    "ssh_detect": {
+        "name": "ssh_detect",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "send_email_smtp": {
+        "name": "send_email_smtp",
+        "protocol": "!tool",
+        "args": {
+            "to": "string (required)",
+            "subject": "string (required)",
+            "body": "string (required)",
+            "dry_run": "bool (optional)",
+        },
+    },
+    "provider_status": {
+        "name": "provider_status",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "provider_switch": {
+        "name": "provider_switch",
+        "protocol": "!tool",
+        "args": {"name": "string (required)"},
+    },
+}
+APPROVAL_REQUIRED_TOOLS = {"send_email_smtp"}
 
 
 @dataclass(frozen=True)
@@ -53,6 +134,15 @@ class LoopAction:
         if self.kind == "tool":
             return f"tool:{self.tool_name}:{json.dumps(self.tool_args, sort_keys=True)}"
         return " ".join(self.argv)
+
+
+@dataclass(frozen=True)
+class ProbeDecision:
+    mode: str
+    reply: str
+    tools: List[str]
+    goal: str
+    max_steps: int
 
 
 class AgentService:
@@ -364,8 +454,9 @@ class AgentService:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         capability_lines = self._build_capability_context(user_prompt=user_prompt)
+        style_lines = [f"Style guide: {MICRO_STYLE_GUIDE}"]
         if not self._run_store:
-            prefix = capability_lines + planning_lines + retrieval_lines
+            prefix = style_lines + capability_lines + planning_lines + retrieval_lines
             if prefix:
                 return "\n".join(prefix + [user_prompt])
             return user_prompt
@@ -373,7 +464,7 @@ class AgentService:
         summary = (session.summary or "").strip() if session else ""
         history = self._run_store.list_session_messages(session_id=session_id, limit=max_turns * 2)
         if not history:
-            prefix = capability_lines + planning_lines + retrieval_lines
+            prefix = style_lines + capability_lines + planning_lines + retrieval_lines
             if summary:
                 prefix = [f"Session memory summary:\n{summary[:CONTEXT_SUMMARY_BUDGET_CHARS]}"] + prefix
             if prefix:
@@ -390,6 +481,7 @@ class AgentService:
         lines = [
             "Conversation context (most recent first-order preserved):",
         ]
+        lines.extend(style_lines)
         used_summary = ""
         if summary:
             used_summary = summary[:CONTEXT_SUMMARY_BUDGET_CHARS]
@@ -437,6 +529,25 @@ class AgentService:
         lines = ["Capability hints (selective summaries):"]
         for item in summaries:
             lines.append(f"- {item.summary[:260]}")
+        return lines
+
+    def _build_capability_context_for_tools(self, tool_names: Sequence[str], max_capabilities: int = 4) -> List[str]:
+        if not self._capability_registry:
+            return []
+        summaries = self._capability_registry.summarize_for_tools(tool_names=tool_names, max_capabilities=max_capabilities)
+        if not summaries:
+            return []
+        lines = ["Capability hints (tool-selected):"]
+        for item in summaries:
+            summary_lines = [ln.rstrip() for ln in str(item.summary or "").splitlines() if ln.strip()]
+            if not summary_lines:
+                continue
+            lines.append(f"- {summary_lines[0][:200]}")
+            for bullet in summary_lines[1:3]:
+                if bullet.startswith("- "):
+                    lines.append(f"  {bullet}")
+                else:
+                    lines.append(f"  - {bullet}")
         return lines
 
     def _build_retrieval_context_with_meta(self, user_prompt: str, limit: int = 4) -> tuple[List[str], Dict[str, Any]]:
@@ -581,6 +692,31 @@ class AgentService:
             session_id=session_id,
             content=f"tool.action.approved action_id={action_id} argv={' '.join(argv)}",
         )
+        tool_run_id = ""
+        if argv and argv[0] == TOOL_APPROVAL_SENTINEL:
+            tool_name = str(argv[1] if len(argv) > 1 else "").strip().lower()
+            raw_args = str(argv[2] if len(argv) > 2 else "{}")
+            try:
+                tool_args = json.loads(raw_args)
+            except Exception:
+                tool_args = {}
+            if not isinstance(tool_args, dict):
+                tool_args = {}
+            result_obj = await self._execute_registered_tool_action(
+                action_id=action_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                workspace_root=self.session_workspace(session_id=session_id),
+                policy_profile=policy_profile,
+                extra_tools={},
+            )
+            text = (
+                f"[tool:{action_id}] rc={0 if result_obj.ok else 1}\n"
+                f"output:\n{(result_obj.output or '').strip()[:1800]}"
+            ).strip()
+            self._run_store.set_tool_approval_status(approval_id, "executed")
+            self.append_session_assistant_message(session_id=session_id, content=text, run_id=tool_run_id)
+            return text
         result, tool_run_id = await self._execute_tool_action_with_telemetry(
             action_id=action_id,
             session_id=session_id,
@@ -649,24 +785,81 @@ class AgentService:
                     {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
                 )
             return msg
-        if not actions and self._autonomous_tool_loop_enabled():
-            await self._notify_progress(progress_callback, {"event": "loop.autoplan.started"})
-            planned_actions, planned_final_prompt = await self._plan_tool_loop_actions(
+        if not actions:
+            if self._autonomous_tool_loop_enabled():
+                await self._notify_progress(progress_callback, {"event": "loop.autoplan.started"})
+                planned_actions, planned_final_prompt = await self._plan_tool_loop_actions(
+                    prompt=(cleaned_prompt or prompt),
+                    agent_id=agent_id,
+                    tool_names=available_tool_names,
+                )
+                if planned_actions:
+                    actions = planned_actions
+                    if planned_final_prompt:
+                        final_prompt = planned_final_prompt
+                    await self._notify_progress(
+                        progress_callback,
+                        {"event": "loop.autoplan.ready", "steps_total": len(actions)},
+                    )
+                else:
+                    await self._notify_progress(progress_callback, {"event": "loop.autoplan.none"})
+
+        if not actions:
+            await self._notify_progress(progress_callback, {"event": "loop.probe.started"})
+            probe = await self._run_probe_decision(
                 prompt=(cleaned_prompt or prompt),
                 agent_id=agent_id,
-                tool_names=available_tool_names,
+                available_tool_names=available_tool_names,
             )
-            if planned_actions:
-                actions = planned_actions
-                if planned_final_prompt:
-                    final_prompt = planned_final_prompt
-                await self._notify_progress(
-                    progress_callback,
-                    {"event": "loop.autoplan.ready", "steps_total": len(actions)},
+            if probe.mode == PROBE_NO_TOOLS and probe.reply:
+                await self._notify_progress(progress_callback, {"event": "loop.probe.no_tools"})
+                if active_skills:
+                    await self._notify_progress(
+                        progress_callback,
+                        {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
+                    )
+                return probe.reply
+            if probe.mode == PROBE_NEED_TOOLS and probe.tools:
+                await self._notify_progress(progress_callback, {"event": "loop.probe.need_tools", "tools": probe.tools})
+                need_tools_output = await self._run_need_tools_inference(
+                    prompt=(cleaned_prompt or prompt),
+                    goal=probe.goal,
+                    selected_tools=probe.tools,
+                    max_steps=probe.max_steps,
+                    agent_id=agent_id,
                 )
-            else:
-                await self._notify_progress(progress_callback, {"event": "loop.autoplan.none"})
-
+                generated_actions, _, generated_final_prompt = _extract_loop_actions(need_tools_output)
+                if generated_actions:
+                    max_probe_steps = max(1, min(int(probe.max_steps or 1), self._tool_loop_max_steps))
+                    if len(generated_actions) > max_probe_steps:
+                        generated_actions = generated_actions[:max_probe_steps]
+                    loop_payload = {
+                        "steps": [_loop_action_to_step(item) for item in generated_actions],
+                        "final_prompt": generated_final_prompt
+                        or _need_tools_summary_prompt(goal=(probe.goal or (cleaned_prompt or prompt))),
+                    }
+                    routed = "!loop " + json.dumps(loop_payload, ensure_ascii=True)
+                    output = await self.run_prompt_with_tool_loop(
+                        prompt=routed,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        progress_callback=progress_callback,
+                    )
+                    if active_skills:
+                        await self._notify_progress(
+                            progress_callback,
+                            {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
+                        )
+                    return output
+                if need_tools_output.strip():
+                    if active_skills:
+                        await self._notify_progress(
+                            progress_callback,
+                            {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
+                        )
+                    return need_tools_output.strip()
         if not actions:
             contextual = self.build_session_prompt(session_id=session_id, user_prompt=cleaned_prompt or prompt)
             job_id = await self.queue_prompt(prompt=contextual, agent_id=agent_id)
@@ -754,6 +947,76 @@ class AgentService:
                 },
             )
             if action.kind == "tool":
+                if self._tool_action_requires_approval(action.tool_name):
+                    if not self._run_store:
+                        return "Error: approval registry unavailable."
+                    if self._run_store.count_pending_tool_approvals(chat_id=chat_id, user_id=user_id) >= self._max_pending_approvals_per_user:
+                        msg = (
+                            "Error: too many pending approvals for this user. "
+                            "Resolve existing approvals with /pending, /approve, or /deny."
+                        )
+                        self.append_session_assistant_message(session_id=session_id, content=msg)
+                        return msg
+                    tool_argv = [
+                        TOOL_APPROVAL_SENTINEL,
+                        action.tool_name,
+                        json.dumps(action.tool_args or {}, sort_keys=True, ensure_ascii=True),
+                    ]
+                    existing = self._run_store.find_pending_tool_approval(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        argv=tool_argv,
+                    )
+                    if existing:
+                        approval_id = existing["approval_id"]
+                    else:
+                        run_id = self._run_store.create_run(f"Approval requested for tool: {action.tool_name}")
+                        self._run_store.mark_running(run_id)
+                        approval_id = self._run_store.create_tool_approval(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            run_id=run_id,
+                            argv=tool_argv,
+                            stdin_text="",
+                            timeout_sec=60,
+                            risk_tier="high",
+                        )
+                        self._emit_tool_event(
+                            run_id=run_id,
+                            event_type="tool.approval.requested",
+                            payload=f"approval_id={approval_id}, action_id={action_id}, risk=high",
+                        )
+                        self._run_store.mark_completed(
+                            run_id,
+                            f"Approval requested approval_id={approval_id} action_id={action_id}",
+                        )
+                    if self._run_store:
+                        self._run_store.upsert_tool_loop_checkpoint(
+                            session_id=session_id,
+                            prompt_fingerprint=prompt_fingerprint,
+                            step_index=index,
+                            command=command,
+                            status="pending_approval",
+                        )
+                    await self._notify_progress(
+                        progress_callback,
+                        {
+                            "event": "loop.step.awaiting_approval",
+                            "step": index,
+                            "action_id": action_id,
+                            "approval_id": approval_id,
+                        },
+                    )
+                    msg = (
+                        f"Approval required for high-risk tool action ({action_id}).\n"
+                        f"Run: /approve {approval_id[:8]}\n"
+                        f"Tool: {action.tool_name}"
+                    )
+                    self.append_session_assistant_message(session_id=session_id, content=msg)
+                    return msg
                 result = await self._execute_registered_tool_action(
                     action_id=action_id,
                     tool_name=action.tool_name,
@@ -1228,6 +1491,15 @@ class AgentService:
             output=f"{action_id} tool={tool_name} status={status}\n{result.output}",
         )
 
+    def _tool_action_requires_approval(self, tool_name: str) -> bool:
+        name = (tool_name or "").strip().lower()
+        if name not in APPROVAL_REQUIRED_TOOLS:
+            return False
+        if name == "send_email_smtp":
+            enabled = (os.environ.get(EMAIL_TOOL_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
+            return enabled
+        return True
+
     async def _attempt_autonomous_email_send_recovery(
         self,
         output: str,
@@ -1481,6 +1753,109 @@ class AgentService:
         raw = (os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV) or "").strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
+    async def _run_probe_decision(
+        self,
+        prompt: str,
+        agent_id: str,
+        available_tool_names: Sequence[str],
+    ) -> ProbeDecision:
+        provider_for_probe = self._provider_for_agent(agent_id=agent_id)
+        selectors = sorted(set(_normalize_tool_names(list(available_tool_names)) + ["exec"]))
+        max_steps = max(1, self._tool_loop_max_steps)
+        probe_prompt = (
+            "Classify whether the request needs tool execution before final answer.\n"
+            "Output strictly in one format only:\n"
+            f"- {PROBE_NO_TOOLS}\\n<final assistant reply>\n"
+            f"- {PROBE_NEED_TOOLS} {{\"tools\":[\"name\"],\"goal\":\"...\",\"max_steps\":{max_steps}}}\n"
+            "Rules:\n"
+            "- Use tool names from: " + ", ".join(selectors) + "\n"
+            "- If unsure, prefer NEED_TOOLS.\n"
+            "- No markdown fences.\n"
+            "User request:\n"
+            + (prompt or "").strip()
+        )
+        try:
+            raw = await provider_for_probe.generate(
+                [{"role": "user", "content": probe_prompt}],
+                stream=False,
+                policy_profile=self._agent_policy_profile(agent_id=agent_id),
+            )
+        except Exception:
+            return ProbeDecision(mode="", reply="", tools=[], goal="", max_steps=max_steps)
+        return _parse_probe_output(
+            raw=raw,
+            available_tool_names=selectors,
+            default_max_steps=max_steps,
+        )
+
+    async def _run_need_tools_inference(
+        self,
+        prompt: str,
+        goal: str,
+        selected_tools: Sequence[str],
+        max_steps: int,
+        agent_id: str,
+    ) -> str:
+        normalized_tools = _normalize_tool_names(list(selected_tools))
+        if not normalized_tools:
+            return ""
+        provider_for_call = self._provider_for_agent(agent_id=agent_id)
+        call_prompt = self._build_need_tools_prompt(
+            prompt=prompt,
+            goal=goal,
+            selected_tools=normalized_tools,
+            max_steps=max_steps,
+        )
+        try:
+            output = await provider_for_call.generate(
+                [{"role": "user", "content": call_prompt}],
+                stream=False,
+                policy_profile=self._agent_policy_profile(agent_id=agent_id),
+            )
+        except Exception as exc:
+            return f"Error: NEED_TOOLS generation failed: {exc}"
+        return (output or "").strip()
+
+    def _build_need_tools_prompt(
+        self,
+        prompt: str,
+        goal: str,
+        selected_tools: Sequence[str],
+        max_steps: int,
+    ) -> str:
+        tool_lines = _render_tool_schema_lines(selected_tools)
+        capability_lines = self._build_capability_context_for_tools(selected_tools, max_capabilities=4)
+        lines = [
+            f"Style guide: {MICRO_STYLE_GUIDE}",
+            "Behavior rules (strict):",
+            "1) Tools are for the assistant to call, never for the user to type.",
+            "2) If you can proceed, proceed. Ask only when blocked or approval is required.",
+            "3) If tools are required now, output only one block: !exec ... OR !tool {...} OR !loop {...}.",
+            "4) Do not output explanations before a tool call.",
+            "5) After tool results: either output next tool call (only), or final short summary.",
+            f"Step budget: {max(1, min(max_steps, self._tool_loop_max_steps))}",
+            "Selected tool APIs:",
+        ]
+        if tool_lines:
+            lines.extend(tool_lines)
+        if capability_lines:
+            lines.extend(capability_lines)
+        lines.extend(
+            [
+                "Example (format only):",
+                'User: "Create a file hello.txt with hi and commit it."',
+                'Assistant: !exec printf "hi\\n" > hello.txt',
+                "(tool result)",
+                'Assistant: !exec git add hello.txt && git commit -m "Add hello.txt"',
+                "(tool result)",
+                "Assistant: Done. Created hello.txt and committed. Next: push to origin?",
+                f"Goal: {(goal or prompt or '').strip()}",
+                "User request:",
+                (prompt or "").strip(),
+            ]
+        )
+        return "\n".join([ln for ln in lines if ln is not None and str(ln).strip() != ""])
+
     async def _plan_tool_loop_actions(
         self,
         prompt: str,
@@ -1652,6 +2027,79 @@ class AgentService:
         }
         value = aliases.get(value, value)
         return value.replace("-", "_")
+
+
+def _normalize_tool_names(names: Sequence[str]) -> List[str]:
+    out: List[str] = []
+    for raw in names or []:
+        name = str(raw or "").strip().lower()
+        if not name:
+            continue
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def _render_tool_schema_lines(selected_tools: Sequence[str]) -> List[str]:
+    lines: List[str] = []
+    for name in _normalize_tool_names(selected_tools):
+        schema = TOOL_SCHEMA_MAP.get(name)
+        if not schema:
+            continue
+        lines.append("- " + json.dumps(schema, ensure_ascii=True, sort_keys=True))
+    if lines:
+        return lines
+    return ["- " + json.dumps(TOOL_SCHEMA_MAP["exec"], ensure_ascii=True, sort_keys=True)]
+
+
+def _parse_probe_output(raw: str, available_tool_names: Sequence[str], default_max_steps: int) -> ProbeDecision:
+    text = (raw or "").strip()
+    if not text:
+        return ProbeDecision(mode="", reply="", tools=[], goal="", max_steps=default_max_steps)
+    if text.startswith(PROBE_NO_TOOLS):
+        reply = text[len(PROBE_NO_TOOLS) :].strip()
+        return ProbeDecision(mode=PROBE_NO_TOOLS, reply=reply, tools=[], goal="", max_steps=default_max_steps)
+    if not text.startswith(PROBE_NEED_TOOLS):
+        return ProbeDecision(mode="", reply="", tools=[], goal="", max_steps=default_max_steps)
+    payload_raw = text[len(PROBE_NEED_TOOLS) :].strip()
+    if not payload_raw:
+        return ProbeDecision(mode="", reply="", tools=[], goal="", max_steps=default_max_steps)
+    parsed = _parse_planner_output(payload_raw)
+    if not parsed:
+        return ProbeDecision(mode="", reply="", tools=[], goal="", max_steps=default_max_steps)
+    allowed = set(_normalize_tool_names(list(available_tool_names)))
+    raw_tools = parsed.get("tools") if isinstance(parsed.get("tools"), list) else []
+    selected: List[str] = []
+    for item in raw_tools:
+        name = str(item or "").strip().lower()
+        if name in allowed and name not in selected:
+            selected.append(name)
+    max_steps = default_max_steps
+    try:
+        max_steps = max(1, min(int(parsed.get("max_steps") or default_max_steps), default_max_steps))
+    except Exception:
+        max_steps = default_max_steps
+    goal = str(parsed.get("goal") or "").strip()
+    if not selected:
+        return ProbeDecision(mode="", reply="", tools=[], goal="", max_steps=max_steps)
+    return ProbeDecision(mode=PROBE_NEED_TOOLS, reply="", tools=selected, goal=goal, max_steps=max_steps)
+
+
+def _loop_action_to_step(action: LoopAction) -> Dict[str, Any]:
+    if action.kind == "tool":
+        return {"kind": "tool", "tool": action.tool_name, "args": dict(action.tool_args or {})}
+    return {"kind": "exec", "command": shlex.join(action.argv)}
+
+
+def _need_tools_summary_prompt(goal: str) -> str:
+    g = (goal or "").strip()
+    if not g:
+        return "Summarize what you executed and the outcome. Offer next options only if useful."
+    return (
+        f"Goal: {g}\n"
+        "After executing steps, respond briefly with what you did, the concrete outcome, "
+        "and useful next options only when they help."
+    )
 
 
 def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
