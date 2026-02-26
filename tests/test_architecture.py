@@ -1171,6 +1171,76 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("shorthand-step executed", out)
         await service.shutdown()
 
+    async def test_model_emitted_split_exec_block_is_executed(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self.calls == 2:
+                    return "!exec\necho split-step"
+                return "Done. split-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="split-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Please proceed.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-4e",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "split-step"])
+        self.assertIn("split-step executed", out)
+        await service.shutdown()
+
+    async def test_model_emitted_bash_fence_command_is_executed(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self.calls == 2:
+                    return "I'll check now.\n\n```bash\necho fenced-step\n```"
+                return "Done. fenced-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="fenced-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Create the file now.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-4f",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "fenced-step"])
+        self.assertIn("fenced-step executed", out)
+        await service.shutdown()
+
     async def test_model_emitted_protocol_can_chain_multiple_follow_up_steps(self):
         class _Provider:
             def __init__(self):
@@ -1254,6 +1324,41 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(runner.last_argv, ["echo", "corrected-step"])
         self.assertIn("corrected-step executed", out)
+        await service.shutdown()
+
+    async def test_model_emitted_step_with_pipe_executes_via_shell_wrapper(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return 'NEED_TOOLS {"tools":["shell_exec"],"goal":"Run command","max_steps":2}'
+                if self.calls == 2:
+                    return "Step 1: echo one | cat"
+                return "Done. one"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="one\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Run the command now.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-shell-wrap",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["bash", "-lc", "echo one | cat"])
+        self.assertIn("Done. one", out)
         await service.shutdown()
 
     async def test_autonomous_tool_loop_uses_planner_as_fallback_after_probe(self):

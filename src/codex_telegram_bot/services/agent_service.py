@@ -1654,6 +1654,7 @@ class AgentService:
             "- !loop {...}",
             "If blocked by missing required input/approval, ask one short question only.",
             "Do not include explanation before tool call.",
+            "Do not use markdown code fences.",
             f"Goal: {(goal or prompt or '').strip()}",
             "User request:",
             (prompt or "").strip(),
@@ -1747,7 +1748,33 @@ class AgentService:
             and (not has_executed_tool)
             and executed_slash is None
             and _prompt_expects_action(base_prompt)
+            and autonomy_depth < self._autonomous_protocol_max_depth()
+        ):
+            extracted_command = _extract_exec_candidate_from_output(text)
+            extracted_argv = _parse_exec_command_argv(extracted_command) if extracted_command else []
+            if extracted_argv:
+                loop_payload = {
+                    "steps": [{"kind": "exec", "command": shlex.join(extracted_argv)}],
+                    "final_prompt": _need_tools_summary_prompt(goal=(goal or base_prompt)),
+                }
+                routed = "!loop " + json.dumps(loop_payload, ensure_ascii=True)
+                return await self.run_prompt_with_tool_loop(
+                    prompt=routed,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    progress_callback=progress_callback,
+                    autonomy_depth=autonomy_depth + 1,
+                )
+
+        if (
+            allow_correction
+            and (not has_executed_tool)
+            and executed_slash is None
+            and _prompt_expects_action(base_prompt)
             and _output_sounds_like_action_promise(text)
+            and autonomy_depth < self._autonomous_protocol_max_depth()
         ):
             corrected = await self._request_tool_call_correction(
                 prompt=base_prompt,
@@ -2019,6 +2046,7 @@ class AgentService:
             "4) Do not output explanations before a tool call.",
             "5) Do not stop at diagnosis; execute the next concrete step immediately when safe.",
             "6) After tool results: continue with next tool call until goal is done or blocked.",
+            "7) Never output shell snippets or markdown fences. Emit protocol blocks only.",
             f"Step budget: {max(1, min(max_steps, self._tool_loop_max_steps))}",
             "Selected tool APIs:",
         ]
@@ -2360,6 +2388,26 @@ def _coerce_tool_value(raw: str) -> Any:
     return value
 
 
+def _command_needs_shell_wrapper(command: str) -> bool:
+    text = str(command or "")
+    if not text.strip():
+        return False
+    shell_markers = ("|", "&&", "||", ";", ">", "<", "$(", "`")
+    return any(marker in text for marker in shell_markers)
+
+
+def _parse_exec_command_argv(command: str) -> List[str]:
+    cmd = str(command or "").strip()
+    if not cmd:
+        return []
+    if _command_needs_shell_wrapper(cmd):
+        return ["bash", "-lc", cmd]
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return []
+
+
 def _parse_tool_directive(body: str) -> Optional[LoopAction]:
     payload = (body or "").strip()
     if not payload:
@@ -2410,15 +2458,14 @@ def _parse_tool_directive(body: str) -> Optional[LoopAction]:
     if tool_name == "exec":
         command = str(args.get("cmd") or args.get("command") or "").strip()
         if command:
-            try:
-                argv = shlex.split(command)
-            except ValueError:
-                argv = []
+            argv = _parse_exec_command_argv(command)
             if argv:
                 return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
             return None
         if positional:
-            return LoopAction(kind="exec", argv=positional, tool_name="", tool_args={})
+            argv = _parse_exec_command_argv(" ".join(positional))
+            if argv:
+                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
         return None
 
     if positional:
@@ -2478,22 +2525,33 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
                     final_prompt = fp
             index += 1
             continue
-        if line.startswith("!exec "):
-            cmd_seed = line[len("!exec "):].strip()
+        if line == "!exec" or line.startswith("!exec "):
+            cmd_seed = line[len("!exec") :].strip()
             candidate = cmd_seed
             consumed = index + 1
+            while (not candidate) and consumed < len(raw_lines):
+                next_line = raw_lines[consumed].strip()
+                consumed += 1
+                if not next_line:
+                    continue
+                candidate = next_line
+                break
             argv: List[str] = []
             if candidate:
-                while True:
-                    try:
-                        argv = shlex.split(candidate)
-                        break
-                    except ValueError:
-                        if consumed >= len(raw_lines):
-                            argv = []
-                            break
-                        candidate = candidate + "\n" + raw_lines[consumed]
-                        consumed += 1
+                if _command_needs_shell_wrapper(candidate):
+                    argv = _parse_exec_command_argv(candidate)
+                else:
+                    parsed = _parse_exec_command_argv(candidate)
+                    if parsed:
+                        argv = parsed
+                    else:
+                        while consumed < len(raw_lines):
+                            candidate = candidate + "\n" + raw_lines[consumed]
+                            consumed += 1
+                            parsed = _parse_exec_command_argv(candidate)
+                            if parsed:
+                                argv = parsed
+                                break
             if argv:
                 actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
             else:
@@ -2711,6 +2769,106 @@ def _output_sounds_like_action_promise(text: str) -> bool:
     if "about to do" in low or "going to do" in low:
         return True
     return False
+
+
+def _looks_like_shell_command_line(line: str) -> bool:
+    raw = str(line or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("!exec", "!tool", "!loop", "/")):
+        return False
+    if raw.lower().startswith(("assistant:", "user:", "step result", "done")):
+        return False
+    cleaned = raw[1:].strip() if raw.startswith("$") else raw
+    try:
+        tokens = shlex.split(cleaned)
+    except ValueError:
+        tokens = cleaned.split()
+    if not tokens:
+        return False
+    first = tokens[0].lower()
+    common = {
+        "ls",
+        "cat",
+        "echo",
+        "touch",
+        "mkdir",
+        "rm",
+        "cp",
+        "mv",
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "git",
+        "npm",
+        "node",
+        "apt",
+        "apt-get",
+        "docker",
+        "kubectl",
+        "systemctl",
+        "service",
+        "ssh",
+        "scp",
+        "grep",
+        "sed",
+        "awk",
+        "find",
+        "pwd",
+        "whoami",
+        "history",
+        "tail",
+        "head",
+        "chmod",
+        "chown",
+        "curl",
+        "wget",
+        "bash",
+        "sh",
+        "zsh",
+        "printf",
+        "tee",
+    }
+    if first in common:
+        return True
+    return first.startswith("./") or first.startswith("/") or first.endswith(".sh")
+
+
+def _extract_exec_candidate_from_output(text: str) -> str:
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    for match in re.finditer(r"```(?:bash|sh|shell|zsh)?\s*\n(.*?)```", raw, flags=re.I | re.S):
+        block = match.group(1)
+        for line in block.splitlines():
+            candidate = line.strip()
+            if not candidate or candidate.startswith("#"):
+                continue
+            if candidate.startswith("$"):
+                candidate = candidate[1:].strip()
+            if _looks_like_shell_command_line(candidate):
+                return candidate
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        step = re.match(r"(?i)^step\s*\d+\s*:\s*(.+)$", stripped)
+        if step:
+            candidate = step.group(1).strip()
+            if _looks_like_shell_command_line(candidate):
+                return candidate
+        if stripped.startswith("$"):
+            candidate = stripped[1:].strip()
+            if _looks_like_shell_command_line(candidate):
+                return candidate
+
+    single = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if len(single) == 1 and _looks_like_shell_command_line(single[0]):
+        return single[0].lstrip("$").strip()
+    return ""
 
 
 def _extract_email_address(text: str) -> str:
