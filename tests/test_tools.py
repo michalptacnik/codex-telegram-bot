@@ -51,6 +51,22 @@ class TestFileTools(unittest.TestCase):
             self.assertIn(str(root / "note.txt"), res.output)
             self.assertIn("Verified file exists", res.output)
 
+    def test_write_file_tool_allows_outside_workspace_in_trusted_profile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            root.mkdir(parents=True, exist_ok=True)
+            external = Path(tmp) / "outside.txt"
+            tool = WriteFileTool()
+
+            res = tool.run(
+                ToolRequest(name="write_file", args={"path": str(external), "content": "hello"}),
+                ToolContext(workspace_root=root, policy_profile="trusted"),
+            )
+
+            self.assertTrue(res.ok)
+            self.assertTrue(external.exists())
+            self.assertEqual(external.read_text(encoding="utf-8"), "hello")
+
 
 class TestToolRegistry(unittest.TestCase):
     def test_default_registry_contains_expected_tools(self):

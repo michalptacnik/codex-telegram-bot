@@ -25,6 +25,7 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Probe → expand prompt path keeps base context small
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
+  - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
 - Multi-provider architecture:
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing
@@ -217,6 +218,7 @@ Environment variables override `.env`:
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
+- `DEFAULT_AGENT_POLICY_PROFILE` is `trusted` in seeded state; use `balanced`/`strict` if you want workspace-constrained file tools
 - `REPO_SCAN_MAX_FILES` (default: `3000`)
 - `REPO_SCAN_MAX_FILE_BYTES` (default: `120000`)
 - `REPO_INDEX_AUTO_REFRESH_SEC` (default: `30`)

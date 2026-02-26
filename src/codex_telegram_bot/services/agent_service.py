@@ -1746,6 +1746,7 @@ class AgentService:
             tool_name=normalized_tool_name,
             tool_args=dict(tool_args or {}),
             workspace_root=workspace_root,
+            policy_profile=policy_profile,
         )
         if normalized_args is None:
             return ToolResult(
@@ -2771,11 +2772,21 @@ def _normalize_tool_args_for_workspace(
     tool_name: str,
     tool_args: Dict[str, Any],
     workspace_root: Path,
+    policy_profile: str = "balanced",
 ) -> Optional[Dict[str, Any]]:
     normalized = dict(tool_args or {})
     name = (tool_name or "").strip().lower()
+    profile = (policy_profile or "").strip().lower()
     if name in {"read_file", "write_file"}:
         if "path" not in normalized:
+            return normalized
+        if profile == "trusted":
+            raw = str(normalized.get("path") or "").strip()
+            if not raw:
+                return normalized
+            candidate = Path(raw).expanduser()
+            resolved = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
+            normalized["path"] = str(resolved)
             return normalized
         path = _resolve_workspace_bound_path(normalized.get("path"), workspace_root)
         if path is None:

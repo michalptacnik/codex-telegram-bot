@@ -9,10 +9,16 @@ MAX_READ_BYTES = 50_000
 MAX_WRITE_BYTES = 80_000
 
 
-def _resolve_workspace_path(workspace_root: Path, raw_path: str) -> Path:
+def _is_trusted_profile(context: ToolContext) -> bool:
+    return str(getattr(context, "policy_profile", "") or "").strip().lower() == "trusted"
+
+
+def _resolve_workspace_path(workspace_root: Path, raw_path: str, allow_full_machine: bool = False) -> Path:
     raw = (raw_path or "").strip()
     candidate = Path(raw).expanduser()
     target = candidate.resolve() if candidate.is_absolute() else (workspace_root / raw).resolve()
+    if allow_full_machine:
+        return target
     workspace = workspace_root.resolve()
     if not str(target).startswith(str(workspace) + "/") and target != workspace:
         raise ValueError("Path escapes workspace root.")
@@ -27,7 +33,11 @@ class ReadFileTool:
         if not raw_path:
             return ToolResult(ok=False, output="Error: missing required arg 'path'.")
         try:
-            target = _resolve_workspace_path(context.workspace_root, raw_path)
+            target = _resolve_workspace_path(
+                context.workspace_root,
+                raw_path,
+                allow_full_machine=_is_trusted_profile(context),
+            )
         except ValueError as exc:
             return ToolResult(ok=False, output=f"Error: {exc}")
         if not target.exists() or not target.is_file():
@@ -49,7 +59,11 @@ class WriteFileTool:
         if len(content.encode("utf-8")) > MAX_WRITE_BYTES:
             return ToolResult(ok=False, output="Error: content exceeds max bytes.")
         try:
-            target = _resolve_workspace_path(context.workspace_root, raw_path)
+            target = _resolve_workspace_path(
+                context.workspace_root,
+                raw_path,
+                allow_full_machine=_is_trusted_profile(context),
+            )
         except ValueError as exc:
             return ToolResult(ok=False, output=f"Error: {exc}")
         target.parent.mkdir(parents=True, exist_ok=True)
