@@ -15,16 +15,19 @@ from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.fallback import EchoFallbackProvider
 from codex_telegram_bot.providers.gemini_provider import GeminiProvider
 from codex_telegram_bot.providers.openai_compatible import OpenAICompatibleProvider
+from codex_telegram_bot.providers.responses_api import ResponsesApiProvider
 from codex_telegram_bot.providers.registry import ProviderRegistry
 from codex_telegram_bot.providers.router import ProviderRouter, ProviderRouterConfig
 from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
+from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.skill_manager import SkillManager
 from codex_telegram_bot.services.toolchain import agent_toolchain_status
+from codex_telegram_bot.tools import build_default_tool_registry
 
 
 logger = logging.getLogger(__name__)
@@ -72,40 +75,14 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         else ((state_db_path.parent if state_db_path else (Path.home() / ".config" / "codex-telegram-bot")).expanduser().resolve())
     )
     skill_manager = SkillManager(config_dir=resolved_config_dir)
+    tool_registry = build_default_tool_registry(provider_registry=provider_registry)
+    probe_loop: Optional[ProbeLoop] = None
+    if (os.environ.get("ENABLE_PROBE_LOOP") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        probe_loop = ProbeLoop(provider=provider, tool_registry=tool_registry)
 
-    if state_db_path is None:
-        return AgentService(
-            provider=provider,
-            execution_runner=runner,
-            repo_retriever=repo_retriever,
-            session_max_messages=memory_cfg.max_messages,
-            session_compact_keep=memory_cfg.keep_recent_messages,
-            tool_loop_max_steps=_read_int_env("TOOL_LOOP_MAX_STEPS", 3),
-            approval_ttl_sec=_read_int_env("APPROVAL_TTL_SEC", 900),
-            max_pending_approvals_per_user=_read_int_env("MAX_PENDING_APPROVALS_PER_USER", 3),
-            session_workspaces_root=session_workspaces_root,
-            provider_registry=provider_registry,
-            capability_registry=capability_registry,
-            workspace_manager=workspace_manager,
-            access_controller=access_controller,
-            capability_router=capability_router,
-            skill_manager=skill_manager,
-        )
-    run_store = SqliteRunStore(db_path=state_db_path)
-    run_store.recover_interrupted_runs()
     approval_ttl_sec = _read_int_env("APPROVAL_TTL_SEC", 900)
-    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(60, approval_ttl_sec))
-    run_store.expire_tool_approvals_before(cutoff.isoformat())
-    event_bus = EventBus()
-    retention_policy = SessionRetentionPolicy(
-        store=run_store,
-        archive_after_idle_days=_read_int_env("SESSION_ARCHIVE_AFTER_IDLE_DAYS", 30),
-        delete_after_days=_read_int_env("SESSION_DELETE_AFTER_DAYS", 90),
-    )
-    return AgentService(
+    common_kwargs = dict(
         provider=provider,
-        run_store=run_store,
-        event_bus=event_bus,
         execution_runner=runner,
         repo_retriever=repo_retriever,
         session_max_messages=memory_cfg.max_messages,
@@ -116,11 +93,31 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         session_workspaces_root=session_workspaces_root,
         provider_registry=provider_registry,
         capability_registry=capability_registry,
+        tool_registry=tool_registry,
+        probe_loop=probe_loop,
         workspace_manager=workspace_manager,
         access_controller=access_controller,
-        retention_policy=retention_policy,
         capability_router=capability_router,
         skill_manager=skill_manager,
+    )
+
+    if state_db_path is None:
+        return AgentService(**common_kwargs)
+    run_store = SqliteRunStore(db_path=state_db_path)
+    run_store.recover_interrupted_runs()
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(60, approval_ttl_sec))
+    run_store.expire_tool_approvals_before(cutoff.isoformat())
+    event_bus = EventBus()
+    retention_policy = SessionRetentionPolicy(
+        store=run_store,
+        archive_after_idle_days=_read_int_env("SESSION_ARCHIVE_AFTER_IDLE_DAYS", 30),
+        delete_after_days=_read_int_env("SESSION_DELETE_AFTER_DAYS", 90),
+    )
+    return AgentService(
+        **common_kwargs,
+        run_store=run_store,
+        event_bus=event_bus,
+        retention_policy=retention_policy,
     )
 
 
@@ -164,6 +161,8 @@ def _read_provider_backend() -> str:
     aliases = {
         "codex_cli": "codex-cli",
         "codex": "codex-cli",
+        "codex_exec_fallback": "codex-exec-fallback",
+        "responses_api": "responses-api",
         "quen": "qwen",
         "qwen-openai": "qwen",
         "deepseek-openai": "deepseek",
@@ -181,6 +180,7 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
         "deepseek",
         "qwen",
         "gemini",
+        "responses_api",
         *[spec["name"] for spec in extra_specs],
     }
     default_name = active if active in known_names else "codex_cli"
@@ -219,6 +219,7 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
         make_active=(default_name == "qwen"),
     )
     registry.register("gemini", GeminiProvider(), make_active=(default_name == "gemini"))
+    registry.register("responses_api", ResponsesApiProvider(), make_active=(default_name == "responses_api"))
     for spec in extra_specs:
         name = spec["name"]
         registry.register(
@@ -238,8 +239,10 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
 
 
 def _registry_name_for_backend(value: str) -> str:
-    if value == "codex-cli":
+    if value in {"codex-cli", "codex-exec-fallback"}:
         return "codex_cli"
+    if value == "responses-api":
+        return "responses_api"
     return (value or "").strip().lower().replace("-", "_")
 
 

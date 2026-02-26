@@ -1,7 +1,12 @@
 import os
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRegistry, ToolRequest, ToolResult
-from codex_telegram_bot.tools.email import SendEmailSmtpTool, email_tool_enabled
+from codex_telegram_bot.tools.email import (
+    SendEmailSmtpTool,
+    SendEmailTool,
+    email_tool_enabled,
+    is_email_tool_enabled,
+)
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
 from codex_telegram_bot.tools.git import (
     GitAddTool,
@@ -33,6 +38,8 @@ def build_default_tool_registry(provider_registry=None) -> ToolRegistry:
     registry.register(SshDetectionTool())
     if email_tool_enabled(os.environ):
         registry.register(SendEmailSmtpTool())
+    if is_email_tool_enabled(os.environ):
+        registry.register(SendEmailTool())
     if provider_registry is not None:
         registry.register(ProviderStatusTool(provider_registry))
         registry.register(ProviderSwitchTool(provider_registry))
@@ -45,6 +52,9 @@ __all__ = [
     "ToolRequest",
     "ToolResult",
     "SendEmailSmtpTool",
+    "SendEmailTool",
+    "email_tool_enabled",
+    "is_email_tool_enabled",
     "ReadFileTool",
     "WriteFileTool",
     "GitStatusTool",

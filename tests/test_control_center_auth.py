@@ -124,6 +124,88 @@ class TestOptApiScopeEnforced(unittest.TestCase):
 
 
 @unittest.skipIf(TestClient is None or create_app is None, "fastapi deps unavailable")
+class TestUiAuth(unittest.TestCase):
+    """CONTROL_CENTER_UI_SECRET gates all HTML pages."""
+
+    def setUp(self):
+        self.service, self.tmp = _make_service()
+        self.old = os.environ.get("CONTROL_CENTER_UI_SECRET")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+        if self.old is None:
+            os.environ.pop("CONTROL_CENTER_UI_SECRET", None)
+        else:
+            os.environ["CONTROL_CENTER_UI_SECRET"] = self.old
+
+    def test_no_secret_pages_open(self):
+        os.environ.pop("CONTROL_CENTER_UI_SECRET", None)
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        self.assertEqual(client.get("/").status_code, 200)
+        self.assertEqual(client.get("/runs").status_code, 200)
+        self.assertEqual(client.get("/sessions").status_code, 200)
+        self.assertEqual(client.get("/settings").status_code, 200)
+
+    def test_with_secret_unauthenticated_redirects_to_login(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        for path in ["/", "/runs", "/sessions", "/agents", "/settings", "/plugins", "/approvals"]:
+            r = client.get(path)
+            self.assertEqual(r.status_code, 303, f"{path} should redirect")
+            self.assertIn("/login", r.headers["location"], f"{path} should redirect to /login")
+
+    def test_login_page_renders(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        r = client.get("/login")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("secret", r.text.lower())
+
+    def test_correct_secret_sets_cookie_and_redirects(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        r = client.post("/login", data={"secret": "s3cr3t", "next": "/"})
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("cc_ui_token", r.cookies)
+
+    def test_wrong_secret_returns_401(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        r = client.post("/login", data={"secret": "wrong", "next": "/"})
+        self.assertEqual(r.status_code, 401)
+
+    def test_valid_cookie_allows_access(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        # login to get cookie
+        client.post("/login", data={"secret": "s3cr3t", "next": "/"})
+        # now access dashboard with cookie
+        r = client.get("/")
+        self.assertEqual(r.status_code, 200)
+
+    def test_logout_clears_cookie_and_redirects(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        client.post("/login", data={"secret": "s3cr3t", "next": "/"})
+        r = client.get("/logout")
+        self.assertEqual(r.status_code, 303)
+        self.assertIn("/login", r.headers["location"])
+
+    def test_health_always_accessible_regardless_of_ui_secret(self):
+        os.environ["CONTROL_CENTER_UI_SECRET"] = "s3cr3t"
+        app = create_app(self.service)
+        client = TestClient(app, follow_redirects=False)
+        self.assertEqual(client.get("/health").status_code, 200)
+
+
+@unittest.skipIf(TestClient is None or create_app is None, "fastapi deps unavailable")
 class TestOnboardingReadiness(unittest.TestCase):
     """Verify the /api/onboarding/readiness endpoint structure."""
 

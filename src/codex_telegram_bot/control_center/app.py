@@ -212,6 +212,102 @@ def create_app_with_config(
             return token
         raise HTTPException(status_code=403, detail=f"Missing scope: {required_scope}")
 
+    # ------------------------------------------------------------------
+    # UI auth helpers (CONTROL_CENTER_UI_SECRET)
+    # ------------------------------------------------------------------
+    _UI_SECRET_ENV = "CONTROL_CENTER_UI_SECRET"
+    _UI_COOKIE = "cc_ui_token"
+
+    def _ui_auth_redirect(request: Request):
+        """Return a RedirectResponse to /login if the UI secret is set and the
+        request does not carry a valid session cookie.  Returns None when auth
+        passes or when the feature is not configured (open / localhost-only mode)."""
+        secret = os.environ.get(_UI_SECRET_ENV, "").strip()
+        if not secret:
+            return None
+        token = request.cookies.get(_UI_COOKIE, "")
+        if token == secret:
+            return None
+        next_path = str(request.url.path)
+        return RedirectResponse(url=f"/login?next={next_path}", status_code=303)
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def login_page(next: str = "/"):
+        safe_next = next if next.startswith("/") else "/"
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Login – Codex Control Center</title>
+  <style>
+    body {{ font-family: system-ui, sans-serif; display: flex; align-items: center;
+            justify-content: center; min-height: 100vh; margin: 0; background: #f3f4f6; }}
+    .card {{ background: white; padding: 2rem; border-radius: 0.5rem;
+             box-shadow: 0 1px 4px rgba(0,0,0,.12); width: 320px; }}
+    h1 {{ font-size: 1.1rem; margin: 0 0 1.2rem; }}
+    label {{ font-size: .875rem; color: #374151; display: block; margin-bottom: .3rem; }}
+    input[type=password] {{ width: 100%; padding: .5rem .75rem; border: 1px solid #d1d5db;
+                            border-radius: .375rem; font-size: .9rem; box-sizing: border-box; }}
+    button {{ margin-top: 1rem; width: 100%; padding: .55rem; background: #2563eb;
+              color: white; border: none; border-radius: .375rem; cursor: pointer;
+              font-size: .9rem; }}
+    button:hover {{ background: #1d4ed8; }}
+    .err {{ color: #dc2626; font-size: .85rem; margin-top: .5rem; }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Codex Control Center</h1>
+    <form method="POST" action="/login">
+      <input type="hidden" name="next" value="{safe_next}">
+      <label for="secret">Access secret</label>
+      <input type="password" id="secret" name="secret" autofocus required>
+      <button type="submit">Sign in</button>
+    </form>
+  </div>
+</body>
+</html>"""
+        return HTMLResponse(content=html)
+
+    @app.post("/login")
+    async def login_submit(request: Request, secret: str = Form(""), next: str = Form("/")):
+        ui_secret = os.environ.get(_UI_SECRET_ENV, "").strip()
+        safe_next = next if next.startswith("/") and next != "/login" else "/"
+        if ui_secret and secret == ui_secret:
+            resp = RedirectResponse(url=safe_next, status_code=303)
+            resp.set_cookie(
+                _UI_COOKIE, ui_secret,
+                httponly=True, samesite="lax",
+                max_age=60 * 60 * 24 * 7,  # 1 week
+            )
+            return resp
+        html = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Login – Codex Control Center</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;
+min-height:100vh;margin:0;background:#f3f4f6;}
+.card{background:white;padding:2rem;border-radius:.5rem;box-shadow:0 1px 4px rgba(0,0,0,.12);width:320px;}
+h1{font-size:1.1rem;margin:0 0 1.2rem;}label{font-size:.875rem;color:#374151;display:block;margin-bottom:.3rem;}
+input[type=password]{width:100%;padding:.5rem .75rem;border:1px solid #d1d5db;border-radius:.375rem;
+font-size:.9rem;box-sizing:border-box;}
+button{margin-top:1rem;width:100%;padding:.55rem;background:#2563eb;color:white;border:none;
+border-radius:.375rem;cursor:pointer;font-size:.9rem;}
+.err{color:#dc2626;font-size:.85rem;margin-top:.5rem;}</style></head>
+<body><div class="card"><h1>Codex Control Center</h1>
+<form method="POST" action="/login">
+<input type="hidden" name="next" value="/"><label for="secret">Access secret</label>
+<input type="password" id="secret" name="secret" autofocus required>
+<button type="submit">Sign in</button></form>
+<p class="err">Incorrect secret. Please try again.</p>
+</div></body></html>"""
+        return HTMLResponse(content=html, status_code=401)
+
+    @app.get("/logout")
+    async def logout():
+        resp = RedirectResponse(url="/login", status_code=303)
+        resp.delete_cookie(_UI_COOKIE)
+        return resp
+
     def _opt_api_scope(request: Request, read_scope: str = "api:read", write_scope: str = "api:write") -> None:
         """Optionally enforce API auth on non-v1 endpoints.
 
@@ -735,6 +831,8 @@ def create_app_with_config(
 
     @app.get("/", response_class=HTMLResponse)
     async def dashboard(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         runs = [_run_to_dict(r) for r in agent_service.list_recent_runs(limit=30)]
         completed = len([r for r in runs if r["status"] == "completed"])
         failed = len([r for r in runs if r["status"] == "failed"])
@@ -758,6 +856,8 @@ def create_app_with_config(
 
     @app.get("/onboarding", response_class=HTMLResponse)
     async def onboarding_page(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         onboarding.record(step="wizard.view", outcome="visit")
         env = load_env_file(get_env_path(config_dir)) if config_dir else {}
         runtime_env = load_env_file(config_dir / "runtime.env") if config_dir else {}
@@ -794,6 +894,8 @@ def create_app_with_config(
         policy_profile: str = Form("trusted"),
         autonomous_tool_loop: str = Form(""),
     ):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         onboarding.record(step="wizard.submit", outcome="attempt")
         key = (provider_key or "").strip()
         workspace = Path((workspace_root or "").strip()).expanduser()
@@ -939,6 +1041,8 @@ def create_app_with_config(
 
     @app.get("/runs", response_class=HTMLResponse)
     async def runs_page(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         runs = [_run_to_dict(r) for r in agent_service.list_recent_runs(limit=100)]
         return templates.TemplateResponse(
             "runs.html",
@@ -947,6 +1051,8 @@ def create_app_with_config(
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
     async def run_detail(request: Request, run_id: str):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         run = agent_service.get_run(run_id)
         if not run:
             raise HTTPException(status_code=404, detail="Run not found")
@@ -982,6 +1088,8 @@ def create_app_with_config(
 
     @app.get("/agents", response_class=HTMLResponse)
     async def agents_page(request: Request, error: str = ""):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         agents = agent_service.list_agents()
         provider_options = _provider_options()
         return templates.TemplateResponse(
@@ -998,6 +1106,8 @@ def create_app_with_config(
 
     @app.get("/plugins", response_class=HTMLResponse)
     async def plugins_page(request: Request, error: str = ""):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         plugins = plugin_manager.list_plugins()
         audit = plugin_manager.list_audit_events(limit=50)
         return templates.TemplateResponse(
@@ -1012,7 +1122,9 @@ def create_app_with_config(
         )
 
     @app.post("/plugins/install")
-    async def plugins_install_form(manifest_path: str = Form(...), enable: str = Form("false")):
+    async def plugins_install_form(request: Request, manifest_path: str = Form(...), enable: str = Form("false")):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         try:
             plugin_manager.install_plugin(Path(manifest_path), enable=(enable == "true"))
         except Exception as exc:
@@ -1020,7 +1132,9 @@ def create_app_with_config(
         return RedirectResponse(url="/plugins", status_code=303)
 
     @app.post("/plugins/{plugin_id}/enable")
-    async def plugins_enable_form(plugin_id: str):
+    async def plugins_enable_form(request: Request, plugin_id: str):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         try:
             plugin_manager.enable_plugin(plugin_id)
         except Exception as exc:
@@ -1028,7 +1142,9 @@ def create_app_with_config(
         return RedirectResponse(url="/plugins", status_code=303)
 
     @app.post("/plugins/{plugin_id}/disable")
-    async def plugins_disable_form(plugin_id: str):
+    async def plugins_disable_form(request: Request, plugin_id: str):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         try:
             plugin_manager.disable_plugin(plugin_id)
         except Exception as exc:
@@ -1036,7 +1152,9 @@ def create_app_with_config(
         return RedirectResponse(url="/plugins", status_code=303)
 
     @app.post("/plugins/{plugin_id}/uninstall")
-    async def plugins_uninstall_form(plugin_id: str):
+    async def plugins_uninstall_form(request: Request, plugin_id: str):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         plugin_manager.uninstall_plugin(plugin_id)
         return RedirectResponse(url="/plugins", status_code=303)
 
@@ -1074,6 +1192,8 @@ def create_app_with_config(
 
     @app.get("/sessions", response_class=HTMLResponse)
     async def sessions_page(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         sessions = agent_service.list_recent_sessions(limit=100)
         return templates.TemplateResponse(
             "sessions.html",
@@ -1082,6 +1202,8 @@ def create_app_with_config(
 
     @app.get("/approvals", response_class=HTMLResponse)
     async def approvals_page(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         approvals = agent_service.list_all_pending_tool_approvals(limit=200)
         return templates.TemplateResponse(
             "approvals.html",
@@ -1098,6 +1220,8 @@ def create_app_with_config(
         max_concurrency: int = Form(1),
         enabled: str = Form("true"),
     ):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         try:
             agent_service.upsert_agent(
                 agent_id=agent_id,
@@ -1125,12 +1249,16 @@ def create_app_with_config(
         return RedirectResponse(url="/agents", status_code=303)
 
     @app.post("/agents/{agent_id}/delete")
-    async def delete_agent(agent_id: str):
+    async def delete_agent(request: Request, agent_id: str):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         agent_service.delete_agent(agent_id)
         return RedirectResponse(url="/agents", status_code=303)
 
     @app.get("/settings", response_class=HTMLResponse)
     async def settings_page(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
         version = await agent_service.provider_version()
         provider_health = await agent_service.provider_health()
         return templates.TemplateResponse(

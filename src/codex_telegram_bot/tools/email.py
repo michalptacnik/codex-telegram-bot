@@ -21,10 +21,17 @@ def email_tool_enabled(env: Mapping[str, str] | None = None) -> bool:
     return all(str(source.get(key) or "").strip() for key in SMTP_REQUIRED_ENV_KEYS)
 
 
+def is_email_tool_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Compatibility helper for branch tests/docs that require strict true."""
+    source = env if env is not None else os.environ
+    return str(source.get(EMAIL_TOOL_ENV) or "").strip().lower() == "true"
+
+
 class SendEmailSmtpTool:
     """Send outbound email through SMTP using app-password style auth."""
 
     name = "send_email_smtp"
+    requires_approval = True
     _MAX_ATTEMPTS = 3
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
@@ -42,9 +49,16 @@ class SendEmailSmtpTool:
         smtp_port_raw = request.args.get("smtp_port") or os.environ.get("SMTP_PORT") or 587
         smtp_user = str(request.args.get("smtp_user") or os.environ.get("SMTP_USER") or "").strip()
         smtp_password = "".join(
-            str(request.args.get("smtp_password") or os.environ.get("SMTP_APP_PASSWORD") or "").split()
+            str(
+                request.args.get("smtp_password")
+                or os.environ.get("SMTP_APP_PASSWORD")
+                or os.environ.get("SMTP_PASSWORD")
+                or ""
+            ).split()
         )
-        from_addr = str(request.args.get("from") or os.environ.get("SMTP_FROM") or smtp_user).strip()
+        from_addr = str(
+            request.args.get("from") or os.environ.get("SMTP_FROM") or os.environ.get("EMAIL_FROM") or smtp_user
+        ).strip()
         dry_run = bool(request.args.get("dry_run", False))
 
         if not smtp_host or not smtp_user or not smtp_password or not from_addr:
@@ -102,3 +116,9 @@ class SendEmailSmtpTool:
                     continue
                 break
         return ToolResult(ok=False, output=f"Error: SMTP send failed after {self._MAX_ATTEMPTS} attempt(s): {last_exc}")
+
+
+class SendEmailTool(SendEmailSmtpTool):
+    """Compatibility alias for send_email tool name from claude branch."""
+
+    name = "send_email"

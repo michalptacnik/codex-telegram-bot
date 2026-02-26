@@ -22,6 +22,7 @@ from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
+from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.access_control import AccessController
@@ -112,6 +113,16 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "dry_run": "bool (optional)",
         },
     },
+    "send_email": {
+        "name": "send_email",
+        "protocol": "!tool",
+        "args": {
+            "to": "string (required)",
+            "subject": "string (required)",
+            "body": "string (required)",
+            "dry_run": "bool (optional)",
+        },
+    },
     "provider_status": {
         "name": "provider_status",
         "protocol": "!tool",
@@ -123,7 +134,7 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "args": {"name": "string (required)"},
     },
 }
-APPROVAL_REQUIRED_TOOLS = {"send_email_smtp"}
+APPROVAL_REQUIRED_TOOLS = {"send_email_smtp", "send_email"}
 
 
 @dataclass(frozen=True)
@@ -167,6 +178,7 @@ class AgentService:
         alert_dispatcher: Optional[AlertDispatcher] = None,
         tool_registry: Optional[ToolRegistry] = None,
         capability_registry: Optional[MarkdownCapabilityRegistry] = None,
+        probe_loop: Optional[ProbeLoop] = None,
         # Parity services
         workspace_manager: Optional[WorkspaceManager] = None,
         access_controller: Optional[AccessController] = None,
@@ -194,6 +206,7 @@ class AgentService:
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry(provider_registry=provider_registry)
         self._capability_registry = capability_registry
+        self._probe_loop = probe_loop
         # Parity services (optional — degrade gracefully when not provided)
         self._workspace_manager = workspace_manager
         self._access_controller = access_controller
@@ -1484,7 +1497,7 @@ class AgentService:
     ):
         tool = (extra_tools or {}).get(tool_name) or self._tool_registry.get(tool_name)
         if not tool:
-            if (tool_name or "").strip().lower() == "send_email_smtp":
+            if (tool_name or "").strip().lower() in {"send_email_smtp", "send_email"}:
                 return ToolResult(
                     ok=False,
                     output=(
@@ -1517,7 +1530,7 @@ class AgentService:
         name = (tool_name or "").strip().lower()
         if name not in APPROVAL_REQUIRED_TOOLS:
             return False
-        if name == "send_email_smtp":
+        if name in {"send_email_smtp", "send_email"}:
             return email_tool_enabled(os.environ)
         return True
 
@@ -2322,8 +2335,11 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
     for name in ["shell_exec", "read_file", "write_file", "ssh_detect", "git_status", "git_diff"]:
         if name in available and name not in picks:
             picks.append(name)
-    if ("email" in low or "mail" in low) and "send_email_smtp" in available and "send_email_smtp" not in picks:
-        picks.append("send_email_smtp")
+    if "email" in low or "mail" in low:
+        if "send_email_smtp" in available and "send_email_smtp" not in picks:
+            picks.append("send_email_smtp")
+        elif "send_email" in available and "send_email" not in picks:
+            picks.append("send_email")
     if "provider" in low and "provider_status" in available and "provider_status" not in picks:
         picks.append("provider_status")
     return picks[:6]
@@ -2448,10 +2464,7 @@ def _parse_tool_directive(body: str) -> Optional[LoopAction]:
             cmd = str((args or {}).get("cmd") or (args or {}).get("command") or "").strip() if isinstance(args, dict) else ""
             if not cmd:
                 return None
-            try:
-                argv = shlex.split(cmd)
-            except ValueError:
-                argv = []
+            argv = _parse_exec_command_argv(cmd)
             if argv:
                 return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
             return None
