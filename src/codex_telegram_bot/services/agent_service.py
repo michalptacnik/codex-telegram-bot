@@ -744,7 +744,9 @@ class AgentService:
         session_id: str,
         agent_id: str = "default",
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        autonomy_depth: int = 0,
     ) -> str:
+        autonomy_depth = max(0, int(autonomy_depth or 0))
         if self._access_controller is not None:
             try:
                 self._access_controller.check_action(user_id, "send_prompt", chat_id)
@@ -811,6 +813,16 @@ class AgentService:
                 agent_id=agent_id,
                 available_tool_names=available_tool_names,
             )
+            if probe.mode != PROBE_NEED_TOOLS and _prompt_expects_action(cleaned_prompt or prompt):
+                fallback_tools = _default_probe_tools_for_prompt(cleaned_prompt or prompt, available_tool_names)
+                if fallback_tools:
+                    probe = ProbeDecision(
+                        mode=PROBE_NEED_TOOLS,
+                        reply="",
+                        tools=fallback_tools,
+                        goal=(cleaned_prompt or prompt).strip(),
+                        max_steps=self._tool_loop_max_steps,
+                    )
             if probe.mode == PROBE_NO_TOOLS and probe.reply:
                 await self._notify_progress(progress_callback, {"event": "loop.probe.no_tools"})
                 if active_skills:
@@ -846,6 +858,7 @@ class AgentService:
                         session_id=session_id,
                         agent_id=agent_id,
                         progress_callback=progress_callback,
+                        autonomy_depth=autonomy_depth + 1,
                     )
                     if active_skills:
                         await self._notify_progress(
@@ -854,18 +867,80 @@ class AgentService:
                         )
                     return output
                 if need_tools_output.strip():
+                    output = need_tools_output.strip()
+                    session_workspace_now = self.session_workspace(session_id=session_id)
+                    policy_profile_now = self._agent_policy_profile(agent_id=agent_id)
+                    protocol_output = await self._attempt_autonomous_protocol_output(
+                        output=output,
+                        prompt=(cleaned_prompt or prompt),
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        agent_id=agent_id,
+                        progress_callback=progress_callback,
+                        autonomy_depth=autonomy_depth,
+                    )
+                    if protocol_output is not None:
+                        output = protocol_output
+                    executed_tool = await self._attempt_autonomous_tool_invocation(
+                        output=output,
+                        session_id=session_id,
+                        workspace_root=session_workspace_now,
+                        policy_profile=policy_profile_now,
+                        extra_tools=extra_tools,
+                    )
+                    has_executed_tool = executed_tool is not None
+                    if has_executed_tool:
+                        output = executed_tool
+                    executed_slash = await self._attempt_autonomous_email_slash_command(
+                        output=output,
+                        session_id=session_id,
+                        workspace_root=session_workspace_now,
+                        policy_profile=policy_profile_now,
+                        extra_tools=extra_tools,
+                    )
+                    if executed_slash is not None:
+                        output = executed_slash
+                    elif (not has_executed_tool) and _output_claims_email_sent(output):
+                        recovered = await self._attempt_autonomous_email_send_recovery(
+                            output=output,
+                            prompt=(cleaned_prompt or prompt),
+                            session_id=session_id,
+                            workspace_root=session_workspace_now,
+                            policy_profile=policy_profile_now,
+                            extra_tools=extra_tools,
+                        )
+                        if recovered is None:
+                            output = (
+                                "Error: email send was claimed, but no SMTP tool action was executed.\n"
+                                "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                            )
+                        else:
+                            output = recovered
                     if active_skills:
                         await self._notify_progress(
                             progress_callback,
                             {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
                         )
-                    return need_tools_output.strip()
+                    return output
         if not actions:
             contextual = self.build_session_prompt(session_id=session_id, user_prompt=cleaned_prompt or prompt)
             job_id = await self.queue_prompt(prompt=contextual, agent_id=agent_id)
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+            protocol_output = await self._attempt_autonomous_protocol_output(
+                output=output,
+                prompt=(cleaned_prompt or prompt),
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                progress_callback=progress_callback,
+                autonomy_depth=autonomy_depth,
+            )
+            if protocol_output is not None:
+                output = protocol_output
             executed_tool = await self._attempt_autonomous_tool_invocation(
                 output=output,
                 session_id=session_id,
@@ -1227,6 +1302,18 @@ class AgentService:
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
         output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
+        protocol_output = await self._attempt_autonomous_protocol_output(
+            output=output,
+            prompt=(final_prompt or cleaned_prompt or prompt),
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+            autonomy_depth=autonomy_depth,
+        )
+        if protocol_output is not None:
+            output = protocol_output
         executed_tool = await self._attempt_autonomous_tool_invocation(
             output=output,
             session_id=session_id,
@@ -1600,6 +1687,39 @@ class AgentService:
         if not result.ok:
             return f"Error: attempted autonomous tool execution but failed.\n{result.output}"
         return _compact_tool_output(result.output)
+
+    async def _attempt_autonomous_protocol_output(
+        self,
+        output: str,
+        prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        autonomy_depth: int,
+    ) -> Optional[str]:
+        if autonomy_depth >= 2:
+            return None
+        actions, cleaned_output, final_prompt = _extract_loop_actions(output)
+        if not actions:
+            return None
+        if len(actions) > self._tool_loop_max_steps:
+            actions = actions[: self._tool_loop_max_steps]
+        loop_payload = {
+            "steps": [_loop_action_to_step(item) for item in actions],
+            "final_prompt": final_prompt or _need_tools_summary_prompt(goal=(cleaned_output or prompt)),
+        }
+        routed = "!loop " + json.dumps(loop_payload, ensure_ascii=True)
+        return await self.run_prompt_with_tool_loop(
+            prompt=routed,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+            autonomy_depth=autonomy_depth + 1,
+        )
 
     async def _execute_tool_action_with_telemetry(
         self,
@@ -2038,6 +2158,56 @@ def _normalize_tool_names(names: Sequence[str]) -> List[str]:
         if name not in out:
             out.append(name)
     return out
+
+
+def _prompt_expects_action(prompt: str) -> bool:
+    low = (prompt or "").strip().lower()
+    if not low:
+        return False
+    action_markers = [
+        "install",
+        "download",
+        "deploy",
+        "set up",
+        "setup",
+        "configure",
+        "create ",
+        "fix ",
+        "update ",
+        "write ",
+        "edit ",
+        "send ",
+        "run ",
+        "execute ",
+        "find ",
+        "implement",
+        "do ",
+    ]
+    info_markers = [
+        "what is",
+        "explain",
+        "why ",
+        "how does",
+        "summarize",
+        "definition",
+    ]
+    if any(m in low for m in info_markers) and not any(m in low for m in action_markers):
+        return False
+    return any(m in low for m in action_markers)
+
+
+def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[str]) -> List[str]:
+    low = (prompt or "").lower()
+    available = set(_normalize_tool_names(list(available_tool_names)))
+    picks: List[str] = ["exec"]
+    for name in ["shell_exec", "read_file", "write_file", "ssh_detect", "git_status", "git_diff"]:
+        if name in available and name not in picks:
+            picks.append(name)
+    if ("email" in low or "mail" in low) and "send_email_smtp" in available and "send_email_smtp" not in picks:
+        picks.append("send_email_smtp")
+    if "provider" in low and "provider_status" in available and "provider_status" not in picks:
+        picks.append("provider_status")
+    return picks[:6]
 
 
 def _render_tool_schema_lines(selected_tools: Sequence[str]) -> List[str]:

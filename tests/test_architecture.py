@@ -1030,6 +1030,76 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Git capability", need_tools_prompt)
             await service.shutdown()
 
+    async def test_action_prompt_overrides_no_tools_probe_and_executes(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "NO_TOOLS\nI cannot do that."
+                if self.calls == 2:
+                    return "!exec echo forced-action"
+                return "Done. Executed forced-action."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="forced-action\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Install and configure the required tooling.",
+            chat_id=1,
+            user_id=1,
+            session_id="sess-probe-3",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "forced-action"])
+        self.assertIn("Done. Executed forced-action.", out)
+        await service.shutdown()
+
+    async def test_model_emitted_protocol_block_is_executed(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self.calls == 2:
+                    return "!exec echo protocol-step"
+                return "Done. protocol-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="protocol-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Please proceed.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-4",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "protocol-step"])
+        self.assertIn("protocol-step executed", out)
+        await service.shutdown()
+
     async def test_autonomous_tool_loop_executes_planned_step(self):
         class _PlannerProvider:
             def __init__(self):
