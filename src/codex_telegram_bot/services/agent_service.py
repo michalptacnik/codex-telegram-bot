@@ -56,7 +56,14 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
     "exec": {
         "name": "exec",
         "protocol": "!exec <command>",
-        "args": {"command": "string (required)"},
+        "args": {
+            "command": "string (required)",
+            "workdir": "string (optional)",
+            "env": "object (optional)",
+            "background": "bool (optional, default=false)",
+            "timeoutSec": "int (optional, default=60)",
+            "timeoutMs": "int (optional)",
+        },
     },
     "read_file": {
         "name": "read_file",
@@ -143,11 +150,12 @@ class LoopAction:
     argv: List[str]
     tool_name: str
     tool_args: Dict[str, Any]
+    timeout_sec: int = 60
 
     def checkpoint_command(self) -> str:
         if self.kind == "tool":
             return f"tool:{self.tool_name}:{json.dumps(self.tool_args, sort_keys=True)}"
-        return " ".join(self.argv)
+        return f"{' '.join(self.argv)}|timeout={int(self.timeout_sec)}"
 
 
 @dataclass(frozen=True)
@@ -1173,7 +1181,7 @@ class AgentService:
                             run_id=run_id,
                             argv=tool_argv,
                             stdin_text="",
-                            timeout_sec=60,
+                            timeout_sec=max(1, int(action.timeout_sec or 60)),
                             risk_tier="high",
                         )
                         self._emit_tool_event(
@@ -1398,7 +1406,7 @@ class AgentService:
                     run_id=run_id,
                     argv=argv,
                     stdin_text="",
-                    timeout_sec=60,
+                    timeout_sec=max(1, int(action.timeout_sec or 60)),
                     risk_tier=decision.risk_tier,
                 )
                 self._emit_tool_event(
@@ -1456,7 +1464,7 @@ class AgentService:
                 agent_id=agent_id,
                 argv=argv,
                 stdin_text="",
-                timeout_sec=60,
+                timeout_sec=max(1, int(action.timeout_sec or 60)),
                 policy_profile=policy_profile,
                 workspace_root=str(session_workspace),
             )
@@ -2487,7 +2495,9 @@ class AgentService:
                 except ValueError:
                     argv = []
                 if argv:
-                    planned_actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+                    planned_actions.append(
+                        LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=60)
+                    )
             elif kind == "tool":
                 tool_name = str(item.get("tool") or item.get("name") or "").strip().lower()
                 tool_args = item.get("args")
@@ -2717,7 +2727,11 @@ def _parse_probe_output(raw: str, available_tool_names: Sequence[str], default_m
 def _loop_action_to_step(action: LoopAction) -> Dict[str, Any]:
     if action.kind == "tool":
         return {"kind": "tool", "tool": action.tool_name, "args": dict(action.tool_args or {})}
-    return {"kind": "exec", "command": shlex.join(action.argv)}
+    return {
+        "kind": "exec",
+        "command": shlex.join(action.argv),
+        "timeout_sec": max(1, int(action.timeout_sec or 60)),
+    }
 
 
 def _need_tools_summary_prompt(goal: str) -> str:
@@ -2814,7 +2828,7 @@ def _command_needs_shell_wrapper(command: str) -> bool:
     text = str(command or "")
     if not text.strip():
         return False
-    shell_markers = ("|", "&&", "||", ";", ">", "<", "$(", "`")
+    shell_markers = ("|", "&&", "||", ";", ">", "<", "$(", "`", "&")
     return any(marker in text for marker in shell_markers)
 
 
@@ -2824,12 +2838,70 @@ def _parse_exec_command_argv(command: str) -> List[str]:
         return []
     if re.search(r"(^|[^A-Za-z0-9_])find\s+/(?:\s|$)", cmd):
         return []
+    try:
+        parsed = shlex.split(cmd)
+    except ValueError:
+        parsed = []
+    if len(parsed) >= 3 and parsed[0] in {"bash", "sh", "zsh"} and parsed[1] == "-lc":
+        return parsed
     if _command_needs_shell_wrapper(cmd):
         return ["bash", "-lc", cmd]
-    try:
-        return shlex.split(cmd)
-    except ValueError:
-        return []
+    return parsed
+
+
+def _coerce_exec_timeout_sec(source: Dict[str, Any], default: int = 60) -> int:
+    timeout = default
+    raw_sec = source.get("timeout_sec")
+    if raw_sec is None:
+        raw_sec = source.get("timeoutSec")
+    if raw_sec is None:
+        raw_sec = source.get("timeout")
+    if raw_sec is not None:
+        try:
+            timeout = int(raw_sec)
+        except (TypeError, ValueError):
+            timeout = default
+    else:
+        raw_ms = source.get("timeout_ms")
+        if raw_ms is None:
+            raw_ms = source.get("timeoutMs")
+        if raw_ms is not None:
+            try:
+                timeout = max(1, int(int(raw_ms) / 1000))
+            except (TypeError, ValueError):
+                timeout = default
+    return max(1, min(timeout, 1800))
+
+
+def _coerce_exec_background(source: Dict[str, Any]) -> bool:
+    raw = source.get("background")
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw or "").strip().lower()
+    return text in {"1", "true", "yes", "on"}
+
+
+def _prepare_exec_command(command: str, options: Dict[str, Any]) -> str:
+    cmd = str(command or "").strip()
+    if not cmd:
+        return ""
+    workdir = str(options.get("workdir") or options.get("cwd") or "").strip()
+    env = options.get("env")
+    background = _coerce_exec_background(options)
+    if isinstance(env, dict) and env:
+        pairs: List[str] = []
+        for key, value in env.items():
+            k = str(key or "").strip()
+            if not k or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+                continue
+            pairs.append(f"{k}={shlex.quote(str(value))}")
+        if pairs:
+            cmd = f"env {' '.join(pairs)} {cmd}"
+    if workdir:
+        cmd = f"cd {shlex.quote(workdir)} && {cmd}"
+    if background:
+        cmd = f"nohup {cmd} >/tmp/codex-exec-bg.log 2>&1 & echo background_started"
+    return cmd
 
 
 def _parse_tool_directive(body: str) -> Optional[LoopAction]:
@@ -2844,12 +2916,15 @@ def _parse_tool_directive(body: str) -> Optional[LoopAction]:
         tool_name = str(obj.get("name") or obj.get("tool") or "").strip().lower()
         args = obj.get("args")
         if tool_name == "exec":
-            cmd = str((args or {}).get("cmd") or (args or {}).get("command") or "").strip() if isinstance(args, dict) else ""
+            args_dict = dict(args or {}) if isinstance(args, dict) else {}
+            cmd = str(args_dict.get("cmd") or args_dict.get("command") or "").strip()
             if not cmd:
                 return None
+            timeout_sec = _coerce_exec_timeout_sec(args_dict, default=60)
+            cmd = _prepare_exec_command(cmd, args_dict)
             argv = _parse_exec_command_argv(cmd)
             if argv:
-                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
+                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=timeout_sec)
             return None
         if tool_name and isinstance(args, dict):
             return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(args))
@@ -2877,16 +2952,19 @@ def _parse_tool_directive(body: str) -> Optional[LoopAction]:
         positional.append(token)
 
     if tool_name == "exec":
+        timeout_sec = _coerce_exec_timeout_sec(args, default=60)
         command = str(args.get("cmd") or args.get("command") or "").strip()
         if command:
+            command = _prepare_exec_command(command, args)
             argv = _parse_exec_command_argv(command)
             if argv:
-                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
+                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=timeout_sec)
             return None
         if positional:
-            argv = _parse_exec_command_argv(" ".join(positional))
+            command = _prepare_exec_command(" ".join(positional), args)
+            argv = _parse_exec_command_argv(command)
             if argv:
-                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
+                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=timeout_sec)
         return None
 
     if positional:
@@ -2928,12 +3006,17 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
                                 argv = [str(x) for x in argv_raw if str(x).strip()]
                             else:
                                 command = str(item.get("command") or "").strip()
-                                try:
-                                    argv = shlex.split(command) if command else []
-                                except ValueError:
-                                    argv = []
+                                argv = _parse_exec_command_argv(command)
                             if argv:
-                                actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+                                actions.append(
+                                    LoopAction(
+                                        kind="exec",
+                                        argv=argv,
+                                        tool_name="",
+                                        tool_args={},
+                                        timeout_sec=_coerce_exec_timeout_sec(item, default=60),
+                                    )
+                                )
                         elif kind == "tool":
                             tool_name = str(item.get("tool") or item.get("name") or "").strip().lower()
                             tool_args = item.get("args")
@@ -2974,7 +3057,7 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
                                 argv = parsed
                                 break
             if argv:
-                actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+                actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=60))
             else:
                 keep_lines.extend(raw_lines[index:consumed])
             index = consumed

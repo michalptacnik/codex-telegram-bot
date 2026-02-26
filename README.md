@@ -26,6 +26,7 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
+  - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
 - Multi-provider architecture:
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing

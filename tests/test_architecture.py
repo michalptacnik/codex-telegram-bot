@@ -1469,6 +1469,42 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Done. one", out)
         await service.shutdown()
 
+    async def test_tool_exec_supports_openclaw_style_command_options(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "Done. Started."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="background_started\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt=(
+                '!tool {"name":"exec","args":{"command":"echo hi","workdir":"/tmp",'
+                '"env":{"TEST_VAR":"1"},"background":true,"timeoutMs":90000}}'
+            ),
+            chat_id=2,
+            user_id=2,
+            session_id="sess-exec-openclaw",
+            agent_id="default",
+        )
+        self.assertEqual(runner.calls[0]["timeout_sec"], 90)
+        self.assertEqual(runner.last_argv[0:2], ["bash", "-lc"])
+        rendered = runner.last_argv[2]
+        self.assertIn("cd /tmp &&", rendered)
+        self.assertIn("env TEST_VAR=1 echo hi", rendered)
+        self.assertIn("nohup", rendered)
+        self.assertIn("& echo background_started", rendered)
+        self.assertIn("Done. Started.", out)
+        await service.shutdown()
+
     async def test_autonomous_tool_loop_uses_planner_as_fallback_after_probe(self):
         class _PlannerProvider:
             def __init__(self):
