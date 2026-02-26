@@ -688,6 +688,41 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
             finally:
                 await service.shutdown()
 
+    async def test_session_reset_reinitializes_workspace_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            workspace_root = Path(tmp) / "session-workspaces"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            runner = FakeRunner(CommandResult(returncode=0, stdout="ok", stderr=""))
+            provider = CodexCliProvider(runner=runner)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                execution_runner=runner,
+                session_workspaces_root=workspace_root,
+            )
+            try:
+                first = service.get_or_create_session(chat_id=2101, user_id=2201)
+                first_root = service.session_workspace(first.session_id).resolve()
+                (first_root / "keep.txt").write_text("x", encoding="utf-8")
+
+                second = service.reset_session(chat_id=2101, user_id=2201)
+                second_root = service.session_workspace(second.session_id).resolve()
+                reinit = service.initialize_session_workspace(
+                    session_id=second.session_id,
+                    previous_session_id=first.session_id,
+                )
+
+                self.assertNotEqual(first.session_id, second.session_id)
+                self.assertNotEqual(first_root, second_root)
+                self.assertEqual(reinit["workspace_root"], str(second_root))
+                self.assertEqual(reinit["previous_workspace_root"], str(first_root))
+                self.assertTrue(second_root.exists())
+            finally:
+                await service.shutdown()
+
     async def test_build_session_prompt_includes_retrieval_context(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "state.db"
@@ -1358,6 +1393,46 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runner.last_argv, ["echo", "corrected-step"])
         self.assertIn("corrected-step executed", out)
         await service.shutdown()
+
+    async def test_need_tools_false_done_claim_is_repaired_before_completion(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return 'NEED_TOOLS {"tools":["write_file"],"goal":"Create a file","max_steps":2}'
+                if self.calls == 2:
+                    return "Done. I wrote a.txt."
+                if self.calls == 3:
+                    return '!tool {"name":"write_file","args":{"path":"a.txt","content":"hi\\n"}}'
+                return "Done. Created and verified the file."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspaces = Path(tmp) / "ws"
+            service = AgentService(provider=_Provider(), session_workspaces_root=workspaces)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Create file a.txt with hi",
+                chat_id=2,
+                user_id=2,
+                session_id="sess-false-done",
+                agent_id="default",
+            )
+            file_path = service.session_workspace("sess-false-done") / "a.txt"
+            self.assertTrue(file_path.exists())
+            self.assertEqual(file_path.read_text(encoding="utf-8"), "hi\n")
+            self.assertIn("Created and verified", out)
+            await service.shutdown()
 
     async def test_model_emitted_step_with_pipe_executes_via_shell_wrapper(self):
         class _Provider:

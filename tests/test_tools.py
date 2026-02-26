@@ -37,6 +37,20 @@ class TestFileTools(unittest.TestCase):
             self.assertFalse(res.ok)
             self.assertIn("escapes workspace", res.output)
 
+    def test_write_file_tool_returns_absolute_verified_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = WriteFileTool()
+
+            res = tool.run(
+                ToolRequest(name="write_file", args={"path": "note.txt", "content": "hi"}),
+                ToolContext(workspace_root=root),
+            )
+
+            self.assertTrue(res.ok)
+            self.assertIn(str(root / "note.txt"), res.output)
+            self.assertIn("Verified file exists", res.output)
+
 
 class TestToolRegistry(unittest.TestCase):
     def test_default_registry_contains_expected_tools(self):

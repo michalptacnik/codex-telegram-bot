@@ -203,6 +203,7 @@ class AgentService:
         self._session_workspaces_root = root.expanduser().resolve()
         self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
         self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
+        self._session_workspace_roots: Dict[str, str] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry(provider_registry=provider_registry)
         self._capability_registry = capability_registry
@@ -393,13 +394,21 @@ class AgentService:
     def get_or_create_session(self, chat_id: int, user_id: int) -> TelegramSessionRecord:
         if not self._run_store:
             raise ValueError("Session registry unavailable without persistent store")
-        return self._run_store.get_or_create_active_session(chat_id=chat_id, user_id=user_id)
+        session = self._run_store.get_or_create_active_session(chat_id=chat_id, user_id=user_id)
+        self.initialize_session_workspace(session_id=session.session_id)
+        return session
 
     def reset_session(self, chat_id: int, user_id: int) -> TelegramSessionRecord:
         if not self._run_store:
             raise ValueError("Session registry unavailable without persistent store")
+        previous = self._run_store.get_active_session(chat_id=chat_id, user_id=user_id)
         self._run_store.archive_active_sessions(chat_id=chat_id, user_id=user_id)
-        return self._run_store.create_session(chat_id=chat_id, user_id=user_id)
+        session = self._run_store.create_session(chat_id=chat_id, user_id=user_id)
+        self.initialize_session_workspace(
+            session_id=session.session_id,
+            previous_session_id=(previous.session_id if previous else ""),
+        )
+        return session
 
     def get_active_session(self, chat_id: int, user_id: int) -> Optional[TelegramSessionRecord]:
         if not self._run_store:
@@ -435,11 +444,48 @@ class AgentService:
 
     def session_workspace(self, session_id: str) -> Path:
         if self._workspace_manager is not None:
-            return self._workspace_manager.provision(session_id)
+            ws = self._workspace_manager.provision(session_id)
+            self._session_workspace_roots[session_id] = str(ws.resolve())
+            return ws
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", (session_id or "").strip())[:64] or "default"
         root = self._session_workspaces_root / safe
         root.mkdir(parents=True, exist_ok=True)
+        self._session_workspace_roots[session_id] = str(root.resolve())
         return root
+
+    def initialize_session_workspace(self, session_id: str, previous_session_id: str = "") -> Dict[str, Any]:
+        ws = self.session_workspace(session_id=session_id).resolve()
+        previous_root = ""
+        if previous_session_id:
+            previous_root = self._session_workspace_roots.get(previous_session_id, "")
+            if not previous_root:
+                try:
+                    previous_root = str(self.session_workspace(session_id=previous_session_id).resolve())
+                except Exception:
+                    previous_root = ""
+        entries: List[str] = []
+        try:
+            entries = sorted([p.name for p in ws.iterdir()])[:40]
+        except Exception:
+            entries = []
+        info = {
+            "session_id": session_id,
+            "workspace_root": str(ws),
+            "previous_session_id": previous_session_id,
+            "previous_workspace_root": previous_root,
+            "pwd": str(ws),
+            "ls": entries,
+        }
+        log_json(
+            logger,
+            "workspace.reinit",
+            session_id=session_id,
+            previous_session_id=previous_session_id or "",
+            workspace_root=str(ws),
+            previous_workspace_root=previous_root,
+            ls=entries[:20],
+        )
+        return info
 
     def run_retention_sweep(self) -> Dict[str, Any]:
         """Run session retention policy sweep. Returns a summary dict."""
@@ -718,6 +764,19 @@ class AgentService:
                 tool_args = {}
             if not isinstance(tool_args, dict):
                 tool_args = {}
+            log_json(
+                logger,
+                "tool.exec.pre",
+                session_id=session_id,
+                action_id=action_id,
+                kind="tool",
+                tool_name=tool_name,
+                command=f"tool:{tool_name}",
+                allowed=True,
+                approval_required=True,
+                approval_granted=True,
+                exit_code=None,
+            )
             result_obj = await self._execute_registered_tool_action(
                 action_id=action_id,
                 tool_name=tool_name,
@@ -730,9 +789,34 @@ class AgentService:
                 f"[tool:{action_id}] rc={0 if result_obj.ok else 1}\n"
                 f"output:\n{(result_obj.output or '').strip()[:1800]}"
             ).strip()
+            log_json(
+                logger,
+                "tool.exec.post",
+                session_id=session_id,
+                action_id=action_id,
+                kind="tool",
+                tool_name=tool_name,
+                command=f"tool:{tool_name}",
+                allowed=True,
+                approval_required=True,
+                approval_granted=True,
+                exit_code=(0 if result_obj.ok else 1),
+            )
             self._run_store.set_tool_approval_status(approval_id, "executed")
             self.append_session_assistant_message(session_id=session_id, content=text, run_id=tool_run_id)
             return text
+        log_json(
+            logger,
+            "tool.exec.pre",
+            session_id=session_id,
+            action_id=action_id,
+            kind="exec",
+            command=" ".join(argv),
+            allowed=True,
+            approval_required=True,
+            approval_granted=True,
+            exit_code=None,
+        )
         result, tool_run_id = await self._execute_tool_action_with_telemetry(
             action_id=action_id,
             session_id=session_id,
@@ -742,6 +826,18 @@ class AgentService:
             timeout_sec=timeout_sec,
             policy_profile=policy_profile,
             workspace_root=str(self.session_workspace(session_id=session_id)),
+        )
+        log_json(
+            logger,
+            "tool.exec.post",
+            session_id=session_id,
+            action_id=action_id,
+            kind="exec",
+            command=" ".join(argv),
+            allowed=True,
+            approval_required=True,
+            approval_granted=True,
+            exit_code=result.returncode,
         )
         self._run_store.set_tool_approval_status(approval_id, "executed")
         text = (
@@ -763,6 +859,8 @@ class AgentService:
         autonomy_depth: int = 0,
     ) -> str:
         autonomy_depth = max(0, int(autonomy_depth or 0))
+        self.initialize_session_workspace(session_id=session_id)
+        workspace_root = self.session_workspace(session_id=session_id)
         if self._access_controller is not None:
             try:
                 self._access_controller.check_action(user_id, "send_prompt", chat_id)
@@ -824,6 +922,15 @@ class AgentService:
                         goal=(cleaned_prompt or prompt).strip(),
                         max_steps=self._tool_loop_max_steps,
                     )
+            log_json(
+                logger,
+                "probe.decision",
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                mode=probe.mode or "",
+                tools=list(probe.tools or []),
+            )
             if probe.mode == PROBE_NO_TOOLS and probe.reply:
                 await self._notify_progress(progress_callback, {"event": "loop.probe.no_tools"})
                 resolved_reply = probe.reply
@@ -842,7 +949,7 @@ class AgentService:
                         agent_id=agent_id,
                         progress_callback=progress_callback,
                         autonomy_depth=autonomy_depth,
-                        workspace_root=self.session_workspace(session_id=session_id),
+                        workspace_root=workspace_root,
                         policy_profile=self._agent_policy_profile(agent_id=agent_id),
                         extra_tools=extra_tools,
                         goal=(cleaned_prompt or prompt),
@@ -861,6 +968,28 @@ class AgentService:
                     selected_tools=probe.tools,
                     max_steps=probe.max_steps,
                     agent_id=agent_id,
+                    workspace_root=workspace_root,
+                )
+                (
+                    need_tools_output,
+                    need_tools_protocol,
+                    need_tools_transpiled,
+                ) = await self._enforce_need_tools_protocol_output(
+                    output=need_tools_output,
+                    prompt=(cleaned_prompt or prompt),
+                    goal=probe.goal,
+                    selected_tools=probe.tools,
+                    agent_id=agent_id,
+                )
+                log_json(
+                    logger,
+                    "need_tools.model.output",
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    preview=(need_tools_output or "")[:200],
+                    protocol=bool(need_tools_protocol),
+                    transpiled=bool(need_tools_transpiled),
                 )
                 generated_actions, _, generated_final_prompt = _extract_loop_actions(need_tools_output)
                 if generated_actions:
@@ -898,7 +1027,7 @@ class AgentService:
                         agent_id=agent_id,
                         progress_callback=progress_callback,
                         autonomy_depth=autonomy_depth,
-                        workspace_root=self.session_workspace(session_id=session_id),
+                        workspace_root=workspace_root,
                         policy_profile=self._agent_policy_profile(agent_id=agent_id),
                         extra_tools=extra_tools,
                         selected_tools=probe.tools,
@@ -939,7 +1068,7 @@ class AgentService:
                 chat_id=chat_id,
                 user_id=user_id,
                 session_id=session_id,
-                workspace_root=self.session_workspace(session_id=session_id),
+                workspace_root=workspace_root,
                 agent_id=agent_id,
                 progress_callback=progress_callback,
                 autonomy_depth=autonomy_depth,
@@ -965,7 +1094,7 @@ class AgentService:
             {"event": "loop.started", "steps_total": len(actions), "agent_id": agent_id},
         )
         observations: List[str] = []
-        session_workspace = self.session_workspace(session_id=session_id)
+        session_workspace = workspace_root
         for index, action in enumerate(actions, start=1):
             action_id = "tool-" + uuid.uuid4().hex[:8]
             command = action.checkpoint_command()
@@ -993,7 +1122,22 @@ class AgentService:
                 },
             )
             if action.kind == "tool":
-                if self._tool_action_requires_approval(action.tool_name):
+                approval_required = self._tool_action_requires_approval(action.tool_name)
+                log_json(
+                    logger,
+                    "tool.exec.pre",
+                    session_id=session_id,
+                    action_id=action_id,
+                    step=index,
+                    kind="tool",
+                    tool_name=action.tool_name,
+                    command=command,
+                    allowed=True,
+                    approval_required=approval_required,
+                    approval_granted=not approval_required,
+                    exit_code=None,
+                )
+                if approval_required:
                     if not self._run_store:
                         return "Error: approval registry unavailable."
                     if self._run_store.count_pending_tool_approvals(chat_id=chat_id, user_id=user_id) >= self._max_pending_approvals_per_user:
@@ -1056,6 +1200,20 @@ class AgentService:
                             "approval_id": approval_id,
                         },
                     )
+                    log_json(
+                        logger,
+                        "tool.exec.post",
+                        session_id=session_id,
+                        action_id=action_id,
+                        step=index,
+                        kind="tool",
+                        tool_name=action.tool_name,
+                        command=command,
+                        allowed=True,
+                        approval_required=True,
+                        approval_granted=False,
+                        exit_code=None,
+                    )
                     msg = (
                         f"Approval required for high-risk tool action ({action_id}).\n"
                         f"Run: /approve {approval_id[:8]}\n"
@@ -1073,6 +1231,20 @@ class AgentService:
                 )
                 observations.append(result.output)
                 rc = 0 if result.ok else 1
+                log_json(
+                    logger,
+                    "tool.exec.post",
+                    session_id=session_id,
+                    action_id=action_id,
+                    step=index,
+                    kind="tool",
+                    tool_name=action.tool_name,
+                    command=command,
+                    allowed=True,
+                    approval_required=False,
+                    approval_granted=True,
+                    exit_code=rc,
+                )
                 if self._run_store:
                     self._run_store.upsert_tool_loop_checkpoint(
                         session_id=session_id,
@@ -1103,6 +1275,20 @@ class AgentService:
             override_requires_approval = _requires_manual_approval_override(argv=argv)
             if override_requires_approval and decision.risk_tier == "low":
                 decision = decision.__class__(allowed=True, risk_tier="high", reason="Manual approval required for mutating command.")
+            approval_required = decision.risk_tier == "high"
+            log_json(
+                logger,
+                "tool.exec.pre",
+                session_id=session_id,
+                action_id=action_id,
+                step=index,
+                kind="exec",
+                command=" ".join(argv),
+                allowed=decision.allowed,
+                approval_required=approval_required,
+                approval_granted=(not approval_required),
+                exit_code=None,
+            )
             if not decision.allowed:
                 msg = (
                     f"Error: tool action blocked ({action_id}) risk={decision.risk_tier}. "
@@ -1126,6 +1312,19 @@ class AgentService:
                         command=command,
                         status="blocked",
                     )
+                log_json(
+                    logger,
+                    "tool.exec.post",
+                    session_id=session_id,
+                    action_id=action_id,
+                    step=index,
+                    kind="exec",
+                    command=" ".join(argv),
+                    allowed=False,
+                    approval_required=approval_required,
+                    approval_granted=False,
+                    exit_code=126,
+                )
                 return msg
 
             if decision.risk_tier == "high":
@@ -1162,6 +1361,19 @@ class AgentService:
                             "action_id": action_id,
                             "approval_id": approval_id,
                         },
+                    )
+                    log_json(
+                        logger,
+                        "tool.exec.post",
+                        session_id=session_id,
+                        action_id=action_id,
+                        step=index,
+                        kind="exec",
+                        command=" ".join(argv),
+                        allowed=True,
+                        approval_required=True,
+                        approval_granted=False,
+                        exit_code=None,
                     )
                     msg = (
                         f"Approval required for high-risk action ({action_id}).\n"
@@ -1209,6 +1421,19 @@ class AgentService:
                     status="pending_approval",
                     run_id=run_id,
                 )
+                log_json(
+                    logger,
+                    "tool.exec.post",
+                    session_id=session_id,
+                    action_id=action_id,
+                    step=index,
+                    kind="exec",
+                    command=" ".join(argv),
+                    allowed=True,
+                    approval_required=True,
+                    approval_granted=False,
+                    exit_code=None,
+                )
                 msg = (
                     f"Approval required for high-risk action ({action_id}).\n"
                     f"Run: /approve {approval_id[:8]}\n"
@@ -1226,6 +1451,19 @@ class AgentService:
                 timeout_sec=60,
                 policy_profile=policy_profile,
                 workspace_root=str(session_workspace),
+            )
+            log_json(
+                logger,
+                "tool.exec.post",
+                session_id=session_id,
+                action_id=action_id,
+                step=index,
+                kind="exec",
+                command=" ".join(argv),
+                allowed=True,
+                approval_required=False,
+                approval_granted=True,
+                exit_code=result.returncode,
             )
             observations.append(
                 f"{action_id} rc={result.returncode}\n"
@@ -1495,9 +1733,20 @@ class AgentService:
         policy_profile: str,
         extra_tools: Optional[Dict[str, Any]] = None,
     ):
+        normalized_tool_name = (tool_name or "").strip().lower()
+        normalized_args = _normalize_tool_args_for_workspace(
+            tool_name=normalized_tool_name,
+            tool_args=dict(tool_args or {}),
+            workspace_root=workspace_root,
+        )
+        if normalized_args is None:
+            return ToolResult(
+                ok=False,
+                output=f"{action_id} tool={tool_name} error=invalid_path outside_workspace",
+            )
         tool = (extra_tools or {}).get(tool_name) or self._tool_registry.get(tool_name)
         if not tool:
-            if (tool_name or "").strip().lower() in {"send_email_smtp", "send_email"}:
+            if normalized_tool_name in {"send_email_smtp", "send_email"}:
                 return ToolResult(
                     ok=False,
                     output=(
@@ -1511,7 +1760,7 @@ class AgentService:
                 output=f"{action_id} tool={tool_name} error=tool_unavailable",
             )
         context = ToolContext(workspace_root=workspace_root, policy_profile=policy_profile)
-        req = ToolRequest(name=tool_name, args=dict(tool_args or {}))
+        req = ToolRequest(name=tool_name, args=normalized_args)
         try:
             arun = getattr(tool, "arun", None)
             if callable(arun):
@@ -1693,6 +1942,7 @@ class AgentService:
             "If blocked by missing required input/approval, ask one short question only.",
             "Do not include explanation before tool call.",
             "Do not use markdown code fences.",
+            "Use absolute paths for file operations and never run `find /`.",
             f"Goal: {(goal or prompt or '').strip()}",
             "User request:",
             (prompt or "").strip(),
@@ -1712,6 +1962,48 @@ class AgentService:
         except Exception:
             return ""
         return (raw or "").strip()
+
+    async def _enforce_need_tools_protocol_output(
+        self,
+        output: str,
+        prompt: str,
+        goal: str,
+        selected_tools: Sequence[str],
+        agent_id: str,
+    ) -> tuple[str, bool, bool]:
+        text = (output or "").strip()
+        if not text:
+            return "", False, False
+        actions, _, _ = _extract_loop_actions(text)
+        if actions:
+            return text, True, False
+        if _is_blocking_question(text):
+            return text, False, False
+        original_command = _extract_exec_candidate_from_output(text)
+
+        corrected = await self._request_tool_call_correction(
+            prompt=prompt,
+            model_output=text,
+            selected_tools=selected_tools,
+            goal=goal,
+            agent_id=agent_id,
+        )
+        corrected = (corrected or "").strip()
+        if corrected:
+            actions, _, _ = _extract_loop_actions(corrected)
+            if actions:
+                return corrected, True, False
+            if _is_blocking_question(corrected):
+                return corrected, False, False
+            text = corrected
+
+        command = _extract_exec_candidate_from_output(text)
+        if not command:
+            command = original_command
+        argv = _parse_exec_command_argv(command) if command else []
+        if argv:
+            return f"!exec {str(command).strip()}", True, True
+        return text, False, False
 
     async def _resolve_autonomous_output(
         self,
@@ -2045,16 +2337,30 @@ class AgentService:
         selected_tools: Sequence[str],
         max_steps: int,
         agent_id: str,
+        workspace_root: Path,
     ) -> str:
         normalized_tools = _normalize_tool_names(list(selected_tools))
         if not normalized_tools:
             return ""
         provider_for_call = self._provider_for_agent(agent_id=agent_id)
+        tool_lines = _render_tool_schema_lines(normalized_tools)
+        capability_lines = self._build_capability_context_for_tools(normalized_tools, max_capabilities=4)
         call_prompt = self._build_need_tools_prompt(
             prompt=prompt,
             goal=goal,
             selected_tools=normalized_tools,
             max_steps=max_steps,
+            workspace_root=workspace_root,
+            tool_lines=tool_lines,
+            capability_lines=capability_lines,
+        )
+        log_json(
+            logger,
+            "need_tools.model.request",
+            agent_id=agent_id,
+            allowed_tools=list(normalized_tools),
+            injected_schemas=list(tool_lines),
+            workspace_root=str(workspace_root),
         )
         try:
             output = await provider_for_call.generate(
@@ -2072,9 +2378,15 @@ class AgentService:
         goal: str,
         selected_tools: Sequence[str],
         max_steps: int,
+        workspace_root: Path,
+        tool_lines: Optional[List[str]] = None,
+        capability_lines: Optional[List[str]] = None,
     ) -> str:
-        tool_lines = _render_tool_schema_lines(selected_tools)
-        capability_lines = self._build_capability_context_for_tools(selected_tools, max_capabilities=4)
+        tool_lines = tool_lines or _render_tool_schema_lines(selected_tools)
+        capability_lines = capability_lines or self._build_capability_context_for_tools(
+            selected_tools,
+            max_capabilities=4,
+        )
         lines = [
             f"Style guide: {MICRO_STYLE_GUIDE}",
             "Behavior rules (strict):",
@@ -2085,6 +2397,9 @@ class AgentService:
             "5) Do not stop at diagnosis; execute the next concrete step immediately when safe.",
             "6) After tool results: continue with next tool call until goal is done or blocked.",
             "7) Never output shell snippets or markdown fences. Emit protocol blocks only.",
+            "8) Use absolute paths under WORKSPACE_ROOT for file operations.",
+            "9) Never run `find /`; search only inside WORKSPACE_ROOT.",
+            f"WORKSPACE_ROOT: {str(workspace_root)}",
             f"Step budget: {max(1, min(max_steps, self._tool_loop_max_steps))}",
             "Selected tool APIs:",
         ]
@@ -2414,6 +2729,35 @@ def _need_tools_summary_prompt(goal: str) -> str:
     )
 
 
+def _resolve_workspace_bound_path(raw_path: Any, workspace_root: Path) -> Optional[str]:
+    value = str(raw_path or "").strip()
+    if not value:
+        return ""
+    candidate = Path(value).expanduser()
+    base = workspace_root.resolve()
+    resolved = candidate.resolve() if candidate.is_absolute() else (base / candidate).resolve()
+    if resolved == base or resolved.is_relative_to(base):
+        return str(resolved)
+    return None
+
+
+def _normalize_tool_args_for_workspace(
+    tool_name: str,
+    tool_args: Dict[str, Any],
+    workspace_root: Path,
+) -> Optional[Dict[str, Any]]:
+    normalized = dict(tool_args or {})
+    name = (tool_name or "").strip().lower()
+    if name in {"read_file", "write_file"}:
+        if "path" not in normalized:
+            return normalized
+        path = _resolve_workspace_bound_path(normalized.get("path"), workspace_root)
+        if path is None:
+            return None
+        normalized["path"] = path
+    return normalized
+
+
 def _coerce_tool_value(raw: str) -> Any:
     value = str(raw or "").strip()
     if not value:
@@ -2440,6 +2784,8 @@ def _command_needs_shell_wrapper(command: str) -> bool:
 def _parse_exec_command_argv(command: str) -> List[str]:
     cmd = str(command or "").strip()
     if not cmd:
+        return []
+    if re.search(r"(^|[^A-Za-z0-9_])find\s+/(?:\s|$)", cmd):
         return []
     if _command_needs_shell_wrapper(cmd):
         return ["bash", "-lc", cmd]
@@ -2805,6 +3151,24 @@ def _output_sounds_like_action_promise(text: str) -> bool:
     if has_future and has_action_verb and not has_completion:
         return True
     if "about to do" in low or "going to do" in low:
+        return True
+    return False
+
+
+def _is_blocking_question(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("!exec", "!tool", "!loop")):
+        return False
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return False
+    first = lines[0].lower()
+    question_markers = ("?", "can you", "should i", "do you want", "which ", "what ", "where ")
+    if any(first.startswith(marker) for marker in question_markers if marker != "?"):
+        return True
+    if raw.endswith("?"):
         return True
     return False
 

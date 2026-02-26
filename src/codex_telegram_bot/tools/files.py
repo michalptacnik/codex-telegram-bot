@@ -10,7 +10,9 @@ MAX_WRITE_BYTES = 80_000
 
 
 def _resolve_workspace_path(workspace_root: Path, raw_path: str) -> Path:
-    target = (workspace_root / (raw_path or "").strip()).resolve()
+    raw = (raw_path or "").strip()
+    candidate = Path(raw).expanduser()
+    target = candidate.resolve() if candidate.is_absolute() else (workspace_root / raw).resolve()
     workspace = workspace_root.resolve()
     if not str(target).startswith(str(workspace) + "/") and target != workspace:
         raise ValueError("Path escapes workspace root.")
@@ -52,4 +54,17 @@ class WriteFileTool:
             return ToolResult(ok=False, output=f"Error: {exc}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
-        return ToolResult(ok=True, output=f"Wrote {len(content)} chars to {raw_path}")
+        if not target.exists() or not target.is_file():
+            return ToolResult(ok=False, output="Error: write failed verification (file missing).")
+        try:
+            stat = target.stat()
+            size = stat.st_size
+        except OSError:
+            size = -1
+        return ToolResult(
+            ok=True,
+            output=(
+                f"Wrote {len(content)} chars to {str(target)}\n"
+                f"Verified file exists: {str(target)} (size={size} bytes)"
+            ),
+        )

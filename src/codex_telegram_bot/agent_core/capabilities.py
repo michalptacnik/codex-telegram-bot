@@ -34,6 +34,7 @@ class MarkdownCapabilityRegistry:
             "exec": "shell",
             "ssh_detect": "ssh_vps",
             "send_email_smtp": "email",
+            "send_email": "email",
             "provider_status": "provider_model",
             "provider_switch": "provider_model",
         }

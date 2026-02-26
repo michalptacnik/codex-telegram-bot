@@ -21,6 +21,10 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Persistent sessions per chat/user pair
   - Automatic idle-session archival and pruning
   - Per-session isolated workspace directories with disk-byte and file-count quotas
+- Agentic execution:
+  - Probe → expand prompt path keeps base context small
+  - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
+  - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
 - Multi-provider architecture:
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing
@@ -78,6 +82,22 @@ Current module boundaries:
 - `execution/local_shell.py`: local subprocess execution boundary
 
 The runtime is stateful per chat/user session with bounded memory and explicit reset/branch/resume controls.
+
+## Probe Protocol
+
+Before tool execution, the service runs a lightweight probe model call with strict output formats:
+
+- `NO_TOOLS`
+  - `<final assistant reply>`
+- `NEED_TOOLS {"tools":["read_file","shell_exec"],"goal":"...","max_steps":3}`
+
+Behavior:
+
+- `NO_TOOLS`: returns immediately (no tool schemas/capabilities injected, no tool loop).
+- `NEED_TOOLS`: injects only selected tool schemas + tool-mapped capability summaries, then enters tool loop.
+- If NEED_TOOLS output is prose instead of protocol, one repair retry is forced; a single shell command is auto-transpiled to `!exec ...`.
+
+All file operations are normalized to the active session workspace root and write operations are verified before completion is reported.
 
 ## Roadmap Tracking
 
@@ -191,7 +211,8 @@ Environment variables override `.env`:
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
 - `AUTONOMOUS_PROTOCOL_MAX_DEPTH` (default: `6`; max recursive assistant-emitted protocol hops before forcing stop)
-- `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, explicitly enables `send_email_smtp`; the tool is also auto-enabled when `SMTP_HOST`, `SMTP_USER`, and `SMTP_APP_PASSWORD` are present)
+- `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, enables `send_email_smtp`; auto-enabled when `SMTP_HOST`, `SMTP_USER`, and `SMTP_APP_PASSWORD` are present)
+- Email sends are always approval-gated when the SMTP tool is enabled
 - `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
