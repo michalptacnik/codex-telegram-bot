@@ -1,4 +1,4 @@
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 import logging
 import re
 import shlex
@@ -20,10 +20,12 @@ from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
+from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
+from codex_telegram_bot.services.session_memory_files import SessionMemoryFiles
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
@@ -31,10 +33,16 @@ from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, Too
 logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
 ALLOWED_POLICY_PROFILES = {"strict", "balanced", "trusted"}
+
+# Hard prompt char budgets — intentionally conservative to leave room for
+# tool schemas (CONTEXT_TOOL_SCHEMA_BUDGET_CHARS) and memory snippets
+# (CONTEXT_MEMORY_SNIPPET_BUDGET_CHARS) without blowing the total budget.
 CONTEXT_BUDGET_TOTAL_CHARS = 12000
-CONTEXT_HISTORY_BUDGET_CHARS = 6500
-CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
-CONTEXT_SUMMARY_BUDGET_CHARS = 1200
+CONTEXT_HISTORY_BUDGET_CHARS = 4000       # reduced from 6500
+CONTEXT_RETRIEVAL_BUDGET_CHARS = 2500     # reduced from 4000
+CONTEXT_SUMMARY_BUDGET_CHARS = 1000       # reduced from 1200
+CONTEXT_TOOL_SCHEMA_BUDGET_CHARS = 800    # new — for inline tool schema lines
+CONTEXT_MEMORY_SNIPPET_BUDGET_CHARS = 600 # new — facts.md + worklog.md
 
 
 @dataclass(frozen=True)
@@ -69,6 +77,7 @@ class AgentService:
         alert_dispatcher: Optional[AlertDispatcher] = None,
         tool_registry: Optional[ToolRegistry] = None,
         capability_registry: Optional[MarkdownCapabilityRegistry] = None,
+        probe_loop: Optional[ProbeLoop] = None,
         # Parity services
         workspace_manager: Optional[WorkspaceManager] = None,
         access_controller: Optional[AccessController] = None,
@@ -93,6 +102,7 @@ class AgentService:
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry()
         self._capability_registry = capability_registry
+        self._probe_loop = probe_loop
         # Parity services (optional — degrade gracefully when not provided)
         self._workspace_manager = workspace_manager
         self._access_controller = access_controller
@@ -349,12 +359,29 @@ class AgentService:
     def access_controller(self) -> Optional[AccessController]:
         return self._access_controller
 
-    def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
+    def session_memory_files(self, session_id: str) -> SessionMemoryFiles:
+        """Return a SessionMemoryFiles helper for the given session's workspace."""
+        ws = self.session_workspace(session_id=session_id)
+        return SessionMemoryFiles(workspace=ws)
+
+    def build_session_prompt(
+        self,
+        session_id: str,
+        user_prompt: str,
+        max_turns: int = 8,
+        allowed_tools: Optional[Set[str]] = None,
+    ) -> str:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
-        capability_lines = self._build_capability_context(user_prompt=user_prompt)
+        capability_lines = self._build_capability_context(
+            user_prompt=user_prompt, allowed_tools=allowed_tools
+        )
+        # Inject memory snippets from facts.md / worklog.md (on-demand, budget-capped)
+        memory_snippet = self._build_memory_snippet(session_id=session_id)
         if not self._run_store:
             prefix = capability_lines + planning_lines + retrieval_lines
+            if memory_snippet:
+                prefix = [memory_snippet] + prefix
             if prefix:
                 return "\n".join(prefix + [user_prompt])
             return user_prompt
@@ -365,6 +392,8 @@ class AgentService:
             prefix = capability_lines + planning_lines + retrieval_lines
             if summary:
                 prefix = [f"Session memory summary:\n{summary[:CONTEXT_SUMMARY_BUDGET_CHARS]}"] + prefix
+            if memory_snippet:
+                prefix = [memory_snippet] + prefix
             if prefix:
                 self._session_context_diagnostics[session_id] = {
                     "summary_chars": min(len(summary), CONTEXT_SUMMARY_BUDGET_CHARS) if summary else 0,
@@ -380,6 +409,8 @@ class AgentService:
             "Conversation context (most recent first-order preserved):",
         ]
         used_summary = ""
+        if memory_snippet:
+            lines.append(memory_snippet)
         if summary:
             used_summary = summary[:CONTEXT_SUMMARY_BUDGET_CHARS]
             lines.append("Session memory summary:")
@@ -417,9 +448,31 @@ class AgentService:
         lines, _ = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=limit)
         return lines
 
-    def _build_capability_context(self, user_prompt: str) -> List[str]:
+    def _build_capability_context(
+        self,
+        user_prompt: str,
+        allowed_tools: Optional[Set[str]] = None,
+    ) -> List[str]:
+        """Build capability context lines.
+
+        When ``allowed_tools`` is provided (tool-driven mode), inject summaries
+        only for the specific tools in the set rather than using keyword matching.
+        This prevents generic capability hints from polluting the prompt.
+        """
         if not self._capability_registry:
             return []
+        if allowed_tools:
+            # Tool-driven: derive capability names from tool names
+            cap_names = _tool_names_to_capability_names(allowed_tools)
+            lines: List[str] = []
+            for cap_name in cap_names[:2]:
+                summary = self._capability_registry._summarize_capability(cap_name)
+                if summary:
+                    lines.append(f"- {summary[:260]}")
+            if lines:
+                return ["Capability hints (tool-driven):"] + lines
+            return []
+        # Keyword-driven fallback (existing behaviour)
         summaries = self._capability_registry.summarize_for_prompt(user_prompt, max_capabilities=2)
         if not summaries:
             return []
@@ -427,6 +480,19 @@ class AgentService:
         for item in summaries:
             lines.append(f"- {item.summary[:260]}")
         return lines
+
+    def _build_memory_snippet(self, session_id: str) -> str:
+        """Return a memory context string (facts + worklog) for the session.
+
+        Returns an empty string when no memory files exist or they are empty,
+        so the caller can skip the section without extra blank lines.
+        """
+        try:
+            mem = self.session_memory_files(session_id=session_id)
+            snippet = mem.inject_context()
+            return snippet[:CONTEXT_MEMORY_SNIPPET_BUDGET_CHARS] if snippet else ""
+        except Exception:
+            return ""
 
     def _build_retrieval_context_with_meta(self, user_prompt: str, limit: int = 4) -> tuple[List[str], Dict[str, Any]]:
         if not self._repo_retriever:
@@ -604,6 +670,39 @@ class AgentService:
             except Exception as exc:
                 return f"Error: {exc}"
         actions, cleaned_prompt, final_prompt = _extract_loop_actions(prompt)
+
+        # PROBE path: when no explicit !exec / !tool / !loop directives are
+        # present and a ProbeLoop is configured, let the model decide whether
+        # tools are needed before committing to the full tool loop.
+        if not actions and self._probe_loop is not None:
+            workspace = self.session_workspace(session_id=session_id)
+            correlation_id = uuid.uuid4().hex[:12]
+            await self._notify_progress(progress_callback, {"event": "probe.started"})
+            probe_result = await self._probe_loop.run(
+                prompt=cleaned_prompt or prompt,
+                workspace_root=workspace,
+                correlation_id=correlation_id,
+            )
+            await self._notify_progress(
+                progress_callback,
+                {"event": "probe.finished", "kind": probe_result.probe.kind},
+            )
+            output = probe_result.answer or ""
+            if output:
+                self.append_session_user_message(session_id=session_id, content=prompt)
+                self.append_session_assistant_message(
+                    session_id=session_id, content=output
+                )
+            # Append worklog entry on successful tool use
+            if probe_result.tool_results:
+                try:
+                    mem = self.session_memory_files(session_id=session_id)
+                    summary = _worklog_summary(probe_result.tool_results, prompt)
+                    mem.append_worklog(summary)
+                except Exception:
+                    pass
+            return output
+
         if len(actions) > self._tool_loop_max_steps:
             msg = (
                 f"Error: tool step budget exceeded ({len(actions)} > {self._tool_loop_max_steps}). "
@@ -1326,3 +1425,36 @@ def _p95(values: List[float]) -> float:
     ordered = sorted(values)
     idx = max(0, int((len(ordered) * 0.95) - 1))
     return ordered[idx]
+
+
+def _tool_names_to_capability_names(tool_names: Set[str]) -> List[str]:
+    """Map tool names to capability file names for tool-driven injection."""
+    cap_names: List[str] = []
+    for tool in sorted(tool_names):
+        low = tool.lower()
+        if "git" in low:
+            if "git" not in cap_names:
+                cap_names.append("git")
+        elif "file" in low or "read" in low or "write" in low:
+            if "files" not in cap_names:
+                cap_names.append("files")
+        elif "shell" in low or "exec" in low or "ssh" in low:
+            if "system" not in cap_names:
+                cap_names.append("system")
+    return cap_names
+
+
+def _worklog_summary(tool_results: List[Dict[str, Any]], prompt: str) -> str:
+    """Build a short worklog entry from tool execution results."""
+    prompt_preview = (prompt or "")[:80].replace("\n", " ")
+    ok_tools = [r["tool"] for r in tool_results if r.get("ok")]
+    fail_tools = [r["tool"] for r in tool_results if not r.get("ok") and "error" not in r]
+    error_tools = [r["tool"] for r in tool_results if "error" in r]
+    parts = [f"Task: {prompt_preview}"]
+    if ok_tools:
+        parts.append(f"Used tools: {', '.join(ok_tools)}")
+    if fail_tools:
+        parts.append(f"Failed: {', '.join(fail_tools)}")
+    if error_tools:
+        parts.append(f"Errors: {', '.join(error_tools)}")
+    return "\n".join(parts)

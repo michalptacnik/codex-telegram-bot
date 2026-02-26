@@ -7,6 +7,70 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.3.0] – 2026-02-26
+
+### Added
+
+**Provider backend adapter layer**
+- `PROVIDER_BACKEND` env var now supports `codex-cli` (default),
+  `responses-api` (OpenAI Responses API), and `codex-exec-fallback` (alias).
+- `providers/responses_api.py`: OpenAI Responses API adapter with native
+  function-calling support; requires `httpx`; configured via `OPENAI_API_KEY`,
+  `OPENAI_MODEL` (default `gpt-4o`), `OPENAI_MAX_TOKENS`, `OPENAI_TIMEOUT_SEC`,
+  `OPENAI_API_BASE`.  Includes `generate_with_tools()` for iterative tool loops.
+
+**Probe-first tool selection loop**
+- `services/probe_loop.py`: `ProbeLoop` service adds a PROBE step before any
+  tool execution.  The model responds with `NO_TOOLS\n<answer>` (direct path,
+  no tools run) or `NEED_TOOLS {...}` (declares which tools and a goal).
+- Hard runtime tool gate: tool calls not in the probe-declared `allowed_tools`
+  set are blocked; one REPAIR attempt is made; loop exits gracefully on failure.
+- Tool catalog injected at PROBE time is ≤200 chars.
+- Tool schemas for the execution step are capped at 800 chars.
+- Activated via `ENABLE_PROBE_LOOP=true`; off by default (zero behaviour change
+  for existing deployments).
+
+**Per-session memory MD files**
+- `services/session_memory_files.py`: manages `facts.md` (stable project facts,
+  overwrite-on-update) and `worklog.md` (append-only timestamped task log) in
+  each session workspace.
+- Injected into prompts on-demand only (capped at 600 chars total) when the
+  files exist and contain non-whitespace content.
+- `worklog.md` is updated automatically after probe-loop tool runs.
+
+**Tool-driven capability injection**
+- When `allowed_tools` is provided (e.g. from a PROBE result), `AgentService`
+  injects capability summaries only for the selected tools rather than using
+  keyword matching.  Generic hints are never injected when tools are known.
+
+**Hard prompt char budgets** (tightened from 0.2.0 values):
+- History: 4 000 chars (was 6 500)
+- Retrieval: 2 500 chars (was 4 000)
+- Summary: 1 000 chars (was 1 200)
+- Tool schemas: 800 chars (new)
+- Memory snippets: 600 chars (new)
+- Total budget unchanged: 12 000 chars
+
+**Email tool with safety gating**
+- `tools/email.py`: `SendEmailTool` (`send_email`) sends email via SMTP.
+- Absent from the tool catalog and registry unless `ENABLE_EMAIL_TOOL=true`.
+- `requires_approval = True` — the approval gate in `AgentService` must be
+  cleared before the tool executes.
+- Supports `dry_run=True` for safe preview.
+- Configuration: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`,
+  `EMAIL_FROM`.
+
+### Changed
+
+- `app_container.py`: `PROVIDER_BACKEND` values besides `codex-cli` no longer
+  raise immediately; `responses-api` is fully supported.
+- `tools/__init__.py`: `SendEmailTool` registered automatically when
+  `ENABLE_EMAIL_TOOL=true`.
+- `services/agent_service.py`: `ProbeLoop` is an optional dependency; when not
+  set (default), behaviour is identical to 0.2.0.
+
+---
+
 ## [0.2.0] – 2026-02-25
 
 ### Added

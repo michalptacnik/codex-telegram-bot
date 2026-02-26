@@ -25,6 +25,25 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing
   - Circuit-breaker with configurable echo fallback
+  - **OpenAI Responses API** backend (`PROVIDER_BACKEND=responses-api`) with native tool calling
+  - **codex-cli** backend (default) for local `codex exec` execution
+- **Probe-first tool selection** (`ENABLE_PROBE_LOOP=true`):
+  - A lightweight PROBE step asks the model whether tools are needed before execution
+  - `NO_TOOLS` → answers directly without running any tool (fast path)
+  - `NEED_TOOLS` → model declares which tools it needs; only those tools are injected
+  - Hard runtime tool gate: tool calls not in the approved set are blocked
+  - One REPAIR attempt on malformed tool calls; exits loop if REPAIR fails
+  - Tool catalog injected at PROBE time is ≤200 chars to keep prompts lean
+- **Per-session memory** (`facts.md` + `worklog.md` in each session workspace):
+  - `facts.md` — stable facts about the project, written by the operator/agent
+  - `worklog.md` — append-only task outcome log, updated after each tool run
+  - Both are injected on-demand only (when non-empty), capped at 600 chars total
+- **Tool-driven capability injection**: when tools are selected by PROBE, only
+  capability summaries for those specific tools are injected (not keyword-driven)
+- **Hard prompt char budgets**: history 4 000, retrieval 2 500, tool schemas 800,
+  memory snippets 600, total 12 000 (leaves headroom for system instructions)
+- **Email tool** (`send_email`): SMTP-based, gated by `ENABLE_EMAIL_TOOL=true`,
+  requires human approval for every send, excluded from catalog when disabled
 - Parity evaluation harness with CI-safe offline baseline mode
 - Admin commands:
   - `/ping`
@@ -61,13 +80,16 @@ Current module boundaries:
 - `agent_core/router.py`: agent-to-service routing boundary
 - `agent_core/memory.py`: bounded memory defaults (`SESSION_MAX_TURNS=20`)
 - `services/agent_service.py`: orchestration, session, approvals, tool loop
+- `services/probe_loop.py`: probe-first tool selection with hard tool gating
+- `services/session_memory_files.py`: per-session `facts.md` / `worklog.md`
 - `services/access_control.py`: role-based action authorization, spend ceilings, secret scanning
 - `services/capability_router.py`: selects best provider by capability requirements
 - `services/workspace_manager.py`: per-session disk workspaces with quota enforcement
 - `services/session_retention.py`: idle-session archival and pruning policy
 - `providers/registry.py`: runtime provider registry with hot-switch
-- `providers/*.py`: provider abstraction + codex-cli implementation
-- `tools/*.py`: explicit tool registry (`read_file`, `write_file`, `git_status`)
+- `providers/responses_api.py`: OpenAI Responses API adapter with native tool calling
+- `providers/codex_cli.py`: local codex CLI adapter
+- `tools/*.py`: explicit tool registry (`read_file`, `write_file`, `git_status`, `send_email`)
 - `execution/local_shell.py`: local subprocess execution boundary
 
 The runtime is stateful per chat/user session with bounded memory and explicit reset/branch/resume controls.
@@ -166,7 +188,19 @@ Environment variables override `.env`:
 - `PROVIDER_FAILURE_THRESHOLD` (default: `2`)
 - `PROVIDER_RECOVERY_SEC` (default: `30`)
 - `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
-- `PROVIDER_BACKEND` (default: `codex-cli`; current supported value: `codex-cli`)
+- `PROVIDER_BACKEND` (default: `codex-cli`; supported: `codex-cli`, `responses-api`, `codex-exec-fallback`)
+- `OPENAI_API_KEY` (required when `PROVIDER_BACKEND=responses-api`)
+- `OPENAI_MODEL` (default: `gpt-4o`; used with `responses-api` backend)
+- `OPENAI_MAX_TOKENS` (default: `4096`; max output tokens for `responses-api`)
+- `OPENAI_TIMEOUT_SEC` (default: `120`; HTTP timeout for `responses-api`)
+- `OPENAI_API_BASE` (default: `https://api.openai.com`; override for proxy/self-hosted)
+- `ENABLE_PROBE_LOOP` (`true` to enable probe-first tool selection, default: disabled)
+- `ENABLE_EMAIL_TOOL` (`true` to register the `send_email` tool, default: disabled)
+- `SMTP_HOST` (default: `localhost`; used by `send_email` tool)
+- `SMTP_PORT` (default: `587`; used by `send_email` tool)
+- `SMTP_USER` (optional SMTP username for auth)
+- `SMTP_PASSWORD` (optional SMTP password for auth)
+- `EMAIL_FROM` (required when `ENABLE_EMAIL_TOOL=true`; sender address)
 - `CODEX_EXEC_TIMEOUT_SEC` (default: `180`, bounded by policy profile max timeout)
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `EXECUTION_WORKSPACE_ROOT` (default: current working directory)
