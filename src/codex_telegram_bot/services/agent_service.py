@@ -559,6 +559,8 @@ class AgentService:
         for msg in history:
             if msg.role not in {"user", "assistant"}:
                 continue
+            if msg.role == "assistant" and _is_internal_assistant_trace(msg.content):
+                continue
             history_lines.append(f"{msg.role}: {msg.content}")
         history_lines = _trim_lines_from_end(history_lines, CONTEXT_HISTORY_BUDGET_CHARS)
         lines.extend(history_lines)
@@ -1214,10 +1216,12 @@ class AgentService:
                         approval_granted=False,
                         exit_code=None,
                     )
+                    action_preview = _format_tool_action_preview(action.tool_name, action.tool_args)
                     msg = (
-                        f"Approval required for high-risk tool action ({action_id}).\n"
-                        f"Run: /approve {approval_id[:8]}\n"
-                        f"Tool: {action.tool_name}"
+                        "Approval required for high-risk tool action before I can continue.\n"
+                        f"Action: {action_preview}\n"
+                        f"Approve once: /approve {approval_id[:8]}\n"
+                        f"Deny: /deny {approval_id[:8]}"
                     )
                     self.append_session_assistant_message(session_id=session_id, content=msg)
                     return msg
@@ -1375,10 +1379,12 @@ class AgentService:
                         approval_granted=False,
                         exit_code=None,
                     )
+                    command_preview = " ".join(argv)
                     msg = (
-                        f"Approval required for high-risk action ({action_id}).\n"
-                        f"Run: /approve {approval_id[:8]}\n"
-                        f"Command: {' '.join(argv)}"
+                        "Approval required before I can continue with this high-risk action.\n"
+                        f"Action: {command_preview}\n"
+                        f"Approve once: /approve {approval_id[:8]}\n"
+                        f"Deny: /deny {approval_id[:8]}"
                     )
                     self.append_session_assistant_message(session_id=session_id, content=msg)
                     return msg
@@ -1434,10 +1440,12 @@ class AgentService:
                     approval_granted=False,
                     exit_code=None,
                 )
+                command_preview = " ".join(argv)
                 msg = (
-                    f"Approval required for high-risk action ({action_id}).\n"
-                    f"Run: /approve {approval_id[:8]}\n"
-                    f"Command: {' '.join(argv)}"
+                    "Approval required before I can continue with this high-risk action.\n"
+                    f"Action: {command_preview}\n"
+                    f"Approve once: /approve {approval_id[:8]}\n"
+                    f"Deny: /deny {approval_id[:8]}"
                 )
                 self.append_session_assistant_message(session_id=session_id, content=msg)
                 return msg
@@ -2729,6 +2737,24 @@ def _need_tools_summary_prompt(goal: str) -> str:
     )
 
 
+def _format_tool_action_preview(tool_name: str, tool_args: Dict[str, Any]) -> str:
+    name = (tool_name or "").strip() or "tool"
+    args = dict(tool_args or {})
+    if name in {"send_email_smtp", "send_email"}:
+        to_addr = str(args.get("to") or "").strip()
+        subject = str(args.get("subject") or "").strip()
+        parts = [name]
+        if to_addr:
+            parts.append(f"to={to_addr}")
+        if subject:
+            parts.append(f"subject={subject}")
+        return " | ".join(parts)
+    if not args:
+        return name
+    compact = ", ".join([f"{k}={v}" for k, v in list(args.items())[:3]])
+    return f"{name}({compact})"
+
+
 def _resolve_workspace_bound_path(raw_path: Any, workspace_root: Path) -> Optional[str]:
     value = str(raw_path or "").strip()
     if not value:
@@ -3153,6 +3179,21 @@ def _output_sounds_like_action_promise(text: str) -> bool:
     if "about to do" in low or "going to do" in low:
         return True
     return False
+
+
+def _is_internal_assistant_trace(content: str) -> bool:
+    low = str(content or "").strip().lower()
+    if not low:
+        return False
+    markers = (
+        "tool.action.completed action_id=",
+        "tool.action.approved action_id=",
+        "[tool:",
+        "approval required for high-risk tool action before i can continue.",
+        "approval required before i can continue with this high-risk action.",
+        "approve once: /approve ",
+    )
+    return any(marker in low for marker in markers)
 
 
 def _is_blocking_question(text: str) -> bool:

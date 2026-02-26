@@ -255,6 +255,22 @@ def _resolve_pending_by_prefix(pending: List[dict], prefix: str) -> Optional[dic
     return next((p for p in pending if p["approval_id"].startswith(value)), None)
 
 
+def _humanize_approval_execution_output(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return "(no output)"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for line in lines:
+        if line.lower().startswith("email sent to "):
+            return f"Done. {line}"
+    if lines and lines[0].startswith("[tool:"):
+        rc_line = next((ln for ln in lines if ln.startswith("[tool:") and "rc=" in ln), "")
+        if rc_line and "rc=0" not in rc_line:
+            return "I ran the approved action, but it failed. Check /status for details."
+        return "Done. I ran the approved action."
+    return text
+
+
 def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     now = asyncio.get_running_loop().time()
     limiter = context.application.bot_data.setdefault("user_command_limiter", {})
@@ -326,7 +342,7 @@ async def _send_approval_options(
 ) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else 0
     msg = (
-        "Approval required: allow Codex to run this command?\n"
+        "Approval required: allow this high-risk action?\n"
         f"`{command_preview[:180]}`\n"
         "1) Allow once\n"
         "2) Deny\n"
@@ -502,7 +518,7 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chat_id=update.effective_chat.id,
             user_id=user_id,
         )
-        for chunk in chunk_text(out or "(no output)", MAX_OUTPUT_CHARS):
+        for chunk in chunk_text(_humanize_approval_execution_output(out), MAX_OUTPUT_CHARS):
             await update.message.reply_text(chunk)
     except Exception as exc:
         logger.exception("Approve handler error: %s", exc)
@@ -562,6 +578,10 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         active_job = active_jobs.get(chat_id, "")
         active_step = state.get("active_step", "-")
         total_steps = state.get("steps_total", "-")
+        active_agent = agent_service.get_agent(session.current_agent_id) if hasattr(session, "current_agent_id") else None
+        provider_label = (
+            (active_agent.provider if active_agent else "") or agent_service.default_provider_name()
+        )
         elapsed = ""
         started_at = state.get("started_at")
         if started_at:
@@ -570,7 +590,8 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         else:
             elapsed = "-"
         msg = (
-            f"Codex version: {version}\n"
+            f"Provider: {provider_label}\n"
+            f"Provider version/model: {version}\n"
             f"CWD: {cwd}\n"
             f"Allowlist active: {allowlist_active}\n"
             f"Session: {session.session_id[:8]}\n"
@@ -964,7 +985,7 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
                 user_id=user_id,
             )
             await query.edit_message_text(f"Approved `{match['approval_id'][:8]}`", parse_mode="Markdown")
-            for chunk in chunk_text(out or "(no output)", MAX_OUTPUT_CHARS):
+            for chunk in chunk_text(_humanize_approval_execution_output(out), MAX_OUTPUT_CHARS):
                 await context.bot.send_message(chat_id=chat_id, text=chunk)
             return
         if op == "deny":
