@@ -103,6 +103,16 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {},
     },
+    "headless_chromium": {
+        "name": "headless_chromium",
+        "protocol": "!tool",
+        "args": {
+            "url": "string (required, http/https)",
+            "wait_ms": "int (optional, default=1500)",
+            "timeout_sec": "int (optional, default=45)",
+            "max_chars": "int (optional, default=15000)",
+        },
+    },
     "send_email_smtp": {
         "name": "send_email_smtp",
         "protocol": "!tool",
@@ -2659,6 +2669,10 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
     for name in ["shell_exec", "read_file", "write_file", "ssh_detect", "git_status", "git_diff"]:
         if name in available and name not in picks:
             picks.append(name)
+    web_markers = ("internet", "website", "web page", "browser", "scrape", "search online", "open url", "crawl")
+    if any(marker in low for marker in web_markers):
+        if "headless_chromium" in available and "headless_chromium" not in picks:
+            picks.append("headless_chromium")
     if "email" in low or "mail" in low:
         if "send_email_smtp" in available and "send_email_smtp" not in picks:
             picks.append("send_email_smtp")
