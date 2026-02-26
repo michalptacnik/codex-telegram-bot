@@ -13,6 +13,7 @@ Options:
   --venv-dir DIR          Python virtualenv path
   --entrypoint CMD        Override service entrypoint (default: <venv>/bin/codex-telegram-bot)
   --skip-apt              Skip apt dependency installation
+  --minimal-agent-tools   Install only base runtime deps (skip extended agent toolchain)
   --no-enable             Do not enable/start the service after install
   --dry-run               Print commands without executing
   --skip-migration-check  Skip state DB integrity/backup preflight
@@ -26,6 +27,7 @@ CONFIG_DIR="${HOME}/.config/codex-telegram-bot"
 VENV_DIR="${HOME}/.local/share/codex-telegram-bot/.venv"
 ENTRYPOINT=""
 SKIP_APT="false"
+MINIMAL_AGENT_TOOLS="false"
 ENABLE_SERVICE="true"
 DRY_RUN="false"
 SKIP_MIGRATION_CHECK="false"
@@ -39,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --venv-dir) VENV_DIR="$2"; shift 2 ;;
     --entrypoint) ENTRYPOINT="$2"; shift 2 ;;
     --skip-apt) SKIP_APT="true"; shift ;;
+    --minimal-agent-tools) MINIMAL_AGENT_TOOLS="true"; shift ;;
     --no-enable) ENABLE_SERVICE="false"; shift ;;
     --dry-run) DRY_RUN="true"; shift ;;
     --skip-migration-check) SKIP_MIGRATION_CHECK="true"; shift ;;
@@ -151,7 +154,32 @@ ensure_ubuntu() {
 install_deps() {
   ensure_ubuntu
   run_cmd_maybe_sudo apt-get update
-  run_cmd_maybe_sudo apt-get install -y python3 python3-venv python3-pip systemd curl git
+  local base_packages=(
+    python3
+    python3-venv
+    python3-pip
+    systemd
+    ca-certificates
+    curl
+    git
+  )
+  local agent_packages=(
+    wget
+    jq
+    ripgrep
+    fd-find
+    zip
+    unzip
+    tar
+    rsync
+    openssh-client
+    build-essential
+  )
+  if [[ "$MINIMAL_AGENT_TOOLS" == "true" ]]; then
+    run_cmd_maybe_sudo apt-get install -y "${base_packages[@]}"
+    return 0
+  fi
+  run_cmd_maybe_sudo apt-get install -y "${base_packages[@]}" "${agent_packages[@]}"
 }
 
 prepare_venv() {

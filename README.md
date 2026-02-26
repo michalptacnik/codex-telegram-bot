@@ -188,6 +188,7 @@ Environment variables override `.env`:
 - `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
 - `AUTONOMOUS_PROTOCOL_MAX_DEPTH` (default: `6`; max recursive assistant-emitted protocol hops before forcing stop)
 - `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, registers `send_email_smtp` in default tool registry and enforces approval before sending)
+- `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
@@ -261,6 +262,7 @@ Versioning and provenance details:
 Bootstrap behavior:
 
 - installs Ubuntu dependencies (`python3`, `python3-venv`, `systemd`, etc.)
+- installs extended agentic command toolchain by default (`ripgrep`, `fd-find`, `jq`, `wget`, `zip`, `unzip`, `tar`, `rsync`, `openssh-client`, `build-essential`)
 - creates a dedicated virtualenv and installs the project
 - generates and reloads systemd unit
 - enables and starts the service (unless `--no-enable`)
@@ -268,6 +270,7 @@ Bootstrap behavior:
 Useful flags:
 
 - `--skip-apt` (use already-installed dependencies)
+- `--minimal-agent-tools` (install base runtime dependencies only, skip extended agentic toolchain)
 - `--no-enable` (install only, do not start service)
 - `--dry-run` (print commands without executing)
 - `--skip-migration-check` (skip state DB integrity+backup preflight; break-glass only)

@@ -1,4 +1,5 @@
 import os
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -23,9 +24,14 @@ from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.skill_manager import SkillManager
+from codex_telegram_bot.services.toolchain import agent_toolchain_status
+
+
+logger = logging.getLogger(__name__)
 
 
 def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Optional[Path] = None) -> AgentService:
+    _log_agent_toolchain_status()
     workspace_root = _read_workspace_root_env("EXECUTION_WORKSPACE_ROOT", Path.cwd())
     capabilities_root = _read_workspace_root_env("CAPABILITIES_DIR", workspace_root / "capabilities")
     session_workspaces_root = _read_workspace_root_env(
@@ -116,6 +122,20 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         capability_router=capability_router,
         skill_manager=skill_manager,
     )
+
+
+def _log_agent_toolchain_status() -> None:
+    status = agent_toolchain_status()
+    missing = [str(x) for x in list(status.get("missing") or [])]
+    if not missing:
+        return
+    hints = [str(x) for x in list(status.get("missing_packages_hint") or [])]
+    logger.warning("Agent toolchain missing commands: %s", ", ".join(missing))
+    if hints:
+        logger.warning(
+            "Install missing packages (Ubuntu): sudo apt-get install -y %s",
+            " ".join(hints),
+        )
 
 
 def _read_int_env(name: str, default: int) -> int:
