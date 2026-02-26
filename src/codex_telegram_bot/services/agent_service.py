@@ -2276,7 +2276,10 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
     actions: List[LoopAction] = []
     keep_lines: List[str] = []
     final_prompt = ""
-    for raw in (prompt or "").splitlines():
+    raw_lines = (prompt or "").splitlines()
+    index = 0
+    while index < len(raw_lines):
+        raw = raw_lines[index]
         line = raw.strip()
         if line.startswith("!loop "):
             body = line[len("!loop "):].strip()
@@ -2313,16 +2316,29 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
                 fp = str(obj.get("final_prompt") or "").strip()
                 if fp:
                     final_prompt = fp
+            index += 1
             continue
         if line.startswith("!exec "):
-            cmd = line[len("!exec "):].strip()
-            if cmd:
-                try:
-                    argv = shlex.split(cmd)
-                except ValueError:
-                    argv = []
-                if argv:
-                    actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+            cmd_seed = line[len("!exec "):].strip()
+            candidate = cmd_seed
+            consumed = index + 1
+            argv: List[str] = []
+            if candidate:
+                while True:
+                    try:
+                        argv = shlex.split(candidate)
+                        break
+                    except ValueError:
+                        if consumed >= len(raw_lines):
+                            argv = []
+                            break
+                        candidate = candidate + "\n" + raw_lines[consumed]
+                        consumed += 1
+            if argv:
+                actions.append(LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}))
+            else:
+                keep_lines.extend(raw_lines[index:consumed])
+            index = consumed
             continue
         if line.startswith("!tool "):
             body = line[len("!tool "):].strip()
@@ -2334,8 +2350,10 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
             tool_args = obj.get("args") if isinstance(obj, dict) else {}
             if tool_name and isinstance(tool_args, dict):
                 actions.append(LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(tool_args)))
+            index += 1
             continue
         keep_lines.append(raw)
+        index += 1
     return actions, "\n".join(keep_lines).strip(), final_prompt
 
 

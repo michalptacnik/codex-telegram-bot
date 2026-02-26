@@ -1100,6 +1100,42 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("protocol-step executed", out)
         await service.shutdown()
 
+    async def test_model_emitted_multiline_exec_protocol_is_executed(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self.calls == 2:
+                    return "!exec python3 -c \"\nprint('protocol-step')\n\""
+                return "Done. protocol-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="protocol-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Please proceed.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-4b",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv[0:2], ["python3", "-c"])
+        self.assertIn("protocol-step", runner.last_argv[2])
+        self.assertIn("protocol-step executed", out)
+        await service.shutdown()
+
     async def test_autonomous_tool_loop_executes_planned_step(self):
         class _PlannerProvider:
             def __init__(self):
