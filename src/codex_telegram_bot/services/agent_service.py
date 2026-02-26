@@ -2298,6 +2298,93 @@ def _need_tools_summary_prompt(goal: str) -> str:
     )
 
 
+def _coerce_tool_value(raw: str) -> Any:
+    value = str(raw or "").strip()
+    if not value:
+        return ""
+    low = value.lower()
+    if low in {"true", "false"}:
+        return low == "true"
+    if re.fullmatch(r"-?\d+", value):
+        try:
+            return int(value)
+        except Exception:
+            return value
+    return value
+
+
+def _parse_tool_directive(body: str) -> Optional[LoopAction]:
+    payload = (body or "").strip()
+    if not payload:
+        return None
+    try:
+        obj = json.loads(payload)
+    except Exception:
+        obj = None
+    if isinstance(obj, dict):
+        tool_name = str(obj.get("name") or obj.get("tool") or "").strip().lower()
+        args = obj.get("args")
+        if tool_name == "exec":
+            cmd = str((args or {}).get("cmd") or (args or {}).get("command") or "").strip() if isinstance(args, dict) else ""
+            if not cmd:
+                return None
+            try:
+                argv = shlex.split(cmd)
+            except ValueError:
+                argv = []
+            if argv:
+                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
+            return None
+        if tool_name and isinstance(args, dict):
+            return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(args))
+        return None
+
+    try:
+        tokens = shlex.split(payload)
+    except ValueError:
+        return None
+    if not tokens:
+        return None
+    tool_name = str(tokens[0] or "").strip().lower()
+    if not tool_name:
+        return None
+
+    args: Dict[str, Any] = {}
+    positional: List[str] = []
+    for token in tokens[1:]:
+        if "=" in token:
+            k, v = token.split("=", 1)
+            key = k.strip()
+            if key:
+                args[key] = _coerce_tool_value(v)
+            continue
+        positional.append(token)
+
+    if tool_name == "exec":
+        command = str(args.get("cmd") or args.get("command") or "").strip()
+        if command:
+            try:
+                argv = shlex.split(command)
+            except ValueError:
+                argv = []
+            if argv:
+                return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={})
+            return None
+        if positional:
+            return LoopAction(kind="exec", argv=positional, tool_name="", tool_args={})
+        return None
+
+    if positional:
+        if tool_name in {"read_file", "write_file"} and "path" not in args:
+            args["path"] = positional[0]
+        elif tool_name == "shell_exec" and "cmd" not in args:
+            args["cmd"] = " ".join(positional)
+        elif tool_name == "git_add" and "paths" not in args:
+            args["paths"] = positional
+
+    return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=args)
+
+
 def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
     actions: List[LoopAction] = []
     keep_lines: List[str] = []
@@ -2368,14 +2455,11 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
             continue
         if line.startswith("!tool "):
             body = line[len("!tool "):].strip()
-            try:
-                obj = json.loads(body)
-            except Exception:
-                obj = {}
-            tool_name = str(obj.get("name") or obj.get("tool") or "").strip().lower() if isinstance(obj, dict) else ""
-            tool_args = obj.get("args") if isinstance(obj, dict) else {}
-            if tool_name and isinstance(tool_args, dict):
-                actions.append(LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(tool_args)))
+            parsed = _parse_tool_directive(body)
+            if parsed:
+                actions.append(parsed)
+            else:
+                keep_lines.append(raw)
             index += 1
             continue
         keep_lines.append(raw)

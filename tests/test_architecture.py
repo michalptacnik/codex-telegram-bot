@@ -1136,6 +1136,41 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("protocol-step executed", out)
         await service.shutdown()
 
+    async def test_model_emitted_tool_exec_shorthand_is_executed(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self.calls == 2:
+                    return '!tool exec cmd="echo shorthand-step"'
+                return "Done. shorthand-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="shorthand-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Please proceed.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-4d",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "shorthand-step"])
+        self.assertIn("shorthand-step executed", out)
+        await service.shutdown()
+
     async def test_model_emitted_protocol_can_chain_multiple_follow_up_steps(self):
         class _Provider:
             def __init__(self):
