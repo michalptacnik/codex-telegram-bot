@@ -791,25 +791,6 @@ class AgentService:
                 )
             return msg
         if not actions:
-            if self._autonomous_tool_loop_enabled():
-                await self._notify_progress(progress_callback, {"event": "loop.autoplan.started"})
-                planned_actions, planned_final_prompt = await self._plan_tool_loop_actions(
-                    prompt=(cleaned_prompt or prompt),
-                    agent_id=agent_id,
-                    tool_names=available_tool_names,
-                )
-                if planned_actions:
-                    actions = planned_actions
-                    if planned_final_prompt:
-                        final_prompt = planned_final_prompt
-                    await self._notify_progress(
-                        progress_callback,
-                        {"event": "loop.autoplan.ready", "steps_total": len(actions)},
-                    )
-                else:
-                    await self._notify_progress(progress_callback, {"event": "loop.autoplan.none"})
-
-        if not actions:
             await self._notify_progress(progress_callback, {"event": "loop.probe.started"})
             probe = await self._run_probe_decision(
                 prompt=(cleaned_prompt or prompt),
@@ -870,115 +851,64 @@ class AgentService:
                         )
                     return output
                 if need_tools_output.strip():
-                    output = need_tools_output.strip()
-                    session_workspace_now = self.session_workspace(session_id=session_id)
-                    policy_profile_now = self._agent_policy_profile(agent_id=agent_id)
-                    protocol_output = await self._attempt_autonomous_protocol_output(
-                        output=output,
-                        prompt=(cleaned_prompt or prompt),
+                    output = await self._resolve_autonomous_output(
+                        output=need_tools_output.strip(),
+                        base_prompt=(cleaned_prompt or prompt),
                         chat_id=chat_id,
                         user_id=user_id,
                         session_id=session_id,
                         agent_id=agent_id,
                         progress_callback=progress_callback,
                         autonomy_depth=autonomy_depth,
-                    )
-                    if protocol_output is not None:
-                        output = protocol_output
-                    executed_tool = await self._attempt_autonomous_tool_invocation(
-                        output=output,
-                        session_id=session_id,
-                        workspace_root=session_workspace_now,
-                        policy_profile=policy_profile_now,
+                        workspace_root=self.session_workspace(session_id=session_id),
+                        policy_profile=self._agent_policy_profile(agent_id=agent_id),
                         extra_tools=extra_tools,
+                        selected_tools=probe.tools,
+                        goal=probe.goal,
                     )
-                    has_executed_tool = executed_tool is not None
-                    if has_executed_tool:
-                        output = executed_tool
-                    executed_slash = await self._attempt_autonomous_email_slash_command(
-                        output=output,
-                        session_id=session_id,
-                        workspace_root=session_workspace_now,
-                        policy_profile=policy_profile_now,
-                        extra_tools=extra_tools,
-                    )
-                    if executed_slash is not None:
-                        output = executed_slash
-                    elif (not has_executed_tool) and _output_claims_email_sent(output):
-                        recovered = await self._attempt_autonomous_email_send_recovery(
-                            output=output,
-                            prompt=(cleaned_prompt or prompt),
-                            session_id=session_id,
-                            workspace_root=session_workspace_now,
-                            policy_profile=policy_profile_now,
-                            extra_tools=extra_tools,
-                        )
-                        if recovered is None:
-                            output = (
-                                "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                                "Please provide explicit recipient email, subject, and body so I can execute the send."
-                            )
-                        else:
-                            output = recovered
                     if active_skills:
                         await self._notify_progress(
                             progress_callback,
                             {"event": "skills.deactivated", "skills": [s.skill_id for s in active_skills]},
                         )
                     return output
+        if not actions and self._autonomous_tool_loop_enabled():
+            await self._notify_progress(progress_callback, {"event": "loop.autoplan.started"})
+            planned_actions, planned_final_prompt = await self._plan_tool_loop_actions(
+                prompt=(cleaned_prompt or prompt),
+                agent_id=agent_id,
+                tool_names=available_tool_names,
+            )
+            if planned_actions:
+                actions = planned_actions
+                if planned_final_prompt:
+                    final_prompt = planned_final_prompt
+                await self._notify_progress(
+                    progress_callback,
+                    {"event": "loop.autoplan.ready", "steps_total": len(actions)},
+                )
+            else:
+                await self._notify_progress(progress_callback, {"event": "loop.autoplan.none"})
         if not actions:
             contextual = self.build_session_prompt(session_id=session_id, user_prompt=cleaned_prompt or prompt)
             job_id = await self.queue_prompt(prompt=contextual, agent_id=agent_id)
             await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
             output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
             await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
-            protocol_output = await self._attempt_autonomous_protocol_output(
+            output = await self._resolve_autonomous_output(
                 output=output,
-                prompt=(cleaned_prompt or prompt),
+                base_prompt=(cleaned_prompt or prompt),
                 chat_id=chat_id,
                 user_id=user_id,
                 session_id=session_id,
+                workspace_root=self.session_workspace(session_id=session_id),
                 agent_id=agent_id,
                 progress_callback=progress_callback,
                 autonomy_depth=autonomy_depth,
-            )
-            if protocol_output is not None:
-                output = protocol_output
-            executed_tool = await self._attempt_autonomous_tool_invocation(
-                output=output,
-                session_id=session_id,
-                workspace_root=self.session_workspace(session_id=session_id),
                 policy_profile=self._agent_policy_profile(agent_id=agent_id),
                 extra_tools=extra_tools,
+                goal=(cleaned_prompt or prompt),
             )
-            has_executed_tool = executed_tool is not None
-            if has_executed_tool:
-                output = executed_tool
-            executed_slash = await self._attempt_autonomous_email_slash_command(
-                output=output,
-                session_id=session_id,
-                workspace_root=self.session_workspace(session_id=session_id),
-                policy_profile=self._agent_policy_profile(agent_id=agent_id),
-                extra_tools=extra_tools,
-            )
-            if executed_slash is not None:
-                output = executed_slash
-            elif (not has_executed_tool) and _output_claims_email_sent(output):
-                recovered = await self._attempt_autonomous_email_send_recovery(
-                    output=output,
-                    prompt=(cleaned_prompt or prompt),
-                    session_id=session_id,
-                    workspace_root=self.session_workspace(session_id=session_id),
-                    policy_profile=self._agent_policy_profile(agent_id=agent_id),
-                    extra_tools=extra_tools,
-                )
-                if recovered is None:
-                    output = (
-                        "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                        "Please provide explicit recipient email, subject, and body so I can execute the send."
-                    )
-                else:
-                    output = recovered
             if active_skills:
                 await self._notify_progress(
                     progress_callback,
@@ -1305,53 +1235,24 @@ class AgentService:
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
         output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
-        protocol_output = await self._attempt_autonomous_protocol_output(
+        selected_tools = [a.tool_name for a in actions if a.kind == "tool" and a.tool_name]
+        if any(a.kind == "exec" for a in actions):
+            selected_tools.append("exec")
+        output = await self._resolve_autonomous_output(
             output=output,
-            prompt=(final_prompt or cleaned_prompt or prompt),
+            base_prompt=(final_prompt or cleaned_prompt or prompt),
             chat_id=chat_id,
             user_id=user_id,
             session_id=session_id,
             agent_id=agent_id,
             progress_callback=progress_callback,
             autonomy_depth=autonomy_depth,
-        )
-        if protocol_output is not None:
-            output = protocol_output
-        executed_tool = await self._attempt_autonomous_tool_invocation(
-            output=output,
-            session_id=session_id,
             workspace_root=session_workspace,
             policy_profile=policy_profile,
             extra_tools=extra_tools,
+            selected_tools=selected_tools,
+            goal=(cleaned_prompt or prompt),
         )
-        has_executed_tool = executed_tool is not None
-        if has_executed_tool:
-            output = executed_tool
-        executed_slash = await self._attempt_autonomous_email_slash_command(
-            output=output,
-            session_id=session_id,
-            workspace_root=session_workspace,
-            policy_profile=policy_profile,
-            extra_tools=extra_tools,
-        )
-        if executed_slash is not None:
-            output = executed_slash
-        elif (not has_executed_tool) and _output_claims_email_sent(output):
-            recovered = await self._attempt_autonomous_email_send_recovery(
-                output=output,
-                prompt=(cleaned_prompt or prompt),
-                session_id=session_id,
-                workspace_root=session_workspace,
-                policy_profile=policy_profile,
-                extra_tools=extra_tools,
-            )
-            if recovered is None:
-                output = (
-                    "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                    "Please provide explicit recipient email, subject, and body so I can execute the send."
-                )
-            else:
-                output = recovered
         await self._notify_progress(
             progress_callback,
             {"event": "loop.finished", "steps_total": len(actions)},
@@ -1728,6 +1629,152 @@ class AgentService:
             progress_callback=progress_callback,
             autonomy_depth=autonomy_depth + 1,
         )
+
+    async def _request_tool_call_correction(
+        self,
+        prompt: str,
+        model_output: str,
+        selected_tools: Sequence[str],
+        goal: str,
+        agent_id: str,
+    ) -> str:
+        tool_names = _normalize_tool_names(list(selected_tools or []))
+        if not tool_names:
+            tool_names = _default_probe_tools_for_prompt(prompt, self._tool_registry.names())
+        if not tool_names:
+            tool_names = ["exec"]
+        tool_lines = _render_tool_schema_lines(tool_names[:6])
+        guidance = [
+            "You are in autonomous execution mode.",
+            "The previous response described intent but did not execute.",
+            "Output exactly one next action now.",
+            "Allowed outputs:",
+            "- !exec ...",
+            "- !tool {...}",
+            "- !loop {...}",
+            "If blocked by missing required input/approval, ask one short question only.",
+            "Do not include explanation before tool call.",
+            f"Goal: {(goal or prompt or '').strip()}",
+            "User request:",
+            (prompt or "").strip(),
+            "Previous response:",
+            (model_output or "").strip(),
+            "Selected tool APIs:",
+        ]
+        guidance.extend(tool_lines)
+        text = "\n".join([ln for ln in guidance if str(ln).strip()])
+        provider_for_call = self._provider_for_agent(agent_id=agent_id)
+        try:
+            raw = await provider_for_call.generate(
+                [{"role": "user", "content": text}],
+                stream=False,
+                policy_profile=self._agent_policy_profile(agent_id=agent_id),
+            )
+        except Exception:
+            return ""
+        return (raw or "").strip()
+
+    async def _resolve_autonomous_output(
+        self,
+        output: str,
+        base_prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str,
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+        autonomy_depth: int,
+        workspace_root: Path,
+        policy_profile: str,
+        extra_tools: Dict[str, Any],
+        selected_tools: Optional[Sequence[str]] = None,
+        goal: str = "",
+        allow_correction: bool = True,
+    ) -> str:
+        text = (output or "").strip()
+        protocol_output = await self._attempt_autonomous_protocol_output(
+            output=text,
+            prompt=base_prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+            autonomy_depth=autonomy_depth,
+        )
+        if protocol_output is not None:
+            text = protocol_output
+
+        executed_tool = await self._attempt_autonomous_tool_invocation(
+            output=text,
+            session_id=session_id,
+            workspace_root=workspace_root,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        has_executed_tool = executed_tool is not None
+        if has_executed_tool:
+            text = executed_tool
+
+        executed_slash = await self._attempt_autonomous_email_slash_command(
+            output=text,
+            session_id=session_id,
+            workspace_root=workspace_root,
+            policy_profile=policy_profile,
+            extra_tools=extra_tools,
+        )
+        if executed_slash is not None:
+            text = executed_slash
+        elif (not has_executed_tool) and _output_claims_email_sent(text):
+            recovered = await self._attempt_autonomous_email_send_recovery(
+                output=text,
+                prompt=base_prompt,
+                session_id=session_id,
+                workspace_root=workspace_root,
+                policy_profile=policy_profile,
+                extra_tools=extra_tools,
+            )
+            if recovered is None:
+                text = (
+                    "Error: email send was claimed, but no SMTP tool action was executed.\n"
+                    "Please provide explicit recipient email, subject, and body so I can execute the send."
+                )
+            else:
+                text = recovered
+
+        if (
+            allow_correction
+            and (not has_executed_tool)
+            and executed_slash is None
+            and _prompt_expects_action(base_prompt)
+            and _output_sounds_like_action_promise(text)
+        ):
+            corrected = await self._request_tool_call_correction(
+                prompt=base_prompt,
+                model_output=text,
+                selected_tools=selected_tools or [],
+                goal=goal,
+                agent_id=agent_id,
+            )
+            corrected = (corrected or "").strip()
+            if corrected and corrected != text:
+                return await self._resolve_autonomous_output(
+                    output=corrected,
+                    base_prompt=base_prompt,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    progress_callback=progress_callback,
+                    autonomy_depth=autonomy_depth + 1,
+                    workspace_root=workspace_root,
+                    policy_profile=policy_profile,
+                    extra_tools=extra_tools,
+                    selected_tools=selected_tools,
+                    goal=goal,
+                    allow_correction=False,
+                )
+        return text
 
     async def _execute_tool_action_with_telemetry(
         self,
@@ -2602,6 +2649,68 @@ def _output_claims_email_sent(text: str) -> bool:
         "delivered",
     )
     return any(p in low for p in phrases)
+
+
+def _output_sounds_like_action_promise(text: str) -> bool:
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    low = raw.lower()
+    if low.startswith("error:"):
+        return False
+    if any(line.strip().startswith(("!exec ", "!tool ", "!loop ")) for line in raw.splitlines()):
+        return False
+    if _extract_tool_invocation_from_output(raw):
+        return False
+
+    completion_markers = (
+        "done.",
+        "completed",
+        "executed",
+        "created",
+        "installed",
+        "updated",
+        "fixed",
+        "sent to",
+        "email sent",
+        "i did",
+        "i've done",
+    )
+    future_markers = (
+        "i will",
+        "i'll",
+        "let me",
+        "i can",
+        "i'm going to",
+        "about to",
+        "next i",
+        "trying now",
+        "sending response",
+    )
+    action_verbs = (
+        "run",
+        "execute",
+        "check",
+        "list",
+        "inspect",
+        "create",
+        "make",
+        "install",
+        "download",
+        "send",
+        "open",
+        "write",
+    )
+    has_future = any(marker in low for marker in future_markers)
+    has_action_verb = any(verb in low for verb in action_verbs)
+    has_completion = any(marker in low for marker in completion_markers)
+    if re.search(r"(?mi)^\s*step\s*\d+\s*:\s*", raw):
+        return True
+    if has_future and has_action_verb and not has_completion:
+        return True
+    if "about to do" in low or "going to do" in low:
+        return True
+    return False
 
 
 def _extract_email_address(text: str) -> str:

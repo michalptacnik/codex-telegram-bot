@@ -533,8 +533,10 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - only selected tool schemas
   - only selected capability summaries
   - tool loop execution
+- If the NEED_TOOLS reply describes intent but does not execute, the service triggers one corrective model turn that must emit exactly one tool call block.
 - Optional autonomous planning bridge:
   - set `AUTONOMOUS_TOOL_LOOP=1` to let text-only API providers (`deepseek`, `openai`, `gemini`, etc.) propose tool-loop steps automatically
+  - planner runs only as fallback when probe/NEED_TOOLS path did not produce executable tool actions
   - keep disabled for `codex_cli` in most setups (Codex already has native agentic tool execution)
 - Skills can extend tool availability per task:
   - skills are auto-activated ad hoc from prompt intent + env prerequisites

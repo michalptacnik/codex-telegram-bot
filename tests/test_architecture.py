@@ -1218,14 +1218,59 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Completed all steps", out)
         await service.shutdown()
 
-    async def test_autonomous_tool_loop_executes_planned_step(self):
+    async def test_action_promise_triggers_tool_call_correction(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                content = str(messages[0].get("content") or "")
+                if self.calls == 1:
+                    return 'NEED_TOOLS {"tools":["shell_exec"],"goal":"Run command","max_steps":2}'
+                if self.calls == 2:
+                    return "I can run that now."
+                if "previous response described intent but did not execute" in content.lower():
+                    return '!exec echo corrected-step'
+                return "Done. corrected-step executed."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="corrected-step\n", stderr=""))
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Create the file now.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-correction",
+            agent_id="default",
+        )
+        self.assertEqual(runner.last_argv, ["echo", "corrected-step"])
+        self.assertIn("corrected-step executed", out)
+        await service.shutdown()
+
+    async def test_autonomous_tool_loop_uses_planner_as_fallback_after_probe(self):
         class _PlannerProvider:
             def __init__(self):
                 self._calls = 0
+                self.prompts = []
 
             async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
                 self._calls += 1
+                content = str(messages[0].get("content") or "")
+                self.prompts.append(content)
                 if self._calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self._calls == 2:
+                    return ""
+                if self._calls == 3:
                     return '{"steps":[{"kind":"exec","command":"echo hello"}],"final_prompt":"Summarize result."}'
                 return "final answer"
 
@@ -1250,6 +1295,9 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(runner.last_argv, ["echo", "hello"])
         self.assertIn("final answer", out)
+        self.assertIn("Classify whether", service._provider.prompts[0])
+        self.assertIn("Behavior rules (strict):", service._provider.prompts[1])
+        self.assertIn("You are an execution planner.", service._provider.prompts[2])
         await service.shutdown()
 
     def test_parse_planner_output_accepts_fenced_json(self):
