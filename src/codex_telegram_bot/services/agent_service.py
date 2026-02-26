@@ -40,6 +40,7 @@ CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
 CONTEXT_SUMMARY_BUDGET_CHARS = 1200
 MODEL_JOB_HEARTBEAT_SEC = 15
 AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
+AUTONOMOUS_PROTOCOL_MAX_DEPTH_ENV = "AUTONOMOUS_PROTOCOL_MAX_DEPTH"
 EMAIL_TOOL_ENV = "ENABLE_EMAIL_TOOL"
 TOOL_APPROVAL_SENTINEL = "__tool__"
 PROBE_NO_TOOLS = "NO_TOOLS"
@@ -1699,7 +1700,7 @@ class AgentService:
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
         autonomy_depth: int,
     ) -> Optional[str]:
-        if autonomy_depth >= 2:
+        if autonomy_depth >= self._autonomous_protocol_max_depth():
             return None
         actions, cleaned_output, final_prompt = _extract_loop_actions(output)
         if not actions:
@@ -1873,6 +1874,16 @@ class AgentService:
         raw = (os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV) or "").strip().lower()
         return raw in {"1", "true", "yes", "on"}
 
+    def _autonomous_protocol_max_depth(self) -> int:
+        raw = (os.environ.get(AUTONOMOUS_PROTOCOL_MAX_DEPTH_ENV) or "").strip()
+        if not raw:
+            return 6
+        try:
+            value = int(raw)
+        except Exception:
+            return 6
+        return max(1, min(value, 12))
+
     async def _run_probe_decision(
         self,
         prompt: str,
@@ -1952,7 +1963,8 @@ class AgentService:
             "2) If you can proceed, proceed. Ask only when blocked or approval is required.",
             "3) If tools are required now, output only one block: !exec ... OR !tool {...} OR !loop {...}.",
             "4) Do not output explanations before a tool call.",
-            "5) After tool results: either output next tool call (only), or final short summary.",
+            "5) Do not stop at diagnosis; execute the next concrete step immediately when safe.",
+            "6) After tool results: continue with next tool call until goal is done or blocked.",
             f"Step budget: {max(1, min(max_steps, self._tool_loop_max_steps))}",
             "Selected tool APIs:",
         ]
@@ -2264,11 +2276,18 @@ def _loop_action_to_step(action: LoopAction) -> Dict[str, Any]:
 def _need_tools_summary_prompt(goal: str) -> str:
     g = (goal or "").strip()
     if not g:
-        return "Summarize what you executed and the outcome. Offer next options only if useful."
+        return (
+            "Check progress after tool results.\n"
+            "- If more work is needed and you can continue: output exactly one tool call block (!exec/!tool/!loop), no prose.\n"
+            "- If blocked by missing info or approval: ask one short blocking question.\n"
+            "- If done: short human summary of what you did and outcome."
+        )
     return (
         f"Goal: {g}\n"
-        "After executing steps, respond briefly with what you did, the concrete outcome, "
-        "and useful next options only when they help."
+        "Check whether the goal is complete.\n"
+        "- If not complete and you can continue: output exactly one next tool call block (!exec/!tool/!loop), no prose.\n"
+        "- If blocked by missing info or approval: ask one short blocking question.\n"
+        "- If complete: short summary with concrete outcome and useful next options only when they help."
     )
 
 

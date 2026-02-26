@@ -186,6 +186,7 @@ Environment variables override `.env`:
 - `SESSION_COMPACT_KEEP` (default: `20`)
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
+- `AUTONOMOUS_PROTOCOL_MAX_DEPTH` (default: `6`; max recursive assistant-emitted protocol hops before forcing stop)
 - `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, registers `send_email_smtp` in default tool registry and enforces approval before sending)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)

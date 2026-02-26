@@ -1136,6 +1136,53 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
         self.assertIn("protocol-step executed", out)
         await service.shutdown()
 
+    async def test_model_emitted_protocol_can_chain_multiple_follow_up_steps(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return "UNPARSEABLE_PROBE"
+                if self.calls == 2:
+                    return "!exec echo first-step"
+                if self.calls == 3:
+                    return "!exec echo second-step"
+                if self.calls == 4:
+                    return "!exec echo third-step"
+                return "Done. Completed all steps."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        runner = FakeRunner(CommandResult(returncode=0, stdout="ok\n", stderr=""))
+        runner.set_results(
+            [
+                CommandResult(returncode=0, stdout="first-step\n", stderr=""),
+                CommandResult(returncode=0, stdout="second-step\n", stderr=""),
+                CommandResult(returncode=0, stdout="third-step\n", stderr=""),
+            ]
+        )
+        service = AgentService(provider=_Provider(), execution_runner=runner)
+        out = await service.run_prompt_with_tool_loop(
+            prompt="Please proceed and finish the task.",
+            chat_id=2,
+            user_id=2,
+            session_id="sess-probe-4c",
+            agent_id="default",
+        )
+        self.assertEqual(len(runner.calls), 3)
+        self.assertEqual(runner.last_argv, ["echo", "third-step"])
+        self.assertIn("Completed all steps", out)
+        await service.shutdown()
+
     async def test_autonomous_tool_loop_executes_planned_step(self):
         class _PlannerProvider:
             def __init__(self):
