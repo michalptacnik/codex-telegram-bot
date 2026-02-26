@@ -7,6 +7,7 @@ from pathlib import Path
 from codex_telegram_bot.app_container import build_agent_service
 from .config import (
     DEFAULT_CONFIG_DIR,
+    apply_env_defaults,
     load_config,
     load_env_with_fallback,
     purge_env,
@@ -69,6 +70,11 @@ def main() -> None:
 
     args = parser.parse_args()
     config_dir = Path(args.config_dir).expanduser().resolve()
+    env_file = load_env_with_fallback(config_dir)
+    apply_env_defaults(env_file)
+
+    if "--log-level" not in sys.argv and (os.environ.get("LOG_LEVEL") or "").strip():
+        args.log_level = os.environ.get("LOG_LEVEL", args.log_level)
 
     _configure_logging(args.log_level)
 

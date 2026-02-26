@@ -29,6 +29,7 @@ from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
+from codex_telegram_bot.tools.email import email_tool_enabled
 
 logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
@@ -41,7 +42,6 @@ CONTEXT_SUMMARY_BUDGET_CHARS = 1200
 MODEL_JOB_HEARTBEAT_SEC = 15
 AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
 AUTONOMOUS_PROTOCOL_MAX_DEPTH_ENV = "AUTONOMOUS_PROTOCOL_MAX_DEPTH"
-EMAIL_TOOL_ENV = "ENABLE_EMAIL_TOOL"
 TOOL_APPROVAL_SENTINEL = "__tool__"
 PROBE_NO_TOOLS = "NO_TOOLS"
 PROBE_NEED_TOOLS = "NEED_TOOLS"
@@ -916,7 +916,7 @@ class AgentService:
                         if recovered is None:
                             output = (
                                 "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                                "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                                "Please provide explicit recipient email, subject, and body so I can execute the send."
                             )
                         else:
                             output = recovered
@@ -975,7 +975,7 @@ class AgentService:
                 if recovered is None:
                     output = (
                         "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                        "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                        "Please provide explicit recipient email, subject, and body so I can execute the send."
                     )
                 else:
                     output = recovered
@@ -1348,7 +1348,7 @@ class AgentService:
             if recovered is None:
                 output = (
                     "Error: email send was claimed, but no SMTP tool action was executed.\n"
-                    "Please use `/email to@example.com | Subject | Body` or provide explicit recipient, subject, and body."
+                    "Please provide explicit recipient email, subject, and body so I can execute the send."
                 )
             else:
                 output = recovered
@@ -1558,12 +1558,18 @@ class AgentService:
     ):
         tool = (extra_tools or {}).get(tool_name) or self._tool_registry.get(tool_name)
         if not tool:
-            names = set(self._tool_registry.names())
-            names.update((extra_tools or {}).keys())
-            known = ", ".join(sorted(names))
+            if (tool_name or "").strip().lower() == "send_email_smtp":
+                return ToolResult(
+                    ok=False,
+                    output=(
+                        f"{action_id} tool={tool_name} error=tool_unavailable "
+                        "Email tool is not available in this runtime. "
+                        "Set SMTP_HOST, SMTP_USER, SMTP_APP_PASSWORD (and optionally ENABLE_EMAIL_TOOL=1)."
+                    ),
+                )
             return ToolResult(
                 ok=False,
-                output=f"{action_id} tool={tool_name} error=unknown_tool known=[{known}]",
+                output=f"{action_id} tool={tool_name} error=tool_unavailable",
             )
         context = ToolContext(workspace_root=workspace_root, policy_profile=policy_profile)
         req = ToolRequest(name=tool_name, args=dict(tool_args or {}))
@@ -1586,8 +1592,7 @@ class AgentService:
         if name not in APPROVAL_REQUIRED_TOOLS:
             return False
         if name == "send_email_smtp":
-            enabled = (os.environ.get(EMAIL_TOOL_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
-            return enabled
+            return email_tool_enabled(os.environ)
         return True
 
     async def _attempt_autonomous_email_send_recovery(

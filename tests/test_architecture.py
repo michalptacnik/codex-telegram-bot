@@ -1283,6 +1283,36 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(out.startswith("Error: email send was claimed"))
             await service.shutdown()
 
+    async def test_email_tool_unavailable_error_is_actionable(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "ok"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SqliteRunStore(db_path=Path(tmp) / "state.db")
+            service = AgentService(provider=_Provider(), run_store=store, event_bus=EventBus())
+            result = await service._execute_registered_tool_action(
+                action_id="tool-x",
+                tool_name="send_email_smtp",
+                tool_args={"to": "a@b.com", "subject": "S", "body": "B"},
+                workspace_root=Path(tmp),
+                policy_profile="balanced",
+                extra_tools={},
+            )
+            self.assertIn("error=tool_unavailable", result.output)
+            self.assertIn("Email tool is not available in this runtime", result.output)
+            self.assertNotIn("known=[", result.output)
+            await service.shutdown()
+
     async def test_email_send_claim_without_send_intent_still_returns_error(self):
         class _Provider:
             async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
@@ -1521,6 +1551,58 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn("[tool:", approved)
                 self.assertEqual(fake_tool.calls, 1)
+            await service.shutdown()
+
+    async def test_email_tool_action_requires_approval_when_smtp_env_present(self):
+        class _Provider:
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                return "ok"
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        class _FakeEmailTool:
+            name = "send_email_smtp"
+
+            def run(self, request, context):
+                return type("R", (), {"ok": True, "output": "sent"})()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            registry = ToolRegistry()
+            registry.register(_FakeEmailTool())
+            service = AgentService(
+                provider=_Provider(),
+                run_store=store,
+                event_bus=bus,
+                tool_registry=registry,
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "SMTP_HOST": "smtp.example.com",
+                    "SMTP_USER": "bot@example.com",
+                    "SMTP_APP_PASSWORD": "app-password",
+                },
+                clear=True,
+            ):
+                session = service.get_or_create_session(chat_id=31, user_id=32)
+                out = await service.run_prompt_with_tool_loop(
+                    prompt='!tool {"name":"send_email_smtp","args":{"to":"a@b.com","subject":"S","body":"B"}}',
+                    chat_id=31,
+                    user_id=32,
+                    session_id=session.session_id,
+                    agent_id="default",
+                )
+                self.assertIn("Approval required for high-risk tool action", out)
             await service.shutdown()
 
     async def test_generic_slash_tool_invocation_executes(self):

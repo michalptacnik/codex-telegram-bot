@@ -5,8 +5,20 @@ import socket
 import smtplib
 import time
 from email.message import EmailMessage
+from typing import Mapping
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
+
+EMAIL_TOOL_ENV = "ENABLE_EMAIL_TOOL"
+SMTP_REQUIRED_ENV_KEYS = ("SMTP_HOST", "SMTP_USER", "SMTP_APP_PASSWORD")
+
+
+def email_tool_enabled(env: Mapping[str, str] | None = None) -> bool:
+    source = env if env is not None else os.environ
+    explicit = str(source.get(EMAIL_TOOL_ENV) or "").strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    return all(str(source.get(key) or "").strip() for key in SMTP_REQUIRED_ENV_KEYS)
 
 
 class SendEmailSmtpTool:

@@ -166,6 +166,8 @@ If `ALLOWLIST` is blank, the bot will warn and require you to type `YES` to cont
 
 Environment variables override `.env`:
 
+- At startup, `.env` entries are applied as process-env defaults (without overriding already-exported vars).
+
 - `TELEGRAM_BOT_TOKEN` (required)
 - `ALLOWLIST` (optional)
 - `LOG_LEVEL` (default: INFO)
@@ -187,7 +189,7 @@ Environment variables override `.env`:
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
 - `AUTONOMOUS_PROTOCOL_MAX_DEPTH` (default: `6`; max recursive assistant-emitted protocol hops before forcing stop)
-- `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, registers `send_email_smtp` in default tool registry and enforces approval before sending)
+- `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, explicitly enables `send_email_smtp`; the tool is also auto-enabled when `SMTP_HOST`, `SMTP_USER`, and `SMTP_APP_PASSWORD` are present)
 - `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
@@ -542,7 +544,7 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - `/pending` to list pending approvals
   - `/approve <approval_id>` to execute approved action
   - `/deny <approval_id>` to reject pending action
-- `send_email_smtp` requires approval when `ENABLE_EMAIL_TOOL=1`.
+- `send_email_smtp` always requires approval when enabled (explicitly via `ENABLE_EMAIL_TOOL=1` or implicitly via SMTP env config).
 - Tool loop enforces per-message max step budget (`TOOL_LOOP_MAX_STEPS`).
 - Pending approvals expire automatically after `APPROVAL_TTL_SEC`.
 - Pending approvals are capped per user (`MAX_PENDING_APPROVALS_PER_USER`) to reduce abuse risk.

@@ -47,6 +47,25 @@ def get_env_value(key: str, env_file: Dict[str, str]) -> Optional[str]:
     return os.environ.get(key) or env_file.get(key)
 
 
+def apply_env_defaults(env_file: Dict[str, str], target_env: Optional[Dict[str, str]] = None) -> int:
+    """Populate missing process env vars from .env-style mapping.
+
+    Existing environment values are never overwritten.
+    Returns the number of keys applied.
+    """
+    target = target_env if target_env is not None else os.environ  # type: ignore[assignment]
+    applied = 0
+    for raw_key, raw_value in (env_file or {}).items():
+        key = str(raw_key or "").strip()
+        if not key:
+            continue
+        if key in target and str(target.get(key) or "").strip():
+            continue
+        target[key] = str(raw_value or "")
+        applied += 1
+    return applied
+
+
 def parse_allowlist(raw: Optional[str]) -> Optional[List[int]]:
     if not raw:
         return None

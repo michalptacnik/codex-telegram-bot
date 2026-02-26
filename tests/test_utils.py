@@ -2,7 +2,7 @@ import os
 import unittest
 
 from codex_telegram_bot.util import redact, chunk_text, redact_with_audit, _compiled_patterns
-from codex_telegram_bot.config import parse_allowlist
+from codex_telegram_bot.config import apply_env_defaults, parse_allowlist
 
 
 class TestRedaction(unittest.TestCase):
@@ -40,6 +40,19 @@ class TestAllowlist(unittest.TestCase):
     def test_parse_allowlist(self):
         raw = "123, 456,abc, ,789"
         self.assertEqual(parse_allowlist(raw), [123, 456, 789])
+
+
+class TestConfigEnvDefaults(unittest.TestCase):
+    def test_apply_env_defaults_sets_missing_only(self):
+        target = {"EXISTING": "keep"}
+        applied = apply_env_defaults(
+            {"EXISTING": "replace", "NEW_VALUE": "x", "EMPTY": ""},
+            target_env=target,
+        )
+        self.assertEqual(applied, 2)
+        self.assertEqual(target["EXISTING"], "keep")
+        self.assertEqual(target["NEW_VALUE"], "x")
+        self.assertEqual(target["EMPTY"], "")
 
 
 if __name__ == "__main__":

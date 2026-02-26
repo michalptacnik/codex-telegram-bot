@@ -55,3 +55,16 @@ class TestToolRegistry(unittest.TestCase):
         with patch.dict("os.environ", {"ENABLE_EMAIL_TOOL": "1"}, clear=True):
             registry = build_default_tool_registry()
             self.assertIsNotNone(registry.get("send_email_smtp"))
+
+    def test_email_tool_enabled_when_smtp_env_present(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "SMTP_HOST": "smtp.example.com",
+                "SMTP_USER": "bot@example.com",
+                "SMTP_APP_PASSWORD": "app-password",
+            },
+            clear=True,
+        ):
+            registry = build_default_tool_registry()
+            self.assertIsNotNone(registry.get("send_email_smtp"))
