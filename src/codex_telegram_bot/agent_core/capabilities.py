@@ -33,7 +33,6 @@ class MarkdownCapabilityRegistry:
             "shell_exec": "shell",
             "exec": "shell",
             "ssh_detect": "ssh_vps",
-            "headless_chromium": "web_browser",
             "send_email_smtp": "email",
             "send_email": "email",
             "provider_status": "provider_model",
@@ -66,13 +65,6 @@ class MarkdownCapabilityRegistry:
                 (
                     "Use SSH connectivity checks before remote-changing operations.",
                     "Surface missing key/agent prerequisites only when they block progress.",
-                ),
-            ),
-            "web_browser": (
-                "Web browser capability",
-                (
-                    "Use `!tool` headless_chromium for webpage fetches that need rendered DOM.",
-                    "Keep page captures targeted and summarize relevant findings only.",
                 ),
             ),
             "email": (

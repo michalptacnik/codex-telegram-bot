@@ -20,7 +20,6 @@ DEFAULT_AGENT_TOOLCHAIN_COMMANDS: tuple[str, ...] = (
     "tar",
     "rsync",
     "ssh",
-    "chromium|chromium-browser|google-chrome",
 )
 
 _APT_PACKAGE_BY_COMMAND: Dict[str, str] = {
@@ -38,8 +37,6 @@ _APT_PACKAGE_BY_COMMAND: Dict[str, str] = {
     "tar": "tar",
     "rsync": "rsync",
     "ssh": "openssh-client",
-    "chromium": "chromium-browser",
-    "chromium-browser": "chromium-browser",
 }
 
 
@@ -96,3 +93,4 @@ def agent_toolchain_status(env: Mapping[str, str] | None = None) -> Dict[str, ob
         "missing_packages_hint": packages,
         "ready": len(missing) == 0,
     }
+

@@ -11,7 +11,6 @@ class TestToolchain(unittest.TestCase):
         required = required_agent_toolchain_commands(env={})
         self.assertIn("python3", required)
         self.assertIn("fd|fdfind", required)
-        self.assertIn("chromium|chromium-browser|google-chrome", required)
 
     def test_required_commands_reads_env_override(self):
         required = required_agent_toolchain_commands(env={"AGENT_TOOLCHAIN_COMMANDS": "git, rg ,git, jq"})
@@ -34,3 +33,4 @@ class TestToolchain(unittest.TestCase):
         status = agent_toolchain_status(env={"AGENT_TOOLCHAIN_COMMANDS": "definitely_missing_binary"})
         self.assertFalse(status["ready"])
         self.assertEqual(status["missing"], ["definitely_missing_binary"])
+

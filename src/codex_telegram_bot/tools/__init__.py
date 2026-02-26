@@ -1,7 +1,6 @@
 import os
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRegistry, ToolRequest, ToolResult
-from codex_telegram_bot.tools.browser import HeadlessChromiumTool
 from codex_telegram_bot.tools.email import (
     SendEmailSmtpTool,
     SendEmailTool,
@@ -37,7 +36,6 @@ def build_default_tool_registry(provider_registry=None) -> ToolRegistry:
     registry.register(GitCommitTool())
     registry.register(ShellExecTool())
     registry.register(SshDetectionTool())
-    registry.register(HeadlessChromiumTool())
     if email_tool_enabled(os.environ):
         registry.register(SendEmailSmtpTool())
     if is_email_tool_enabled(os.environ):
@@ -53,7 +51,6 @@ __all__ = [
     "ToolRegistry",
     "ToolRequest",
     "ToolResult",
-    "HeadlessChromiumTool",
     "SendEmailSmtpTool",
     "SendEmailTool",
     "email_tool_enabled",

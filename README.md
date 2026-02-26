@@ -26,7 +26,6 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
-  - Includes `headless_chromium` tool for real webpage fetch/render tasks (requires local Chromium/Chrome binary)
 - Multi-provider architecture:
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing
@@ -216,7 +215,6 @@ Environment variables override `.env`:
 - `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, enables `send_email_smtp`; auto-enabled when `SMTP_HOST`, `SMTP_USER`, and `SMTP_APP_PASSWORD` are present)
 - Email sends are always approval-gated when the SMTP tool is enabled
 - `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)
-- Install `chromium` / `chromium-browser` / `google-chrome` to enable the `headless_chromium` tool at runtime
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)

@@ -1,12 +1,10 @@
 import tempfile
 import unittest
-import subprocess
 from unittest.mock import patch
 from pathlib import Path
 
 from codex_telegram_bot.tools import build_default_tool_registry
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
-from codex_telegram_bot.tools.browser import HeadlessChromiumTool
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
 
 
@@ -77,7 +75,6 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
         self.assertIn("git_status", names)
-        self.assertIn("headless_chromium", names)
 
     def test_email_tool_disabled_by_default(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -88,55 +85,6 @@ class TestToolRegistry(unittest.TestCase):
         with patch.dict("os.environ", {"ENABLE_EMAIL_TOOL": "1"}, clear=True):
             registry = build_default_tool_registry()
             self.assertIsNotNone(registry.get("send_email_smtp"))
-
-
-class TestHeadlessChromiumTool(unittest.TestCase):
-    def test_requires_url(self):
-        tool = HeadlessChromiumTool()
-        with tempfile.TemporaryDirectory() as tmp:
-            res = tool.run(ToolRequest(name="headless_chromium", args={}), ToolContext(workspace_root=Path(tmp)))
-        self.assertFalse(res.ok)
-        self.assertIn("missing required arg 'url'", res.output)
-
-    def test_requires_http_or_https_url(self):
-        tool = HeadlessChromiumTool()
-        with tempfile.TemporaryDirectory() as tmp:
-            res = tool.run(
-                ToolRequest(name="headless_chromium", args={"url": "file:///tmp/x.html"}),
-                ToolContext(workspace_root=Path(tmp)),
-            )
-        self.assertFalse(res.ok)
-        self.assertIn("http(s)", res.output)
-
-    @patch("codex_telegram_bot.tools.browser.shutil.which", return_value=None)
-    def test_reports_missing_binary(self, _which):
-        tool = HeadlessChromiumTool()
-        with tempfile.TemporaryDirectory() as tmp:
-            res = tool.run(
-                ToolRequest(name="headless_chromium", args={"url": "https://example.com"}),
-                ToolContext(workspace_root=Path(tmp)),
-            )
-        self.assertFalse(res.ok)
-        self.assertIn("no Chromium binary found", res.output)
-
-    @patch("codex_telegram_bot.tools.browser.shutil.which", return_value="/usr/bin/chromium")
-    @patch("codex_telegram_bot.tools.browser.subprocess.run")
-    def test_fetches_dom_on_success(self, mocked_run, _which):
-        mocked_run.return_value = subprocess.CompletedProcess(
-            args=["chromium"],
-            returncode=0,
-            stdout="<html><head><title>Example</title></head><body>Hello</body></html>",
-            stderr="",
-        )
-        tool = HeadlessChromiumTool()
-        with tempfile.TemporaryDirectory() as tmp:
-            res = tool.run(
-                ToolRequest(name="headless_chromium", args={"url": "https://example.com"}),
-                ToolContext(workspace_root=Path(tmp)),
-            )
-        self.assertTrue(res.ok)
-        self.assertIn("Fetched: https://example.com", res.output)
-        self.assertIn("Title: Example", res.output)
 
     def test_email_tool_enabled_when_smtp_env_present(self):
         with patch.dict(
