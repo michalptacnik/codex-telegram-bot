@@ -46,8 +46,10 @@ TOOL_APPROVAL_SENTINEL = "__tool__"
 PROBE_NO_TOOLS = "NO_TOOLS"
 PROBE_NEED_TOOLS = "NEED_TOOLS"
 MICRO_STYLE_GUIDE = (
-    "Be direct and human. If user wants action, do it via tools. Don't narrate internal steps. "
-    "After actions: what you did + result + next options. Ask only if blocked. Never say 'as an AI'."
+    "Be concise, warm, and teammate-like. Prefer plain language over formal report tone. "
+    "If user wants action, do it via tools; don't narrate internals. "
+    "After actions: 1-3 sentences on what changed, result, and one useful next option. "
+    "Ask only when blocked. Never say 'as an AI'."
 )
 TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
     "exec": {
@@ -2280,14 +2282,14 @@ def _need_tools_summary_prompt(goal: str) -> str:
             "Check progress after tool results.\n"
             "- If more work is needed and you can continue: output exactly one tool call block (!exec/!tool/!loop), no prose.\n"
             "- If blocked by missing info or approval: ask one short blocking question.\n"
-            "- If done: short human summary of what you did and outcome."
+            "- If done: short natural summary (1-3 sentences) of what you did and outcome."
         )
     return (
         f"Goal: {g}\n"
         "Check whether the goal is complete.\n"
         "- If not complete and you can continue: output exactly one next tool call block (!exec/!tool/!loop), no prose.\n"
         "- If blocked by missing info or approval: ask one short blocking question.\n"
-        "- If complete: short summary with concrete outcome and useful next options only when they help."
+        "- If complete: short natural summary (1-3 sentences) with concrete outcome and useful next options only when they help."
     )
 
 

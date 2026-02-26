@@ -992,7 +992,7 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         "steps_total": 0,
         "started_at": asyncio.get_running_loop().time(),
     }
-    status_msg = await update.message.reply_text("Running: received prompt, preparing execution...")
+    status_msg = await update.message.reply_text("On it — preparing execution...")
 
     async def set_status(text_value: str) -> None:
         try:
@@ -1004,28 +1004,26 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         event = update_payload.get("event", "")
         if event == "loop.started":
             run_state[update.effective_chat.id]["steps_total"] = int(update_payload.get("steps_total", 0) or 0)
-            await set_status(f"Running: tool loop started ({update_payload.get('steps_total', 0)} step(s))...")
+            await set_status(f"Working on it: started {update_payload.get('steps_total', 0)} step(s).")
         elif event == "loop.autoplan.started":
-            await set_status("Running: planning tool actions from model...")
+            await set_status("Planning the next concrete actions...")
         elif event == "loop.autoplan.ready":
             run_state[update.effective_chat.id]["steps_total"] = int(update_payload.get("steps_total", 0) or 0)
-            await set_status(
-                f"Running: planner prepared {update_payload.get('steps_total', 0)} executable step(s)..."
-            )
+            await set_status(f"Plan ready: {update_payload.get('steps_total', 0)} executable step(s).")
         elif event == "loop.autoplan.none":
-            await set_status("Running: no tool actions needed, answering directly...")
+            await set_status("No tool steps needed; drafting the answer.")
         elif event == "skills.activated":
             skills = ", ".join([str(x) for x in list(update_payload.get("skills") or [])][:4])
-            await set_status(f"Running: activated skill(s): {skills or 'n/a'}")
+            await set_status(f"Using skill(s): {skills or 'n/a'}")
         elif event == "skills.deactivated":
             skills = ", ".join([str(x) for x in list(update_payload.get("skills") or [])][:4])
-            await set_status(f"Running: deactivated skill(s): {skills or 'n/a'}")
+            await set_status(f"Finished with skill(s): {skills or 'n/a'}")
         elif event == "loop.step.started":
             run_state[update.effective_chat.id]["active_step"] = int(update_payload.get("step", 0) or 0)
-            await set_status(f"Running: step {update_payload.get('step')} -> {update_payload.get('command', '')[:120]}")
+            await set_status(f"Step {update_payload.get('step')}: {update_payload.get('command', '')[:120]}")
         elif event == "loop.step.awaiting_approval":
             approval_id = str(update_payload.get("approval_id", ""))
-            await set_status(f"Running paused: awaiting approval `{approval_id[:8]}`")
+            await set_status(f"Paused: waiting for approval `{approval_id[:8]}`.")
             agent_service_local = context.bot_data.get("agent_service")
             pending = agent_service_local.list_pending_tool_approvals(
                 chat_id=update.effective_chat.id,
@@ -1043,16 +1041,16 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                 )
         elif event == "model.job.queued":
             active_jobs[update.effective_chat.id] = update_payload.get("job_id", "")
-            await set_status(f"Running: model job queued `{str(update_payload.get('job_id', ''))[:8]}`...")
+            await set_status(f"Model job queued `{str(update_payload.get('job_id', ''))[:8]}`.")
         elif event == "model.job.heartbeat":
             phase = str(update_payload.get("phase", "") or "processing")
             elapsed = int(update_payload.get("elapsed_sec", 0) or 0)
             jid = str(update_payload.get("job_id", "") or "")
             await set_status(
-                f"Running: {phase} ({elapsed}s elapsed), job `{jid[:8]}`..."
+                f"Still working: {phase} ({elapsed}s), job `{jid[:8]}`."
             )
         elif event == "loop.finished":
-            await set_status("Running: tool loop finished, finalizing response...")
+            await set_status("Finishing up and preparing the response.")
 
     async def heartbeat() -> None:
         chat_id = update.effective_chat.id
@@ -1069,11 +1067,11 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             total_steps = int(state.get("steps_total", 0) or 0)
             job_id = str(active_jobs.get(chat_id, "") or "")
             if total_steps > 0:
-                msg = f"Running: still working ({elapsed}s elapsed), step {active_step}/{total_steps}..."
+                msg = f"Still working: step {active_step}/{total_steps} ({elapsed}s)."
             elif job_id:
-                msg = f"Running: model job `{job_id[:8]}` in progress ({elapsed}s elapsed)..."
+                msg = f"Still working: model job `{job_id[:8]}` ({elapsed}s)."
             else:
-                msg = f"Running: still processing ({elapsed}s elapsed)..."
+                msg = f"Still processing ({elapsed}s)."
             await set_status(msg)
             if now - last_push >= STATUS_HEARTBEAT_PUSH_SEC:
                 try:
@@ -1113,7 +1111,7 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     if not output:
         output = "(no output)"
 
-    await set_status("Completed. Cleaning up status message...")
+    await set_status("Done — sending response.")
     asyncio.create_task(
         _delete_message_later(
             bot=context.bot,
