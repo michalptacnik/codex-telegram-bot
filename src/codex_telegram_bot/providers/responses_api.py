@@ -178,6 +178,75 @@ class ResponsesApiProvider:
             return {"text": f"Error: {exc}", "tool_calls": []}
 
     # ------------------------------------------------------------------
+    # Structured tool-calling loop (Issue #102)
+    # ------------------------------------------------------------------
+
+    async def run_tool_loop(
+        self,
+        messages: Sequence[Dict[str, str]],
+        tool_schemas: List[Dict[str, Any]],
+        tool_executor: Any = None,
+        max_iterations: int = 10,
+        correlation_id: str = "",
+    ) -> Dict[str, Any]:
+        """Execute a structured tool-calling loop.
+
+        Iteratively calls the model, executes any returned tool calls via
+        ``tool_executor(name, args) -> str``, feeds results back, and
+        repeats until the model produces a final text response or the
+        iteration limit is reached.
+
+        Returns ``{"text": str, "tool_calls_log": list, "iterations": int}``.
+        """
+        if not self._api_key:
+            return {"text": "Error: OPENAI_API_KEY not configured.", "tool_calls_log": [], "iterations": 0}
+        if not _HTTPX_AVAILABLE:
+            return {"text": "Error: httpx not installed.", "tool_calls_log": [], "iterations": 0}
+
+        conversation = list(messages)
+        all_tool_calls: List[Dict[str, Any]] = []
+
+        for iteration in range(max_iterations):
+            log_json(logger, "tool_loop.iteration", provider="responses_api",
+                     run_id=correlation_id, iteration=iteration)
+            result = await self.generate_with_tools(
+                messages=conversation,
+                tool_schemas=tool_schemas,
+                correlation_id=correlation_id,
+            )
+            calls = result.get("tool_calls") or []
+            text = result.get("text") or ""
+
+            if not calls:
+                return {"text": text, "tool_calls_log": all_tool_calls, "iterations": iteration + 1}
+
+            for call in calls:
+                all_tool_calls.append(call)
+                call_name = call.get("name", "")
+                call_args = call.get("args", {})
+                call_id = call.get("call_id", "")
+
+                if tool_executor is not None:
+                    try:
+                        tool_output = tool_executor(call_name, call_args)
+                    except Exception as exc:
+                        tool_output = f"Error: {exc}"
+                else:
+                    tool_output = f"Tool '{call_name}' executed (no executor configured)."
+
+                conversation.append({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": str(tool_output)[:4000],
+                })
+
+        return {
+            "text": result.get("text", "") if 'result' in dir() else "",
+            "tool_calls_log": all_tool_calls,
+            "iterations": max_iterations,
+        }
+
+    # ------------------------------------------------------------------
     # Internal HTTP helpers
     # ------------------------------------------------------------------
 
@@ -236,6 +305,28 @@ def _extract_responses_text(data: Dict[str, Any]) -> str:
             if t:
                 texts.append(t)
     return "\n".join(texts).strip()
+
+
+def tool_schemas_from_registry(tool_registry: Any) -> List[Dict[str, Any]]:
+    """Convert a ToolRegistry into Responses API function tool schemas."""
+    schemas: List[Dict[str, Any]] = []
+    for name in (tool_registry.names() if tool_registry else []):
+        tool = tool_registry.get(name)
+        if not tool:
+            continue
+        doc = getattr(tool, "description", "") or getattr(tool, "__doc__", "") or ""
+        description = doc.strip().split("\n")[0][:200] if doc else name
+        schemas.append({
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            },
+        })
+    return schemas
 
 
 def _extract_responses_tool_calls(data: Dict[str, Any]) -> List[Dict[str, Any]]:
