@@ -25,7 +25,10 @@ from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.mcp_bridge import McpBridge, _mcp_enabled
 from codex_telegram_bot.services.skill_manager import SkillManager
+from codex_telegram_bot.services.skill_pack import SkillPackLoader
+from codex_telegram_bot.services.tool_policy import ToolPolicyEngine
 from codex_telegram_bot.services.toolchain import agent_toolchain_status
 from codex_telegram_bot.tools import build_default_tool_registry
 
@@ -75,7 +78,27 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         else ((state_db_path.parent if state_db_path else (Path.home() / ".config" / "codex-telegram-bot")).expanduser().resolve())
     )
     skill_manager = SkillManager(config_dir=resolved_config_dir)
-    tool_registry = build_default_tool_registry(provider_registry=provider_registry)
+
+    # MCP bridge (Issue #103)
+    mcp_bridge: Optional[McpBridge] = None
+    if _mcp_enabled():
+        mcp_bridge = McpBridge(workspace_root=workspace_root)
+
+    # Skill pack loader (Issue #104)
+    skill_pack_loader = SkillPackLoader(
+        bundled_dir=workspace_root / "skills" / "bundled",
+        global_dir=resolved_config_dir / "skills" / "packs",
+        workspace_dir=workspace_root / ".skills",
+    )
+
+    # Tool policy engine (Issue #107)
+    tool_policy_engine = ToolPolicyEngine()
+
+    # Build tool registry with optional run_store (passed later for db-backed path)
+    tool_registry = build_default_tool_registry(
+        provider_registry=provider_registry,
+        mcp_bridge=mcp_bridge,
+    )
     probe_loop: Optional[ProbeLoop] = None
     if (os.environ.get("ENABLE_PROBE_LOOP") or "").strip().lower() in {"1", "true", "yes", "on"}:
         probe_loop = ProbeLoop(provider=provider, tool_registry=tool_registry)
@@ -99,6 +122,9 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         access_controller=access_controller,
         capability_router=capability_router,
         skill_manager=skill_manager,
+        mcp_bridge=mcp_bridge,
+        skill_pack_loader=skill_pack_loader,
+        tool_policy_engine=tool_policy_engine,
     )
 
     if state_db_path is None:

@@ -140,6 +140,54 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"name": "string (required)"},
     },
+    # Session tools (Issue #105)
+    "sessions_list": {
+        "name": "sessions_list",
+        "protocol": "!tool",
+        "args": {"chat_id": "int (required)", "user_id": "int (required)"},
+    },
+    "sessions_history": {
+        "name": "sessions_history",
+        "protocol": "!tool",
+        "args": {"session_id": "string (required)", "chat_id": "int", "user_id": "int", "limit": "int (optional)"},
+    },
+    "sessions_send": {
+        "name": "sessions_send",
+        "protocol": "!tool",
+        "args": {"session_id": "string (required)", "content": "string (required)", "chat_id": "int", "user_id": "int"},
+    },
+    "sessions_spawn": {
+        "name": "sessions_spawn",
+        "protocol": "!tool",
+        "args": {"chat_id": "int (required)", "user_id": "int (required)", "summary": "string (optional)"},
+    },
+    "session_status": {
+        "name": "session_status",
+        "protocol": "!tool",
+        "args": {"session_id": "string (required)", "chat_id": "int", "user_id": "int"},
+    },
+    # Memory tools (Issue #106)
+    "memory_get": {
+        "name": "memory_get",
+        "protocol": "!tool",
+        "args": {"path": "string (required)", "startLine": "int (optional)", "endLine": "int (optional)"},
+    },
+    "memory_search": {
+        "name": "memory_search",
+        "protocol": "!tool",
+        "args": {"query": "string (required)", "k": "int (optional)"},
+    },
+    # MCP tools (Issue #103)
+    "mcp_search": {
+        "name": "mcp_search",
+        "protocol": "!tool",
+        "args": {"query": "string (required)", "k": "int (optional)"},
+    },
+    "mcp_call": {
+        "name": "mcp_call",
+        "protocol": "!tool",
+        "args": {"tool_id": "string (required)", "args": "object (optional)"},
+    },
 }
 APPROVAL_REQUIRED_TOOLS = {"send_email_smtp", "send_email"}
 
@@ -194,6 +242,10 @@ class AgentService:
         capability_router: Optional[CapabilityRouter] = None,
         provider_registry: Optional[Any] = None,
         skill_manager: Optional[Any] = None,
+        # OpenClaw parity services (Issue #100 epic)
+        mcp_bridge: Optional[Any] = None,
+        skill_pack_loader: Optional[Any] = None,
+        tool_policy_engine: Optional[Any] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -222,6 +274,10 @@ class AgentService:
         self._retention_policy = retention_policy
         self._capability_router = capability_router
         self._skill_manager = skill_manager
+        # OpenClaw parity services (Issue #100 epic)
+        self._mcp_bridge = mcp_bridge
+        self._skill_pack_loader = skill_pack_loader
+        self._tool_policy_engine = tool_policy_engine
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)

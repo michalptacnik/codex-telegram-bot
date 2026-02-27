@@ -286,6 +286,7 @@ Versioning and provenance details:
 - `docs/local_api_v1.md`
 - `docs/plugin_manifest.md`
 - `docs/plugin_lifecycle.md`
+- `docs/parity_matrix_openclaw.md`
 
 Bootstrap behavior:
 
