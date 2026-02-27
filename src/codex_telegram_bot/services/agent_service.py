@@ -321,6 +321,206 @@ class AgentService:
             get_agent_concurrency=self._agent_max_concurrency,
         )
 
+    # ------------------------------------------------------------------
+    # Native function-calling agentic loop
+    # ------------------------------------------------------------------
+    _NATIVE_LOOP_MAX_TURNS = 15
+    _TOOL_RESULT_MAX_CHARS = 4000
+
+    def _supports_native_tool_loop(self, provider: Any) -> bool:
+        """Check if the given provider supports native function calling."""
+        return callable(getattr(provider, "generate_with_tools", None))
+
+    async def run_native_tool_loop(
+        self,
+        user_message: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> str:
+        """Run the native function-calling agentic loop.
+
+        Uses the provider's ``generate_with_tools()`` method so the LLM returns
+        structured ``tool_use`` content blocks instead of printing tool syntax
+        as text.  The loop executes tools and feeds results back until the model
+        returns only text (the final reply).
+        """
+        provider = self._provider_for_agent(agent_id=agent_id)
+        if not self._supports_native_tool_loop(provider):
+            # Fall back to the legacy text-parsing loop.
+            return await self.run_prompt_with_tool_loop(
+                prompt=user_message,
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                progress_callback=progress_callback,
+            )
+
+        self.initialize_session_workspace(session_id=session_id)
+        workspace_root = self.session_workspace(session_id=session_id)
+        policy_profile = self._agent_policy_profile(agent_id=agent_id)
+
+        # Build tool schemas from registry
+        tool_schemas = self._tool_registry.tool_schemas()
+        if not tool_schemas:
+            # No native schemas available — fall back to legacy
+            return await self.run_prompt_with_tool_loop(
+                prompt=user_message,
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                progress_callback=progress_callback,
+            )
+
+        # Build system prompt (lean: personality + context only)
+        system_lines = [MICRO_STYLE_GUIDE]
+        system_prompt = "\n".join(system_lines)
+
+        # Build conversation messages from session history
+        messages: List[Dict[str, Any]] = []
+        if self._run_store:
+            history = self.list_session_messages(session_id=session_id, limit=20)
+            for msg in history:
+                if msg.role == "user":
+                    messages.append({"role": "user", "content": msg.content})
+                elif msg.role == "assistant":
+                    # Skip internal traces
+                    if not _is_internal_assistant_trace(msg.content):
+                        messages.append({"role": "assistant", "content": msg.content})
+        messages.append({"role": "user", "content": user_message})
+
+        await self._notify_progress(
+            progress_callback,
+            {"event": "native_loop.started", "agent_id": agent_id, "tool_count": len(tool_schemas)},
+        )
+
+        max_turns = min(
+            self._NATIVE_LOOP_MAX_TURNS,
+            max(3, self._tool_loop_max_steps * 3),
+        )
+
+        for turn in range(max_turns):
+            await self._notify_progress(
+                progress_callback,
+                {"event": "native_loop.turn", "turn": turn + 1, "max_turns": max_turns},
+            )
+
+            response = await provider.generate_with_tools(
+                messages=messages,
+                tools=tool_schemas,
+                system=system_prompt,
+            )
+
+            content_blocks = response.get("content") or []
+            text_blocks = []
+            tool_calls = []
+
+            for block in content_blocks:
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text":
+                    text_blocks.append(block.get("text", ""))
+                elif block.get("type") == "tool_use":
+                    tool_calls.append(block)
+
+            # If no tool calls, we have the final reply
+            if not tool_calls:
+                final_reply = "\n".join(text_blocks).strip()
+                if not final_reply:
+                    final_reply = "(No response from model.)"
+                await self._notify_progress(
+                    progress_callback,
+                    {"event": "native_loop.finished", "turns": turn + 1},
+                )
+                return final_reply
+
+            # Add assistant message with tool calls to conversation
+            messages.append({"role": "assistant", "content": content_blocks})
+
+            # Execute each tool and collect results
+            tool_results: List[Dict[str, Any]] = []
+            for call in tool_calls:
+                tool_name = call.get("name", "")
+                tool_input = call.get("input", {})
+                tool_use_id = call.get("id", "")
+
+                await self._notify_progress(
+                    progress_callback,
+                    {
+                        "event": "native_loop.tool_call",
+                        "turn": turn + 1,
+                        "tool_name": tool_name,
+                        "tool_use_id": tool_use_id,
+                    },
+                )
+
+                # Check if approval is required
+                if self._tool_action_requires_approval(tool_name):
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use_id,
+                        "content": f"Error: tool '{tool_name}' requires approval. Use /approve to grant permission.",
+                        "is_error": True,
+                    })
+                    continue
+
+                action_id = "tool-" + uuid.uuid4().hex[:8]
+                result = await self._execute_registered_tool_action(
+                    action_id=action_id,
+                    tool_name=tool_name,
+                    tool_args=dict(tool_input or {}),
+                    workspace_root=workspace_root,
+                    policy_profile=policy_profile,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+
+                # Truncate large results
+                result_text = (result.output or "")
+                if len(result_text) > self._TOOL_RESULT_MAX_CHARS:
+                    result_text = result_text[:self._TOOL_RESULT_MAX_CHARS] + "\n(output truncated)"
+
+                log_json(
+                    logger,
+                    "native_loop.tool.executed",
+                    session_id=session_id,
+                    action_id=action_id,
+                    tool_name=tool_name,
+                    tool_use_id=tool_use_id,
+                    ok=result.ok,
+                    output_len=len(result_text),
+                )
+
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": result_text,
+                    "is_error": not result.ok,
+                })
+
+                self.append_session_assistant_message(
+                    session_id=session_id,
+                    content=f"tool.action.completed action_id={action_id} rc={0 if result.ok else 1}",
+                )
+
+            # Feed tool results back as a user message for the next turn
+            messages.append({"role": "user", "content": tool_results})
+
+        # Exceeded max turns — return what we have
+        final_text = "\n".join(text_blocks).strip() if text_blocks else ""
+        if not final_text:
+            final_text = "I've reached the maximum number of tool execution steps. Here's what I've done so far — please let me know if you'd like me to continue."
+        await self._notify_progress(
+            progress_callback,
+            {"event": "native_loop.max_turns_reached", "turns": max_turns},
+        )
+        return final_text
+
     async def run_prompt(self, prompt: str, agent_id: str = "default") -> str:
         job_id = await self.queue_prompt(prompt=prompt, agent_id=agent_id)
         return await self._scheduler.wait_result(job_id)
