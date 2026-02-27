@@ -31,6 +31,7 @@ class AgentScheduler:
         self._agent_semaphores: Dict[str, asyncio.Semaphore] = {}
         self._counter = itertools.count()
         self._dispatcher_task: Optional[asyncio.Task] = None
+        self._job_tasks: set[asyncio.Task] = set()
         self._started = False
 
     def _ensure_started(self) -> None:
@@ -42,12 +43,15 @@ class AgentScheduler:
 
     async def shutdown(self) -> None:
         if self._dispatcher_task is None:
+            if self._job_tasks:
+                await self._shutdown_jobs()
             return
         self._dispatcher_task.cancel()
         try:
             await self._dispatcher_task
         except asyncio.CancelledError:
             pass
+        await self._shutdown_jobs()
         self._dispatcher_task = None
         self._started = False
 
@@ -90,15 +94,20 @@ class AgentScheduler:
         return True
 
     async def _dispatcher(self) -> None:
-        while True:
-            _, _, job_id = await self._queue.get()
-            job = self._jobs.get(job_id)
-            fut = self._futures.get(job_id)
-            if not job or not fut or fut.done() or job.cancelled:
+        try:
+            while True:
+                _, _, job_id = await self._queue.get()
+                job = self._jobs.get(job_id)
+                fut = self._futures.get(job_id)
+                if not job or not fut or fut.done() or job.cancelled:
+                    self._queue.task_done()
+                    continue
+                task = asyncio.create_task(self._run_job(job, fut), name=f"agent-job-{job_id}")
+                self._job_tasks.add(task)
+                task.add_done_callback(self._job_tasks.discard)
                 self._queue.task_done()
-                continue
-            asyncio.create_task(self._run_job(job, fut), name=f"agent-job-{job_id}")
-            self._queue.task_done()
+        except asyncio.CancelledError:
+            raise
 
     async def _run_job(self, job: _Job, fut: asyncio.Future[str]) -> None:
         sem = self._semaphore_for_agent(job.agent_id)
@@ -123,3 +132,12 @@ class AgentScheduler:
             current = asyncio.Semaphore(desired)
             self._agent_semaphores[agent_id] = current
         return current
+
+    async def _shutdown_jobs(self) -> None:
+        if not self._job_tasks:
+            return
+        pending = list(self._job_tasks)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        self._job_tasks.clear()

@@ -24,6 +24,7 @@ import os
 from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
 from codex_telegram_bot.observability.structured_log import log_json
+from codex_telegram_bot.providers.transport import build_httpx_client, post_json_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +79,9 @@ class AnthropicProvider:
         self._model: str = model or os.environ.get("ANTHROPIC_MODEL") or _DEFAULT_MODEL
         self._max_tokens: int = max_tokens or _env_int("ANTHROPIC_MAX_TOKENS", _DEFAULT_MAX_TOKENS)
         self._timeout_sec: int = timeout_sec or _env_int("ANTHROPIC_TIMEOUT_SEC", _DEFAULT_TIMEOUT_SEC)
+        self._connect_timeout_sec: float = float(_env_int("ANTHROPIC_CONNECT_TIMEOUT_SEC", 15))
+        self._read_timeout_sec: float = float(_env_int("ANTHROPIC_READ_TIMEOUT_SEC", self._timeout_sec))
+        self._http_retries: int = _env_int("ANTHROPIC_HTTP_RETRIES", 3)
         self._sdk_client: Any = None
         self._http_client: Any = None
 
@@ -223,8 +227,12 @@ class AnthropicProvider:
         }
         if system:
             payload["system"] = system
-        response = await client.post("/v1/messages", json=payload)
-        response.raise_for_status()
+        response = await post_json_with_retries(
+            client,
+            path="/v1/messages",
+            payload=payload,
+            attempts=self._http_retries,
+        )
         data = response.json()
         return _extract_httpx_full_response(data)
 
@@ -324,14 +332,15 @@ class AnthropicProvider:
 
     def _get_http_client(self) -> Any:
         if self._http_client is None:
-            self._http_client = _httpx.AsyncClient(
+            self._http_client = build_httpx_client(
                 base_url="https://api.anthropic.com",
                 headers={
                     "x-api-key": self._api_key,
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
-                timeout=float(self._timeout_sec),
+                connect_timeout_sec=self._connect_timeout_sec,
+                read_timeout_sec=self._read_timeout_sec,
             )
         return self._http_client
 
@@ -342,8 +351,12 @@ class AnthropicProvider:
             "max_tokens": self._max_tokens,
             "messages": list(messages),
         }
-        response = await client.post("/v1/messages", json=payload)
-        response.raise_for_status()
+        response = await post_json_with_retries(
+            client,
+            path="/v1/messages",
+            payload=payload,
+            attempts=self._http_retries,
+        )
         data = response.json()
         return _extract_httpx_text(data)
 
