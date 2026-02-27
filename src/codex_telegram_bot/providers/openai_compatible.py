@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import random
+import time
 from typing import Any, Dict, List, Optional, Sequence
 from urllib import error, request
 
@@ -69,6 +71,7 @@ class OpenAICompatibleProvider:
             or default_base_url
         )
         self._timeout_sec = timeout_sec or _env_int(timeout_env or f"{provider_name.upper()}_TIMEOUT_SEC", 120)
+        self._http_retries = _env_int(f"{provider_name.upper()}_HTTP_RETRIES", 3)
 
     async def generate(
         self,
@@ -200,7 +203,7 @@ class OpenAICompatibleProvider:
         }
         try:
             data = await asyncio.to_thread(
-                self._send_request,
+                self._send_request_with_retries,
                 request.Request(
                     url=f"{self._base_url}/chat/completions",
                     data=json.dumps(payload).encode("utf-8"),
@@ -244,7 +247,7 @@ class OpenAICompatibleProvider:
         req = request.Request(url=url, data=body, headers=headers, method="POST")
 
         try:
-            data = await asyncio.to_thread(self._send_request, req)
+            data = await asyncio.to_thread(self._send_request_with_retries, req)
         except error.HTTPError as exc:
             detail = ""
             try:
@@ -263,6 +266,37 @@ class OpenAICompatibleProvider:
         if not isinstance(data, dict):
             return {}
         return data
+
+    def _send_request_with_retries(self, req: request.Request) -> Dict[str, Any]:
+        attempts = max(1, int(self._http_retries or 1))
+        last_exc: Exception | None = None
+        for idx in range(attempts):
+            try:
+                return self._send_request(req)
+            except Exception as exc:
+                last_exc = exc
+                if idx + 1 >= attempts or (not _is_transient_exception(exc)):
+                    raise
+                delay = min(8.0, 0.5 * (2 ** idx))
+                delay = delay * (0.8 + random.random() * 0.4)
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        return {}
+
+
+def _is_transient_exception(exc: Exception) -> bool:
+    if isinstance(exc, error.URLError):
+        return True
+    text = f"{type(exc).__name__} {exc}".lower()
+    transient_markers = [
+        "timed out",
+        "temporary failure",
+        "name or service not known",
+        "connection reset",
+        "readerror",
+    ]
+    return any(marker in text for marker in transient_markers)
 
 
 def _extract_completion_text(data: Dict[str, Any]) -> str:

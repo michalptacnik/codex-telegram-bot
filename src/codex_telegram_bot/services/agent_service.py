@@ -24,6 +24,18 @@ from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
+from codex_telegram_bot.runtime_contract import (
+    AssistantText as RuntimeAssistantText,
+    RuntimeError as RuntimeContractError,
+    ToolCall as RuntimeToolCall,
+    decode_provider_response,
+    decode_text_response,
+    to_telegram_text,
+)
+from codex_telegram_bot.services.capabilities_manifest import (
+    build_system_capabilities_chunk,
+    write_capabilities_manifest,
+)
 from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
@@ -32,6 +44,7 @@ from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
+from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
 from codex_telegram_bot.tools.email import email_tool_enabled
 
 logger = logging.getLogger(__name__)
@@ -46,6 +59,10 @@ MODEL_JOB_HEARTBEAT_SEC = 15
 AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
 AUTONOMOUS_PROTOCOL_MAX_DEPTH_ENV = "AUTONOMOUS_PROTOCOL_MAX_DEPTH"
 TOOL_APPROVAL_SENTINEL = "__tool__"
+SAFE_RUNTIME_ERROR_TEXT = (
+    "I could not safely decode the model output for this turn. "
+    "Please retry and I will continue."
+)
 PROBE_NO_TOOLS = "NO_TOOLS"
 PROBE_NEED_TOOLS = "NEED_TOOLS"
 MICRO_STYLE_GUIDE = (
@@ -296,6 +313,7 @@ class AgentService:
         self._session_workspaces_root.mkdir(parents=True, exist_ok=True)
         self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
         self._session_workspace_roots: Dict[str, str] = {}
+        self._runtime_registry_snapshots: Dict[str, ToolRegistrySnapshot] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry(provider_registry=provider_registry)
         self._capability_registry = capability_registry
@@ -340,16 +358,9 @@ class AgentService:
         agent_id: str = "default",
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> str:
-        """Run the native function-calling agentic loop.
-
-        Uses the provider's ``generate_with_tools()`` method so the LLM returns
-        structured ``tool_use`` content blocks instead of printing tool syntax
-        as text.  The loop executes tools and feeds results back until the model
-        returns only text (the final reply).
-        """
+        """Run the typed runtime loop with a strict contract boundary."""
         provider = self._provider_for_agent(agent_id=agent_id)
         if not self._supports_native_tool_loop(provider):
-            # Fall back to the legacy text-parsing loop.
             return await self.run_prompt_with_tool_loop(
                 prompt=user_message,
                 chat_id=chat_id,
@@ -362,11 +373,10 @@ class AgentService:
         self.initialize_session_workspace(session_id=session_id)
         workspace_root = self.session_workspace(session_id=session_id)
         policy_profile = self._agent_policy_profile(agent_id=agent_id)
-
-        # Build tool schemas from registry
-        tool_schemas = self._tool_registry.tool_schemas()
+        snapshot = self.runtime_tool_snapshot(session_id=session_id, refresh=True)
+        manifest_paths = write_capabilities_manifest(workspace_root=workspace_root, snapshot=snapshot)
+        tool_schemas = list(snapshot.schemas)
         if not tool_schemas:
-            # No native schemas available — fall back to legacy
             return await self.run_prompt_with_tool_loop(
                 prompt=user_message,
                 chat_id=chat_id,
@@ -376,11 +386,22 @@ class AgentService:
                 progress_callback=progress_callback,
             )
 
-        # Build system prompt (lean: personality + context only)
-        system_lines = [MICRO_STYLE_GUIDE]
+        system_lines = [
+            MICRO_STYLE_GUIDE,
+            build_system_capabilities_chunk(snapshot),
+            (
+                "Structured runtime contract:\n"
+                "- Emit assistant text as normal text blocks.\n"
+                "- Emit tool calls only via native tool_use blocks.\n"
+                "- Do not emit raw !tool/!exec protocol text."
+            ),
+            (
+                f"Capabilities files are available at: {manifest_paths['markdown_path']} "
+                f"and {manifest_paths['json_path']}"
+            ),
+        ]
         system_prompt = "\n".join(system_lines)
 
-        # Build conversation messages from session history
         messages: List[Dict[str, Any]] = []
         if self._run_store:
             history = self.list_session_messages(session_id=session_id, limit=20)
@@ -395,13 +416,22 @@ class AgentService:
 
         await self._notify_progress(
             progress_callback,
-            {"event": "native_loop.started", "agent_id": agent_id, "tool_count": len(tool_schemas)},
+            {
+                "event": "native_loop.started",
+                "agent_id": agent_id,
+                "tool_count": len(tool_schemas),
+                "repo_root": str(snapshot.invariants.repo_root),
+                "cwd": str(snapshot.invariants.cwd),
+                "is_git_repo": bool(snapshot.invariants.is_git_repo),
+            },
         )
 
         max_turns = min(
             self._NATIVE_LOOP_MAX_TURNS,
             max(3, self._tool_loop_max_steps * 3),
         )
+        decode_retry_budget = 1
+        text_accumulator: List[str] = []
 
         for turn in range(max_turns):
             await self._notify_progress(
@@ -409,44 +439,99 @@ class AgentService:
                 {"event": "native_loop.turn", "turn": turn + 1, "max_turns": max_turns},
             )
 
-            response = await provider.generate_with_tools(
-                messages=messages,
-                tools=tool_schemas,
-                system=system_prompt,
-            )
+            try:
+                response = await provider.generate_with_tools(
+                    messages=messages,
+                    tools=tool_schemas,
+                    system=system_prompt,
+                )
+            except TypeError:
+                # Compatibility path for providers still using ``tool_schemas`` arg.
+                response = await provider.generate_with_tools(
+                    messages=messages,
+                    tool_schemas=tool_schemas,
+                    correlation_id="",
+                )
 
-            content_blocks = response.get("content") or []
-            text_blocks = []
-            tool_calls = []
-
-            for block in content_blocks:
-                if not isinstance(block, dict):
+            events = decode_provider_response(response, allowed_tools=snapshot.names())
+            decode_error = next((ev for ev in events if isinstance(ev, RuntimeContractError)), None)
+            if decode_error is not None:
+                log_json(
+                    logger,
+                    "runtime.decode.failed",
+                    session_id=session_id,
+                    turn=turn + 1,
+                    kind=decode_error.kind,
+                    detail=decode_error.detail,
+                )
+                if decode_retry_budget > 0:
+                    decode_retry_budget -= 1
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous output violated the structured runtime contract. "
+                                "Retry and emit only valid native content blocks."
+                            ),
+                        }
+                    )
                     continue
-                if block.get("type") == "text":
-                    text_blocks.append(block.get("text", ""))
-                elif block.get("type") == "tool_use":
-                    tool_calls.append(block)
+                return SAFE_RUNTIME_ERROR_TEXT
 
-            # If no tool calls, we have the final reply
-            if not tool_calls:
-                final_reply = "\n".join(text_blocks).strip()
+            assistant_chunks = [e.content for e in events if isinstance(e, RuntimeAssistantText) and e.content.strip()]
+            text_contract_violation = False
+            for chunk in assistant_chunks:
+                parsed_text_events = decode_text_response(chunk, allowed_tools=snapshot.names())
+                if any(isinstance(item, (RuntimeToolCall, RuntimeContractError)) for item in parsed_text_events):
+                    text_contract_violation = True
+                    break
+            if text_contract_violation:
+                log_json(
+                    logger,
+                    "runtime.decode.failed",
+                    session_id=session_id,
+                    turn=turn + 1,
+                    kind="text_protocol_violation",
+                    detail="assistant text contained protocol bytes",
+                )
+                if decode_retry_budget > 0:
+                    decode_retry_budget -= 1
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Your previous text included raw tool protocol bytes. "
+                                "Retry with valid native content blocks only."
+                            ),
+                        }
+                    )
+                    continue
+                return SAFE_RUNTIME_ERROR_TEXT
+            if assistant_chunks:
+                text_accumulator.extend(assistant_chunks)
+            tool_calls = [e for e in events if isinstance(e, RuntimeToolCall)]
+
+            if not tool_calls and str(response.get("stop_reason") or "end_turn") != "tool_use":
+                final_reply = ("\n".join(assistant_chunks) or "\n".join(text_accumulator)).strip()
                 if not final_reply:
                     final_reply = "(No response from model.)"
-                await self._notify_progress(
-                    progress_callback,
-                    {"event": "native_loop.finished", "turns": turn + 1},
+                await self._notify_progress(progress_callback, {"event": "native_loop.finished", "turns": turn + 1})
+                return self.enforce_transport_text_contract(session_id=session_id, raw_output=final_reply)
+
+            assistant_payload_blocks: List[Dict[str, Any]] = []
+            for chunk in assistant_chunks:
+                assistant_payload_blocks.append({"type": "text", "text": chunk})
+            for tc in tool_calls:
+                assistant_payload_blocks.append(
+                    {"type": "tool_use", "id": tc.call_id, "name": tc.name, "input": dict(tc.args or {})}
                 )
-                return final_reply
+            messages.append({"role": "assistant", "content": assistant_payload_blocks})
 
-            # Add assistant message with tool calls to conversation
-            messages.append({"role": "assistant", "content": content_blocks})
-
-            # Execute each tool and collect results
             tool_results: List[Dict[str, Any]] = []
             for call in tool_calls:
-                tool_name = call.get("name", "")
-                tool_input = call.get("input", {})
-                tool_use_id = call.get("id", "")
+                tool_name = call.name
+                tool_input = dict(call.args or {})
+                tool_use_id = call.call_id
 
                 await self._notify_progress(
                     progress_callback,
@@ -475,6 +560,8 @@ class AgentService:
                     tool_args=dict(tool_input or {}),
                     workspace_root=workspace_root,
                     policy_profile=policy_profile,
+                    extra_tools=dict(snapshot.tools),
+                    allowed_tool_names=snapshot.names(),
                     chat_id=chat_id,
                     user_id=user_id,
                     session_id=session_id,
@@ -508,18 +595,19 @@ class AgentService:
                     content=f"tool.action.completed action_id={action_id} rc={0 if result.ok else 1}",
                 )
 
-            # Feed tool results back as a user message for the next turn
             messages.append({"role": "user", "content": tool_results})
 
-        # Exceeded max turns — return what we have
-        final_text = "\n".join(text_blocks).strip() if text_blocks else ""
+        final_text = "\n".join(text_accumulator).strip() if text_accumulator else ""
         if not final_text:
-            final_text = "I've reached the maximum number of tool execution steps. Here's what I've done so far — please let me know if you'd like me to continue."
+            final_text = (
+                "I've reached the maximum number of tool execution steps. "
+                "Please tell me whether to continue."
+            )
         await self._notify_progress(
             progress_callback,
             {"event": "native_loop.max_turns_reached", "turns": max_turns},
         )
-        return final_text
+        return self.enforce_transport_text_contract(session_id=session_id, raw_output=final_text)
 
     async def run_prompt(self, prompt: str, agent_id: str = "default") -> str:
         job_id = await self.queue_prompt(prompt=prompt, agent_id=agent_id)
@@ -539,6 +627,11 @@ class AgentService:
 
     async def shutdown(self) -> None:
         await self._scheduler.shutdown()
+        if self._process_manager is not None:
+            try:
+                self._process_manager.cleanup_sessions()
+            except Exception:
+                logger.exception("process manager shutdown cleanup failed")
 
     async def handoff_prompt(
         self,
@@ -784,7 +877,71 @@ class AgentService:
             previous_workspace_root=previous_root,
             ls=entries[:20],
         )
+        self._runtime_registry_snapshots.pop(session_id, None)
         return info
+
+    def runtime_tool_snapshot(
+        self,
+        session_id: str,
+        *,
+        extra_tools: Optional[Dict[str, Any]] = None,
+        refresh: bool = False,
+    ) -> ToolRegistrySnapshot:
+        if (not refresh) and session_id in self._runtime_registry_snapshots and not extra_tools:
+            return self._runtime_registry_snapshots[session_id]
+        workspace_root = self.session_workspace(session_id=session_id)
+        snapshot = build_runtime_tool_registry(
+            self._tool_registry,
+            workspace_root=workspace_root,
+            extra_tools=extra_tools,
+        )
+        if not extra_tools:
+            self._runtime_registry_snapshots[session_id] = snapshot
+            try:
+                write_capabilities_manifest(workspace_root=workspace_root, snapshot=snapshot)
+            except Exception:
+                logger.exception("failed to write capabilities manifest")
+        cache_key = f"{session_id}:workspace.invariants.logged"
+        if cache_key not in self._session_context_diagnostics:
+            self._session_context_diagnostics[cache_key] = {"logged": True}
+            log_json(
+                logger,
+                "workspace.invariants",
+                session_id=session_id,
+                repo_root=str(snapshot.invariants.repo_root),
+                cwd=str(snapshot.invariants.cwd),
+                is_git_repo=bool(snapshot.invariants.is_git_repo),
+                disabled_tools=dict(snapshot.disabled),
+            )
+        return snapshot
+
+    def enforce_transport_text_contract(
+        self,
+        *,
+        session_id: str,
+        raw_output: str,
+    ) -> str:
+        snapshot = self.runtime_tool_snapshot(session_id=session_id)
+        events = decode_text_response(raw_output, allowed_tools=snapshot.names())
+        if any(isinstance(event, RuntimeToolCall) for event in events):
+            log_json(
+                logger,
+                "runtime_contract.drop",
+                session_id=session_id,
+                reason="decoded_toolcall_at_transport_boundary",
+                preview=(raw_output or "")[:200],
+            )
+            return SAFE_RUNTIME_ERROR_TEXT
+        if any(isinstance(event, RuntimeContractError) for event in events):
+            log_json(
+                logger,
+                "runtime_contract.drop",
+                session_id=session_id,
+                reason="decode_error",
+                preview=(raw_output or "")[:200],
+            )
+            return SAFE_RUNTIME_ERROR_TEXT
+        return to_telegram_text(events, safe_fallback=SAFE_RUNTIME_ERROR_TEXT)
 
     def run_retention_sweep(self) -> Dict[str, Any]:
         """Run session retention policy sweep. Returns a summary dict."""
@@ -1095,13 +1252,15 @@ class AgentService:
                 approval_granted=True,
                 exit_code=None,
             )
+            snapshot = self.runtime_tool_snapshot(session_id=session_id, refresh=True)
             result_obj = await self._execute_registered_tool_action(
                 action_id=action_id,
                 tool_name=tool_name,
                 tool_args=tool_args,
                 workspace_root=self.session_workspace(session_id=session_id),
                 policy_profile=policy_profile,
-                extra_tools={},
+                extra_tools=dict(snapshot.tools),
+                allowed_tool_names=snapshot.names(),
                 chat_id=chat_id,
                 user_id=user_id,
                 session_id=session_id,
@@ -1237,7 +1396,10 @@ class AgentService:
                 "I hit a tool-call formatting loop while executing your request. "
                 "Reply with 'retry' and I will continue automatically."
             )
-        output = (output or "").strip() or "(no output)"
+        output = self.enforce_transport_text_contract(
+            session_id=session_id,
+            raw_output=(output or "").strip() or "(no output)",
+        )
         lowered = output.lower()
         if "approve once: /approve" in lowered or lowered.startswith("approval required"):
             kind = "approval_request"
@@ -1284,7 +1446,12 @@ class AgentService:
                     "skills": [s.skill_id for s in active_skills],
                 },
             )
-        available_tool_names = sorted(set(self._tool_registry.names()) | set(extra_tools.keys()))
+        snapshot = self.runtime_tool_snapshot(
+            session_id=session_id,
+            extra_tools=extra_tools if extra_tools else None,
+            refresh=True,
+        )
+        available_tool_names = snapshot.names()
         if not actions:
             reparsed_actions, reparsed_cleaned_prompt, reparsed_final_prompt = _extract_loop_actions(
                 prompt,
@@ -1695,7 +1862,8 @@ class AgentService:
                     tool_args=action.tool_args,
                     workspace_root=session_workspace,
                     policy_profile=policy_profile,
-                    extra_tools=extra_tools,
+                    extra_tools=dict(snapshot.tools),
+                    allowed_tool_names=available_tool_names,
                     chat_id=chat_id,
                     user_id=user_id,
                     session_id=session_id,
@@ -2207,7 +2375,8 @@ class AgentService:
 
     def _workspace_is_git_repo(self, workspace_root: Path) -> bool:
         try:
-            return (workspace_root.resolve() / ".git").exists()
+            snapshot = build_runtime_tool_registry(self._tool_registry, workspace_root=workspace_root)
+            return bool(snapshot.invariants.is_git_repo)
         except Exception:
             return False
 
@@ -2234,10 +2403,7 @@ class AgentService:
                     if path:
                         args["path"] = path
                 if name.startswith("git_") and not self._workspace_is_git_repo(workspace_root):
-                    return [], (
-                        "Workspace is not a git repository yet. "
-                        "Should I initialize one here with `git init`?"
-                    )
+                    return [], "Error: git tools are disabled because WORKSPACE_ROOT is not a git repository."
                 normalized.append(
                     LoopAction(
                         kind="tool",
@@ -2265,10 +2431,7 @@ class AgentService:
                 inner = str(argv[2] or "").strip().lower()
                 invokes_git = bool(re.search(r"(^|\s)git(\s|$)", inner))
             if invokes_git and not self._workspace_is_git_repo(workspace_root):
-                return [], (
-                    "Workspace is not a git repository yet. "
-                    "Should I initialize one here with `git init`?"
-                )
+                return [], "Error: git commands are disabled because WORKSPACE_ROOT is not a git repository."
             normalized.append(
                 LoopAction(
                     kind="exec",
@@ -2288,11 +2451,18 @@ class AgentService:
         workspace_root: Path,
         policy_profile: str,
         extra_tools: Optional[Dict[str, Any]] = None,
+        allowed_tool_names: Optional[Sequence[str]] = None,
         chat_id: int = 0,
         user_id: int = 0,
         session_id: str = "",
     ):
         normalized_tool_name = (tool_name or "").strip().lower()
+        allowed = set(_normalize_tool_names(list(allowed_tool_names or [])))
+        if allowed and normalized_tool_name not in allowed:
+            return ToolResult(
+                ok=False,
+                output=f"{action_id} tool={tool_name} error=tool_unavailable_in_this_turn",
+            )
         normalized_args = _normalize_tool_args_for_workspace(
             tool_name=normalized_tool_name,
             tool_args=dict(tool_args or {}),
@@ -2308,7 +2478,10 @@ class AgentService:
             normalized_args.setdefault("_chat_id", int(chat_id or 0))
             normalized_args.setdefault("_user_id", int(user_id or 0))
             normalized_args.setdefault("_session_id", session_id or "")
-        tool = (extra_tools or {}).get(tool_name) or self._tool_registry.get(tool_name)
+        if allowed:
+            tool = (extra_tools or {}).get(normalized_tool_name)
+        else:
+            tool = (extra_tools or {}).get(normalized_tool_name) or self._tool_registry.get(normalized_tool_name)
         if not tool:
             if normalized_tool_name in {"send_email_smtp", "send_email"}:
                 return ToolResult(
@@ -2362,8 +2535,13 @@ class AgentService:
         policy_profile: str,
         extra_tools: Dict[str, Any],
     ) -> Optional[str]:
+        snapshot = self.runtime_tool_snapshot(
+            session_id=session_id,
+            extra_tools=extra_tools if extra_tools else None,
+            refresh=True,
+        )
         tool_name = "send_email_smtp"
-        if tool_name not in (extra_tools or {}) and self._tool_registry.get(tool_name) is None:
+        if tool_name not in snapshot.names():
             return None
         to_addr, subject, body = _extract_email_triplet_from_slash_command(output)
         if not to_addr:
@@ -2384,7 +2562,8 @@ class AgentService:
             tool_args={"to": to_addr, "subject": subject, "body": body},
             workspace_root=workspace_root,
             policy_profile=policy_profile,
-            extra_tools=extra_tools,
+            extra_tools=dict(snapshot.tools),
+            allowed_tool_names=snapshot.names(),
             session_id=session_id,
         )
         self.append_session_assistant_message(
@@ -2403,8 +2582,13 @@ class AgentService:
         policy_profile: str,
         extra_tools: Dict[str, Any],
     ) -> Optional[str]:
+        snapshot = self.runtime_tool_snapshot(
+            session_id=session_id,
+            extra_tools=extra_tools if extra_tools else None,
+            refresh=True,
+        )
         tool_name = "send_email_smtp"
-        if tool_name not in (extra_tools or {}) and self._tool_registry.get(tool_name) is None:
+        if tool_name not in snapshot.names():
             return None
         to_addr, subject, body = _extract_email_triplet_from_slash_command(output)
         if not to_addr or not subject or not body:
@@ -2416,7 +2600,8 @@ class AgentService:
             tool_args={"to": to_addr, "subject": subject, "body": body},
             workspace_root=workspace_root,
             policy_profile=policy_profile,
-            extra_tools=extra_tools,
+            extra_tools=dict(snapshot.tools),
+            allowed_tool_names=snapshot.names(),
             session_id=session_id,
         )
         self.append_session_assistant_message(
@@ -2435,10 +2620,17 @@ class AgentService:
         policy_profile: str,
         extra_tools: Dict[str, Any],
     ) -> Optional[str]:
+        snapshot = self.runtime_tool_snapshot(
+            session_id=session_id,
+            extra_tools=extra_tools if extra_tools else None,
+            refresh=True,
+        )
         parsed = _extract_tool_invocation_from_output(output)
         if not parsed:
             return None
         tool_name, tool_args = parsed
+        if tool_name not in snapshot.names():
+            return None
         action_id = "tool-" + uuid.uuid4().hex[:8]
         result = await self._execute_registered_tool_action(
             action_id=action_id,
@@ -2446,7 +2638,8 @@ class AgentService:
             tool_args=tool_args,
             workspace_root=workspace_root,
             policy_profile=policy_profile,
-            extra_tools=extra_tools,
+            extra_tools=dict(snapshot.tools),
+            allowed_tool_names=snapshot.names(),
             session_id=session_id,
         )
         self.append_session_assistant_message(
@@ -2504,6 +2697,7 @@ class AgentService:
         if not tool_names:
             tool_names = ["exec"]
         tool_lines = _render_tool_schema_lines(tool_names[:6])
+        capability_lines = self._build_capability_context_for_tools(tool_names[:6], max_capabilities=4)
         guidance = [
             "You are in autonomous execution mode.",
             "The previous response described intent but did not execute.",
@@ -2524,6 +2718,8 @@ class AgentService:
             "Selected tool APIs:",
         ]
         guidance.extend(tool_lines)
+        if capability_lines:
+            guidance.extend(capability_lines)
         text = "\n".join([ln for ln in guidance if str(ln).strip()])
         provider_for_call = self._provider_for_agent(agent_id=agent_id)
         try:
@@ -2678,7 +2874,7 @@ class AgentService:
             and (not has_executed_tool)
             and executed_slash is None
             and _prompt_expects_action(base_prompt)
-            and _output_sounds_like_action_promise(text)
+            and (_output_sounds_like_action_promise(text) or _contains_tool_call_signatures(text))
             and autonomy_depth < self._autonomous_protocol_max_depth()
         ):
             corrected = await self._request_tool_call_correction(
@@ -3850,6 +4046,8 @@ def _contains_tool_call_signatures(text: str) -> bool:
         return True
     if re.search(r"(?is)\b(exec|tool|loop)\s*\{", raw):
         return True
+    if re.search(r'(?is)\{[^{}]{0,500}"(?:name|tool|args|arguments|input|command)"\s*:', raw):
+        return True
     if re.search(r"(?is)step\s*\d+\s*:.*\{cmd\s*:", raw) and re.search(r"(?is)\|\s*timeout\s*=", raw):
         return True
     if re.search(r"(?is)```.*?(?:!exec|!tool|!loop|\{cmd\s*:).*?```", raw):
@@ -4307,8 +4505,31 @@ def _parse_tool_invocation_json(text: str) -> Optional[tuple[str, Dict[str, Any]
             continue
         if not isinstance(obj, dict):
             continue
-        name = str(obj.get("name") or obj.get("tool") or "").strip().lower()
+        name = str(
+            obj.get("name")
+            or obj.get("tool")
+            or obj.get("tool_name")
+            or obj.get("action")
+            or ""
+        ).strip().lower()
         args = obj.get("args")
+        if args is None:
+            args = obj.get("arguments")
+        if args is None:
+            args = obj.get("input")
+        if args is None:
+            args = obj.get("parameters")
+        if isinstance(args, str):
+            raw_args = args.strip()
+            if raw_args.startswith("{") and raw_args.endswith("}"):
+                try:
+                    parsed_args = json.loads(raw_args)
+                except Exception:
+                    parsed_args = None
+                if isinstance(parsed_args, dict):
+                    args = parsed_args
+        if args is None:
+            args = {}
         if name and isinstance(args, dict):
             return name, dict(args)
     return None

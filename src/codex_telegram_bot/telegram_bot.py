@@ -66,6 +66,7 @@ from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.message_updater import MessageUpdater
 from .util import chunk_text
 
 logger = logging.getLogger(__name__)
@@ -1206,12 +1207,16 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         "started_at": asyncio.get_running_loop().time(),
     }
     status_msg = await update.message.reply_text("On it — preparing execution...")
+    message_updater = context.application.bot_data.setdefault("message_updater", MessageUpdater())
 
     async def set_status(text_value: str) -> None:
-        try:
-            await status_msg.edit_text(text_value[:3900])
-        except Exception:
-            pass
+        await message_updater.update(
+            bot=context.bot,
+            chat_id=update.effective_chat.id,
+            message_id=status_msg.message_id,
+            text=text_value[:3900],
+            fallback_send=False,
+        )
 
     async def progress(update_payload: dict) -> None:
         event = update_payload.get("event", "")
@@ -1339,6 +1344,7 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             output = "I need one clarification to continue: should I run the next tool step now?"
 
     await set_status("Done — sending response.")
+    await message_updater.flush(chat_id=update.effective_chat.id, message_id=status_msg.message_id)
     asyncio.create_task(
         _delete_message_later(
             bot=context.bot,
@@ -1366,6 +1372,7 @@ def build_application(
     app.bot_data["allowlist"] = allowlist
     app.bot_data["agent_service"] = agent_service
     app.bot_data["agent"] = agent
+    app.bot_data["message_updater"] = MessageUpdater()
     app.bot_data.update(callbacks)
     command_specs = _build_command_registry()
     for command_name, handler in command_specs:

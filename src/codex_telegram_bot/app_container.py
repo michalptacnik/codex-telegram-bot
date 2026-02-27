@@ -95,6 +95,8 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     # Tool policy engine (Issue #107)
     tool_policy_engine = ToolPolicyEngine()
 
+    if state_db_path is not None:
+        logger.info("state_db_path=%s", str(state_db_path.expanduser().resolve()))
     run_store = SqliteRunStore(db_path=state_db_path) if state_db_path is not None else None
     process_manager = ProcessManager(run_store=run_store)
 

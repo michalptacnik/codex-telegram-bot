@@ -1,6 +1,7 @@
 import sqlite3
 import uuid
 import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -34,11 +35,15 @@ from codex_telegram_bot.domain.sessions import (
 from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
+logger = logging.getLogger(__name__)
+SCHEMA_VERSION = 2
+
 
 class SqliteRunStore:
     def __init__(self, db_path: Path):
         self._db_path = Path(db_path).expanduser().resolve()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        logger.info("sqlite_store.init db_path=%s", str(self._db_path))
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
@@ -50,6 +55,14 @@ class SqliteRunStore:
     def _init_schema(self) -> None:
         with self._connect() as conn:
             conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY,
+                    applied_at TEXT NOT NULL
+                )
+                """
+            )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -415,6 +428,17 @@ class SqliteRunStore:
                 """,
                 (_utc_now(), _utc_now()),
             )
+            self._set_schema_version(conn, SCHEMA_VERSION)
+
+    def _set_schema_version(self, conn: sqlite3.Connection, version: int) -> None:
+        row = conn.execute("SELECT MAX(version) AS v FROM schema_version").fetchone()
+        current = int(row["v"] or 0) if row else 0
+        if int(version) <= current:
+            return
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+            (int(version), _utc_now()),
+        )
 
     def create_run(self, prompt: str) -> str:
         run_id = str(uuid.uuid4())

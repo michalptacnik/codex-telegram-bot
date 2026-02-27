@@ -44,5 +44,9 @@ class Agent:
             agent_id=agent_id,
             progress_callback=progress_callback,
         )
-        self._agent_service.append_session_assistant_message(session.session_id, output)
-        return AgentResponse(session_id=session.session_id, output=output)
+        safe_output = self._agent_service.enforce_transport_text_contract(
+            session_id=session.session_id,
+            raw_output=output,
+        )
+        self._agent_service.append_session_assistant_message(session.session_id, safe_output)
+        return AgentResponse(session_id=session.session_id, output=safe_output)

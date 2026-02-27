@@ -1,9 +1,12 @@
 import argparse
+import asyncio
 import logging
 import os
+import random
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from codex_telegram_bot.app_container import build_agent_service
@@ -164,7 +167,49 @@ def main() -> None:
         callbacks,
         agent_service=agent_service,
     )
-    app.run_polling(close_loop=False)
+    _run_polling_with_retry(app)
+    try:
+        asyncio.run(agent_service.shutdown())
+    except Exception:
+        logging.getLogger(__name__).exception("agent_service.shutdown failed")
+
+
+def _run_polling_with_retry(app) -> None:
+    logger = logging.getLogger(__name__)
+    max_attempts = max(1, int(os.environ.get("TELEGRAM_BOOTSTRAP_RETRIES", "5") or 5))
+    attempt = 0
+    while True:
+        try:
+            app.run_polling(close_loop=False)
+            return
+        except Exception as exc:
+            attempt += 1
+            transient = _is_transient_bootstrap_error(exc)
+            if (not transient) or attempt >= max_attempts:
+                raise
+            delay = min(20.0, 1.0 * (2 ** max(0, attempt - 1)))
+            delay = delay * (0.8 + random.random() * 0.4)
+            logger.warning(
+                "telegram.bootstrap.retry attempt=%s/%s delay=%.2fs kind=%s",
+                attempt,
+                max_attempts,
+                delay,
+                type(exc).__name__,
+            )
+            time.sleep(delay)
+
+
+def _is_transient_bootstrap_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__} {exc}".lower()
+    markers = [
+        "readerror",
+        "connecterror",
+        "timeout",
+        "temporary failure",
+        "name or service not known",
+        "dns",
+    ]
+    return any(marker in text for marker in markers)
 
 
 if __name__ == "__main__":

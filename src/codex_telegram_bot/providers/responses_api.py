@@ -20,6 +20,7 @@ import os
 from typing import Any, Dict, List, Optional, Sequence
 
 from codex_telegram_bot.observability.structured_log import log_json
+from codex_telegram_bot.providers.transport import build_httpx_client, post_json_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,9 @@ class ResponsesApiProvider:
         self._model: str = model or os.environ.get("OPENAI_MODEL") or _DEFAULT_MODEL
         self._max_tokens: int = max_tokens or _env_int("OPENAI_MAX_TOKENS", _DEFAULT_MAX_TOKENS)
         self._timeout_sec: int = timeout_sec or _env_int("OPENAI_TIMEOUT_SEC", _DEFAULT_TIMEOUT_SEC)
+        self._connect_timeout_sec: float = float(_env_int("OPENAI_CONNECT_TIMEOUT_SEC", 15))
+        self._read_timeout_sec: float = float(_env_int("OPENAI_READ_TIMEOUT_SEC", self._timeout_sec))
+        self._http_retries: int = _env_int("OPENAI_HTTP_RETRIES", 3)
         self._api_base: str = (api_base or os.environ.get("OPENAI_API_BASE") or _API_BASE).rstrip("/")
         self._http_client: Any = None
 
@@ -145,8 +149,10 @@ class ResponsesApiProvider:
     async def generate_with_tools(
         self,
         messages: Sequence[Dict[str, str]],
-        tool_schemas: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        system: str = "",
         correlation_id: str = "",
+        tool_schemas: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """Generate with tool schemas; return both text and tool_calls.
 
@@ -158,6 +164,7 @@ class ResponsesApiProvider:
             return {"text": "Error: OPENAI_API_KEY not configured.", "tool_calls": []}
         if not _HTTPX_AVAILABLE:
             return {"text": "Error: httpx not installed.", "tool_calls": []}
+        effective_tools = list(tools or tool_schemas or [])
         try:
             client = self._get_http_client()
             payload: Dict[str, Any] = {
@@ -165,10 +172,16 @@ class ResponsesApiProvider:
                 "input": list(messages),
                 "max_output_tokens": self._max_tokens,
             }
-            if tool_schemas:
-                payload["tools"] = tool_schemas
-            response = await client.post("/v1/responses", json=payload)
-            response.raise_for_status()
+            if system:
+                payload["instructions"] = str(system)
+            if effective_tools:
+                payload["tools"] = effective_tools
+            response = await post_json_with_retries(
+                client,
+                path="/v1/responses",
+                payload=payload,
+                attempts=self._http_retries,
+            )
             data = response.json()
             text = _extract_responses_text(data)
             tool_calls = _extract_responses_tool_calls(data)
@@ -252,13 +265,14 @@ class ResponsesApiProvider:
 
     def _get_http_client(self) -> Any:
         if self._http_client is None:
-            self._http_client = _httpx.AsyncClient(
+            self._http_client = build_httpx_client(
                 base_url=self._api_base,
                 headers={
                     "Authorization": f"Bearer {self._api_key}",
                     "Content-Type": "application/json",
                 },
-                timeout=float(self._timeout_sec),
+                connect_timeout_sec=self._connect_timeout_sec,
+                read_timeout_sec=self._read_timeout_sec,
             )
         return self._http_client
 
@@ -275,8 +289,12 @@ class ResponsesApiProvider:
         }
         if tools:
             payload["tools"] = tools
-        response = await client.post("/v1/responses", json=payload)
-        response.raise_for_status()
+        response = await post_json_with_retries(
+            client,
+            path="/v1/responses",
+            payload=payload,
+            attempts=self._http_retries,
+        )
         data = response.json()
         return _extract_responses_text(data)
 
