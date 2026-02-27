@@ -18,9 +18,10 @@ Configuration via environment variables (or explicit constructor args):
 from __future__ import annotations
 
 import asyncio
+import json as _json_mod
 import logging
 import os
-from typing import Any, AsyncIterator, Dict, Optional, Sequence
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence
 
 from codex_telegram_bot.observability.structured_log import log_json
 
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MODEL = "claude-opus-4-6"
 _DEFAULT_MAX_TOKENS = 4096
 _DEFAULT_TIMEOUT_SEC = 120
+
+# Maximum characters for a single tool result before truncation.
+_TOOL_RESULT_MAX_CHARS = 4000
 
 # Try to import the official SDK; fall back to httpx for environments
 # where the package is not installed.
@@ -126,13 +130,103 @@ class AnthropicProvider:
     def capabilities(self) -> Dict[str, Any]:
         return {
             "provider": "anthropic",
-            "supports_tool_calls": False,
+            "supports_tool_calls": True,
             "supports_streaming": True,
             "max_context_chars": 800_000,
             "supported_policy_profiles": ["strict", "balanced", "trusted"],
             "reliability_tier": "primary",
             "model": self._model,
         }
+
+    # ------------------------------------------------------------------
+    # Native function calling interface
+    # ------------------------------------------------------------------
+
+    async def generate_with_tools(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+        system: str = "",
+        correlation_id: str = "",
+    ) -> Dict[str, Any]:
+        """Call the Anthropic Messages API with native tool definitions.
+
+        Returns a dict with:
+          - "content": list of content blocks (text and tool_use)
+          - "stop_reason": "end_turn" | "tool_use" | ...
+          - "usage": token usage dict
+        """
+        if not self._api_key:
+            return {
+                "content": [{"type": "text", "text": "Error: ANTHROPIC_API_KEY not configured."}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            }
+        log_json(
+            logger, "provider.generate_with_tools.start",
+            provider="anthropic", run_id=correlation_id,
+            model=self._model, tool_count=len(tools),
+        )
+        try:
+            if _SDK_AVAILABLE:
+                return await self._call_with_tools_sdk(messages, tools, system)
+            elif _HTTPX_AVAILABLE:
+                return await self._call_with_tools_httpx(messages, tools, system)
+            else:
+                return {
+                    "content": [{"type": "text", "text": "Error: neither 'anthropic' SDK nor 'httpx' is installed."}],
+                    "stop_reason": "end_turn",
+                    "usage": {},
+                }
+        except Exception as exc:
+            logger.exception("AnthropicProvider generate_with_tools error")
+            log_json(
+                logger, "provider.generate_with_tools.error",
+                provider="anthropic", run_id=correlation_id, kind=type(exc).__name__,
+            )
+            return {
+                "content": [{"type": "text", "text": f"Error: {exc}"}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            }
+
+    async def _call_with_tools_sdk(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+        system: str = "",
+    ) -> Dict[str, Any]:
+        client = self._get_sdk_client()
+        kwargs: Dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": list(messages),
+            "tools": list(tools),
+        }
+        if system:
+            kwargs["system"] = system
+        msg = await client.messages.create(**kwargs)
+        return _extract_sdk_full_response(msg)
+
+    async def _call_with_tools_httpx(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+        system: str = "",
+    ) -> Dict[str, Any]:
+        client = self._get_http_client()
+        payload: Dict[str, Any] = {
+            "model": self._model,
+            "max_tokens": self._max_tokens,
+            "messages": list(messages),
+            "tools": list(tools),
+        }
+        if system:
+            payload["system"] = system
+        response = await client.post("/v1/messages", json=payload)
+        response.raise_for_status()
+        data = response.json()
+        return _extract_httpx_full_response(data)
 
     # ------------------------------------------------------------------
     # Streaming interface (EPIC 4)
@@ -306,3 +400,53 @@ def _extract_httpx_text(data: Dict[str, Any]) -> str:
         if isinstance(block, dict) and block.get("type") == "text":
             return block.get("text") or ""
     return ""
+
+
+def _extract_sdk_full_response(msg: Any) -> Dict[str, Any]:
+    """Convert an SDK Message object to a plain dict with content blocks."""
+    content: List[Dict[str, Any]] = []
+    try:
+        for block in msg.content or []:
+            block_type = getattr(block, "type", None)
+            if block_type == "text":
+                content.append({"type": "text", "text": block.text or ""})
+            elif block_type == "tool_use":
+                content.append({
+                    "type": "tool_use",
+                    "id": getattr(block, "id", ""),
+                    "name": getattr(block, "name", ""),
+                    "input": getattr(block, "input", {}),
+                })
+    except Exception:
+        content = [{"type": "text", "text": str(msg)}]
+
+    stop_reason = getattr(msg, "stop_reason", "end_turn") or "end_turn"
+    usage_obj = getattr(msg, "usage", None)
+    usage: Dict[str, Any] = {}
+    if usage_obj is not None:
+        usage = {
+            "input_tokens": getattr(usage_obj, "input_tokens", 0),
+            "output_tokens": getattr(usage_obj, "output_tokens", 0),
+        }
+    return {"content": content, "stop_reason": stop_reason, "usage": usage}
+
+
+def _extract_httpx_full_response(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert a raw httpx JSON response to a plain dict with content blocks."""
+    content: List[Dict[str, Any]] = []
+    for block in data.get("content") or []:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type", "")
+        if block_type == "text":
+            content.append({"type": "text", "text": block.get("text") or ""})
+        elif block_type == "tool_use":
+            content.append({
+                "type": "tool_use",
+                "id": block.get("id", ""),
+                "name": block.get("name", ""),
+                "input": block.get("input", {}),
+            })
+    stop_reason = data.get("stop_reason", "end_turn") or "end_turn"
+    usage = data.get("usage") or {}
+    return {"content": content, "stop_reason": stop_reason, "usage": usage}

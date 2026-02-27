@@ -149,6 +149,24 @@ class ProviderRegistry(ProviderAdapter):
             prompt, correlation_id=correlation_id, policy_profile=policy_profile,
         )
 
+    async def generate_with_tools(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+        system: str = "",
+        correlation_id: str = "",
+    ) -> Dict[str, Any]:
+        """Delegate native function calling to the active provider."""
+        active = self._active()
+        method = getattr(active, "generate_with_tools", None)
+        if method is None:
+            return {
+                "content": [{"type": "text", "text": "Error: active provider does not support native tool calling."}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            }
+        return await method(messages=messages, tools=tools, system=system, correlation_id=correlation_id)
+
     async def version(self) -> str:
         return await self._active().version()
 

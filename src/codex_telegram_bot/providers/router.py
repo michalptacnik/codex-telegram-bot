@@ -104,6 +104,23 @@ class ProviderRouter(ProviderAdapter):
             )
         return last_output or "Error: provider execution failed."
 
+    async def generate_with_tools(
+        self,
+        messages: Sequence[Dict[str, Any]],
+        tools: Sequence[Dict[str, Any]],
+        system: str = "",
+        correlation_id: str = "",
+    ) -> Dict[str, Any]:
+        """Delegate native function calling to the primary provider."""
+        method = getattr(self._primary, "generate_with_tools", None)
+        if method is None:
+            return {
+                "content": [{"type": "text", "text": "Error: provider does not support native tool calling."}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            }
+        return await method(messages=messages, tools=tools, system=system, correlation_id=correlation_id)
+
     async def version(self) -> str:
         if self._active_provider == "fallback" and self._fallback is not None:
             return await self._fallback.version()
