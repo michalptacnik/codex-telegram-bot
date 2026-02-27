@@ -5,10 +5,62 @@ import shlex
 import json
 import re
 from typing import Optional, List
+from types import SimpleNamespace
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.constants import ChatAction
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
+try:
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.constants import ChatAction
+    from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, CallbackQueryHandler, filters
+except Exception:  # pragma: no cover - exercised only in minimal test environments.
+    class Update:  # type: ignore[override]
+        pass
+
+    class InlineKeyboardButton:  # type: ignore[override]
+        def __init__(self, text: str, callback_data: str = ""):
+            self.text = text
+            self.callback_data = callback_data
+
+    class InlineKeyboardMarkup:  # type: ignore[override]
+        def __init__(self, keyboard):
+            self.keyboard = keyboard
+
+    class ChatAction:  # type: ignore[override]
+        TYPING = "typing"
+
+    class _FilterStub:
+        def __and__(self, _other):
+            return self
+
+        def __invert__(self):
+            return self
+
+    class _BuilderStub:
+        def token(self, _token: str):
+            return self
+
+        def build(self):
+            raise RuntimeError("python-telegram-bot is required to build application runtime.")
+
+    class ApplicationBuilder:  # type: ignore[override]
+        def token(self, token: str):
+            return _BuilderStub().token(token)
+
+    class CommandHandler:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class MessageHandler:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class CallbackQueryHandler:  # type: ignore[override]
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+    class ContextTypes:  # type: ignore[override]
+        DEFAULT_TYPE = object
+
+    filters = SimpleNamespace(TEXT=_FilterStub(), COMMAND=_FilterStub())
 
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
@@ -26,6 +78,9 @@ STATUS_HEARTBEAT_PUSH_SEC = 45
 USER_WINDOW_SEC = 60
 MAX_USER_COMMANDS_PER_WINDOW = 20
 COMMAND_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+TOOL_LEAK_RE = re.compile(
+    r"(?is)(^\s*!(exec|tool|loop)\b|step\s*\d+\s*:.*\{cmd\s*:|\|\s*timeout\s*=|```.*!(exec|tool|loop).*```)"
+)
 _COMMAND_HANDLERS = [
     ("ping", "handle_ping"),
     ("new", "handle_new"),
@@ -48,6 +103,9 @@ _COMMAND_HANDLERS = [
     ("reinstall", "handle_reinstall"),
     ("purge", "handle_purge"),
     ("restart", "handle_restart"),
+    ("sessions", "handle_sessions"),
+    ("tail", "handle_tail"),
+    ("kill", "handle_kill"),
     ("interrupt", "handle_interrupt"),
     ("continue", "handle_continue"),
 ]
@@ -286,6 +344,26 @@ def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> boo
 
 def _is_valid_command_name(name: str) -> bool:
     return bool(COMMAND_NAME_RE.match((name or "").strip()))
+
+
+def _looks_like_tool_leak(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    # Match tool directives anywhere in the outgoing message.
+    if re.search(r"(?is)![a-z_][a-z0-9_-]*(?:\s|$)", raw):
+        return True
+    if re.search(r"(?is)!(exec|tool|loop)\s", raw):
+        return True
+    if re.search(r"(?is)\b(exec|tool|loop)\s*\{", raw):
+        return True
+    if TOOL_LEAK_RE.search(raw):
+        return True
+    if re.search(r"(?is)step\s*\d+\s*:.*\{cmd\s*:", raw) and re.search(r"(?is)\|\s*timeout\s*=", raw):
+        return True
+    if re.search(r"(?is)```.*?(?:!exec|!tool|!loop|\{cmd\s*:).*?```", raw):
+        return True
+    return bool(re.match(r"(?is)^\s*\{.*\"(name|tool|args)\"\s*:", raw))
 
 
 def _sanitize_command_name(name: str) -> str:
@@ -625,7 +703,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 profile = agent.policy_profile
         text = (
             "Commands:\n"
-            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /email, /gh, /email_check, /contact, /template, /email_template\n"
+            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /sessions, /tail [id], /kill [id], /email, /gh, /email_check, /contact, /template, /email_template\n"
             "\n"
             "Examples:\n"
             "- `!exec /bin/ls -la`\n"
@@ -799,6 +877,97 @@ async def handle_email_template(update: Update, context: ContextTypes.DEFAULT_TY
         logger.exception("Email-template handler error: %s", exc)
 
 
+async def handle_sessions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        agent_service = context.bot_data.get("agent_service")
+        manager = getattr(agent_service, "process_manager", None)
+        if manager is None:
+            await update.message.reply_text("Process sessions are unavailable in this runtime.")
+            return
+        rows = manager.list_sessions(chat_id=update.effective_chat.id, user_id=user_id, limit=20)
+        if not rows:
+            await update.message.reply_text("No process sessions.")
+            return
+        lines = ["Process sessions:"]
+        for row in rows[:20]:
+            sid = str(row.get("process_session_id") or "")[:16]
+            cmd = " ".join(list(row.get("argv") or []))[:80]
+            lines.append(f"- `{sid}` {row.get('status')} pty={bool(row.get('pty_enabled'))} {cmd}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as exc:
+        logger.exception("Sessions handler error: %s", exc)
+
+
+async def handle_tail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        agent_service = context.bot_data.get("agent_service")
+        manager = getattr(agent_service, "process_manager", None)
+        if manager is None:
+            await update.message.reply_text("Process sessions are unavailable in this runtime.")
+            return
+        session_id = str((context.args[0] if context.args else "") or "").strip()
+        if not session_id:
+            active = manager.get_active_session(chat_id=update.effective_chat.id, user_id=user_id)
+            session_id = str((active or {}).get("process_session_id") or "")
+        if not session_id:
+            await update.message.reply_text("No active process session.")
+            return
+        polled = manager.poll_session(process_session_id=session_id, cursor=None)
+        if not polled.get("ok"):
+            await update.message.reply_text(str(polled.get("error") or "Failed to poll session."))
+            return
+        output = str(polled.get("output") or "(no new output)")
+        msg = f"session={session_id} status={polled.get('status')} cursor_next={polled.get('cursor_next')}\n{output}"
+        for chunk in chunk_text(msg, MAX_OUTPUT_CHARS):
+            await update.message.reply_text(chunk)
+    except Exception as exc:
+        logger.exception("Tail handler error: %s", exc)
+
+
+async def handle_kill(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        agent_service = context.bot_data.get("agent_service")
+        manager = getattr(agent_service, "process_manager", None)
+        if manager is None:
+            await update.message.reply_text("Process sessions are unavailable in this runtime.")
+            return
+        session_id = str((context.args[0] if context.args else "") or "").strip()
+        if not session_id:
+            active = manager.get_active_session(chat_id=update.effective_chat.id, user_id=user_id)
+            session_id = str((active or {}).get("process_session_id") or "")
+        if not session_id:
+            await update.message.reply_text("No active process session to kill.")
+            return
+        result = manager.terminate_session(process_session_id=session_id, mode="kill")
+        if result.get("ok"):
+            await update.message.reply_text(
+                f"Killed session `{session_id[:16]}` status={result.get('status')} exit_code={result.get('exit_code')}",
+                parse_mode="Markdown",
+            )
+            return
+        await update.message.reply_text(str(result.get("error") or "Failed to terminate session."))
+    except Exception as exc:
+        logger.exception("Kill handler error: %s", exc)
+
+
 async def handle_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if not update.message or not update.effective_chat:
@@ -808,9 +977,20 @@ async def handle_interrupt(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if not is_allowed(user_id, allowlist):
             return
         chat_id = update.effective_chat.id
+        manager = getattr(agent_service, "process_manager", None)
+        if manager is not None:
+            active = manager.get_active_session(chat_id=chat_id, user_id=user_id)
+            if active:
+                sid = str(active.get("process_session_id") or "")
+                outcome = manager.terminate_session(process_session_id=sid, mode="interrupt")
+                if outcome.get("ok"):
+                    await update.message.reply_text(
+                        f"Interrupted session `{sid[:16]}` status={outcome.get('status')}",
+                        parse_mode="Markdown",
+                    )
+                    return
         active_jobs = context.application.bot_data.setdefault("active_jobs", {})
         active_tasks = context.application.bot_data.setdefault("active_tasks", {})
-        agent_service = context.bot_data.get("agent_service")
         cancelled_job = False
         cancelled_task = False
         job_id = active_jobs.get(chat_id)
@@ -838,6 +1018,18 @@ async def handle_continue(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             return
         agent_service = context.bot_data.get("agent_service")
         chat_id = update.effective_chat.id
+        manager = getattr(agent_service, "process_manager", None)
+        if manager is not None:
+            active = manager.get_active_session(chat_id=chat_id, user_id=user_id)
+            if active:
+                sid = str(active.get("process_session_id") or "")
+                polled = manager.poll_session(process_session_id=sid, cursor=None)
+                if polled.get("ok"):
+                    out = str(polled.get("output") or "(no new output)")
+                    msg = f"session={sid} status={polled.get('status')} cursor_next={polled.get('cursor_next')}\n{out}"
+                    for chunk in chunk_text(msg, MAX_OUTPUT_CHARS):
+                        await update.message.reply_text(chunk)
+                    return
         pending_continue = context.application.bot_data.setdefault("pending_continue_prompts", {})
         force_continue = bool(
             context.args and (context.args[0] or "").strip().lower() in {"yes", "force", "confirm"}
@@ -1131,6 +1323,20 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     output = output.strip() if output else ""
     if not output:
         output = "(no output)"
+    if _looks_like_tool_leak(output):
+        try:
+            turn = await agent_service.run_turn(
+                prompt=output,
+                chat_id=update.effective_chat.id,
+                user_id=user_id,
+                session_id=response.session_id,
+                agent_id="default",
+                progress_callback=progress,
+            )
+            output = (turn.text or "").strip() or "(no output)"
+        except Exception:
+            logger.exception("Output firewall reroute failed")
+            output = "I need one clarification to continue: should I run the next tool step now?"
 
     await set_status("Done — sending response.")
     asyncio.create_task(

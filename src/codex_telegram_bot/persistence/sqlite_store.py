@@ -44,10 +44,12 @@ class SqliteRunStore:
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 2000")
         return conn
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -291,6 +293,59 @@ class SqliteRunStore:
                 ON mission_summaries (mission_id)
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS process_sessions (
+                    process_session_id TEXT PRIMARY KEY,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    argv_json TEXT NOT NULL DEFAULT '[]',
+                    workspace_root TEXT NOT NULL DEFAULT '',
+                    pty_enabled INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'running',
+                    exit_code INTEGER,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    last_activity_at TEXT NOT NULL,
+                    max_wall_sec INTEGER NOT NULL DEFAULT 21600,
+                    idle_timeout_sec INTEGER NOT NULL DEFAULT 1200,
+                    max_output_bytes INTEGER NOT NULL DEFAULT 5242880,
+                    ring_buffer_bytes INTEGER NOT NULL DEFAULT 65536,
+                    output_bytes INTEGER NOT NULL DEFAULT 0,
+                    redaction_replacements INTEGER NOT NULL DEFAULT 0,
+                    log_path TEXT NOT NULL DEFAULT '',
+                    index_path TEXT NOT NULL DEFAULT '',
+                    last_cursor INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_process_sessions_chat_user_status
+                ON process_sessions (chat_id, user_id, status, last_activity_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS process_session_chunks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    process_session_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    start_offset INTEGER NOT NULL,
+                    end_offset INTEGER NOT NULL,
+                    preview TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_process_session_chunks_unique
+                ON process_session_chunks (process_session_id, seq)
+                """
+            )
             # Lightweight migration for existing DBs created before max_concurrency existed.
             cols = conn.execute("PRAGMA table_info(agents)").fetchall()
             col_names = {c["name"] for c in cols}
@@ -300,6 +355,32 @@ class SqliteRunStore:
             tool_col_names = {c["name"] for c in tool_cols}
             if tool_cols and "run_id" not in tool_col_names:
                 conn.execute("ALTER TABLE tool_approvals ADD COLUMN run_id TEXT NOT NULL DEFAULT ''")
+            process_cols = conn.execute("PRAGMA table_info(process_sessions)").fetchall()
+            process_col_names = {c["name"] for c in process_cols}
+            process_defaults = {
+                "argv_json": "TEXT NOT NULL DEFAULT '[]'",
+                "workspace_root": "TEXT NOT NULL DEFAULT ''",
+                "pty_enabled": "INTEGER NOT NULL DEFAULT 0",
+                "status": "TEXT NOT NULL DEFAULT 'running'",
+                "exit_code": "INTEGER",
+                "created_at": "TEXT NOT NULL DEFAULT ''",
+                "started_at": "TEXT",
+                "completed_at": "TEXT",
+                "last_activity_at": "TEXT NOT NULL DEFAULT ''",
+                "max_wall_sec": "INTEGER NOT NULL DEFAULT 21600",
+                "idle_timeout_sec": "INTEGER NOT NULL DEFAULT 1200",
+                "max_output_bytes": "INTEGER NOT NULL DEFAULT 5242880",
+                "ring_buffer_bytes": "INTEGER NOT NULL DEFAULT 65536",
+                "output_bytes": "INTEGER NOT NULL DEFAULT 0",
+                "redaction_replacements": "INTEGER NOT NULL DEFAULT 0",
+                "log_path": "TEXT NOT NULL DEFAULT ''",
+                "index_path": "TEXT NOT NULL DEFAULT ''",
+                "last_cursor": "INTEGER NOT NULL DEFAULT 0",
+                "error": "TEXT NOT NULL DEFAULT ''",
+            }
+            for key, ddl in process_defaults.items():
+                if process_cols and key not in process_col_names:
+                    conn.execute(f"ALTER TABLE process_sessions ADD COLUMN {key} {ddl}")
             existing = conn.execute("SELECT COUNT(*) AS c FROM agents").fetchone()["c"]
             if existing == 0:
                 now = _utc_now()
@@ -320,6 +401,20 @@ class SqliteRunStore:
                     """,
                     ("trusted", _utc_now(), "default", "balanced"),
                 )
+            conn.execute(
+                """
+                UPDATE process_sessions
+                SET status = 'orphaned',
+                    error = CASE
+                        WHEN error = '' THEN 'Recovered after restart: session handle orphaned.'
+                        ELSE error
+                    END,
+                    completed_at = COALESCE(completed_at, ?),
+                    last_activity_at = COALESCE(last_activity_at, ?)
+                WHERE status = 'running'
+                """,
+                (_utc_now(), _utc_now()),
+            )
 
     def create_run(self, prompt: str) -> str:
         run_id = str(uuid.uuid4())
@@ -855,6 +950,222 @@ class SqliteRunStore:
                 ids,
             )
             return len(ids)
+
+    # ------------------------------------------------------------------
+    # Process session persistence
+    # ------------------------------------------------------------------
+
+    def create_process_session(
+        self,
+        *,
+        process_session_id: str,
+        chat_id: int,
+        user_id: int,
+        argv: list[str],
+        workspace_root: str,
+        pty_enabled: bool,
+        status: str,
+        exit_code: Optional[int],
+        created_at: str,
+        started_at: Optional[str],
+        completed_at: Optional[str],
+        last_activity_at: str,
+        max_wall_sec: int,
+        idle_timeout_sec: int,
+        max_output_bytes: int,
+        ring_buffer_bytes: int,
+        output_bytes: int,
+        redaction_replacements: int,
+        log_path: str,
+        index_path: str,
+        last_cursor: int,
+        error: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO process_sessions (
+                    process_session_id, chat_id, user_id, argv_json, workspace_root,
+                    pty_enabled, status, exit_code, created_at, started_at, completed_at,
+                    last_activity_at, max_wall_sec, idle_timeout_sec, max_output_bytes,
+                    ring_buffer_bytes, output_bytes, redaction_replacements, log_path,
+                    index_path, last_cursor, error
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    process_session_id,
+                    int(chat_id),
+                    int(user_id),
+                    json.dumps(argv or []),
+                    workspace_root or "",
+                    1 if pty_enabled else 0,
+                    status or "running",
+                    exit_code,
+                    created_at,
+                    started_at,
+                    completed_at,
+                    last_activity_at,
+                    int(max_wall_sec),
+                    int(idle_timeout_sec),
+                    int(max_output_bytes),
+                    int(ring_buffer_bytes),
+                    int(output_bytes),
+                    int(redaction_replacements),
+                    log_path or "",
+                    index_path or "",
+                    int(last_cursor),
+                    error or "",
+                ),
+            )
+
+    def update_process_session(
+        self,
+        process_session_id: str,
+        *,
+        status: Optional[str] = None,
+        exit_code: Optional[int] = None,
+        completed_at: Optional[str] = None,
+        last_activity_at: Optional[str] = None,
+        output_bytes: Optional[int] = None,
+        redaction_replacements: Optional[int] = None,
+        last_cursor: Optional[int] = None,
+        pty_enabled: Optional[bool] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        clauses: list[str] = []
+        params: list = []
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        if exit_code is not None:
+            clauses.append("exit_code = ?")
+            params.append(int(exit_code))
+        if completed_at is not None:
+            clauses.append("completed_at = ?")
+            params.append(completed_at)
+        if last_activity_at is not None:
+            clauses.append("last_activity_at = ?")
+            params.append(last_activity_at)
+        if output_bytes is not None:
+            clauses.append("output_bytes = ?")
+            params.append(int(output_bytes))
+        if redaction_replacements is not None:
+            clauses.append("redaction_replacements = ?")
+            params.append(int(redaction_replacements))
+        if last_cursor is not None:
+            clauses.append("last_cursor = ?")
+            params.append(int(last_cursor))
+        if pty_enabled is not None:
+            clauses.append("pty_enabled = ?")
+            params.append(1 if pty_enabled else 0)
+        if error is not None:
+            clauses.append("error = ?")
+            params.append(error)
+        if not clauses:
+            return
+        params.append(process_session_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE process_sessions SET {', '.join(clauses)} WHERE process_session_id = ?",
+                params,
+            )
+
+    def set_process_session_last_cursor(self, process_session_id: str, cursor: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE process_sessions
+                SET last_cursor = ?, last_activity_at = ?
+                WHERE process_session_id = ?
+                """,
+                (int(cursor), _utc_now(), process_session_id),
+            )
+
+    def get_process_session(self, process_session_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM process_sessions WHERE process_session_id = ?",
+                (process_session_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return _row_to_process_session(row)
+
+    def list_process_sessions(self, chat_id: int, user_id: int, limit: int = 20) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM process_sessions
+                WHERE chat_id = ? AND user_id = ?
+                ORDER BY last_activity_at DESC
+                LIMIT ?
+                """,
+                (int(chat_id), int(user_id), max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_process_session(r) for r in rows]
+
+    def count_running_process_sessions(self, chat_id: int, user_id: int) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c FROM process_sessions
+                WHERE chat_id = ? AND user_id = ? AND status = 'running'
+                """,
+                (int(chat_id), int(user_id)),
+            ).fetchone()
+        return int(row["c"] or 0)
+
+    def append_process_session_chunk(
+        self,
+        *,
+        process_session_id: str,
+        seq: int,
+        created_at: str,
+        start_offset: int,
+        end_offset: int,
+        preview: str,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO process_session_chunks
+                (process_session_id, seq, created_at, start_offset, end_offset, preview)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    process_session_id,
+                    int(seq),
+                    created_at,
+                    int(start_offset),
+                    int(end_offset),
+                    preview or "",
+                ),
+            )
+
+    def list_process_session_chunks(self, process_session_id: str, limit: int = 100) -> list[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM process_session_chunks
+                WHERE process_session_id = ?
+                ORDER BY seq DESC
+                LIMIT ?
+                """,
+                (process_session_id, max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "id": int(row["id"]),
+                "process_session_id": row["process_session_id"],
+                "seq": int(row["seq"]),
+                "created_at": row["created_at"],
+                "start_offset": int(row["start_offset"]),
+                "end_offset": int(row["end_offset"]),
+                "preview": row["preview"] or "",
+            }
+            for row in rows
+        ]
 
     def create_tool_approval(
         self,
@@ -1719,6 +2030,33 @@ def _row_to_tool_approval(row: sqlite3.Row) -> dict:
         "status": row["status"] or "pending",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+
+
+def _row_to_process_session(row: sqlite3.Row) -> dict:
+    return {
+        "process_session_id": row["process_session_id"],
+        "chat_id": int(row["chat_id"] or 0),
+        "user_id": int(row["user_id"] or 0),
+        "argv": json.loads(row["argv_json"] or "[]"),
+        "workspace_root": row["workspace_root"] or "",
+        "pty_enabled": bool(row["pty_enabled"]),
+        "status": row["status"] or "unknown",
+        "exit_code": int(row["exit_code"]) if row["exit_code"] is not None else None,
+        "created_at": row["created_at"] or "",
+        "started_at": row["started_at"] or "",
+        "completed_at": row["completed_at"] or "",
+        "last_activity_at": row["last_activity_at"] or "",
+        "max_wall_sec": int(row["max_wall_sec"] or 0),
+        "idle_timeout_sec": int(row["idle_timeout_sec"] or 0),
+        "max_output_bytes": int(row["max_output_bytes"] or 0),
+        "ring_buffer_bytes": int(row["ring_buffer_bytes"] or 0),
+        "output_bytes": int(row["output_bytes"] or 0),
+        "redaction_replacements": int(row["redaction_replacements"] or 0),
+        "log_path": row["log_path"] or "",
+        "index_path": row["index_path"] or "",
+        "last_cursor": int(row["last_cursor"] or 0),
+        "error": row["error"] or "",
     }
 
 

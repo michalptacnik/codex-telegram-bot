@@ -4,6 +4,7 @@ from codex_telegram_bot.telegram_bot import (
     _COMMAND_HANDLERS,
     _build_command_registry,
     _is_valid_command_name,
+    _looks_like_tool_leak,
     _sanitize_command_name,
     _validate_command_registry,
     _parse_contact_spec,
@@ -85,3 +86,35 @@ class TestCommandRegistryValidation(unittest.TestCase):
     def test_build_registry_normalizes_and_skips_broken_entries(self):
         registry = _build_command_registry()
         self.assertTrue(any(name == "email_check" for name, _ in registry))
+
+    def test_process_session_commands_registered(self):
+        registry = _build_command_registry()
+        names = {name for name, _ in registry}
+        for cmd in {"sessions", "tail", "kill"}:
+            self.assertIn(cmd, names)
+
+
+class TestOutputFirewallDetection(unittest.TestCase):
+    def test_detects_embedded_tool_line_after_prose(self):
+        text = "Done - sending response.\n\n!tool {\"query\": \"companies needing cross-border tax advisory\"}"
+        self.assertTrue(_looks_like_tool_leak(text))
+
+    def test_detects_inline_tool_directive(self):
+        text = "Done - sending response. !tool {\"query\": \"companies\"}"
+        self.assertTrue(_looks_like_tool_leak(text))
+
+    def test_detects_inline_bare_tool_directive(self):
+        text = "Done - sending response. tool {\"query\": \"companies\"}"
+        self.assertTrue(_looks_like_tool_leak(text))
+
+    def test_detects_unknown_bang_directive(self):
+        text = "Done - sending response. !search web"
+        self.assertTrue(_looks_like_tool_leak(text))
+
+    def test_detects_step_cmd_timeout_dialect(self):
+        text = "Step 1: {cmd: cat /tmp/x}|timeout=60"
+        self.assertTrue(_looks_like_tool_leak(text))
+
+    def test_does_not_flag_regular_assistant_text(self):
+        text = "Here are 10 companies and why each is a fit."
+        self.assertFalse(_looks_like_tool_leak(text))

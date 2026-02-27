@@ -32,6 +32,7 @@ def build_default_tool_registry(
     provider_registry=None,
     run_store=None,
     mcp_bridge=None,
+    process_manager=None,
 ) -> ToolRegistry:
     """Build the default tool registry.
 
@@ -48,7 +49,7 @@ def build_default_tool_registry(
     registry.register(GitLogTool())
     registry.register(GitAddTool())
     registry.register(GitCommitTool())
-    registry.register(ShellExecTool())
+    registry.register(ShellExecTool(process_manager=process_manager))
     registry.register(SshDetectionTool())
     if email_tool_enabled(os.environ):
         registry.register(SendEmailSmtpTool())

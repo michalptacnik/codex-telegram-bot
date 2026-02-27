@@ -15,6 +15,9 @@ class ToolRequest:
 class ToolContext:
     workspace_root: Path
     policy_profile: str = "balanced"
+    chat_id: int = 0
+    user_id: int = 0
+    session_id: str = ""
 
 
 @dataclass(frozen=True)

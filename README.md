@@ -52,6 +52,9 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - `/deny <approval_id>`
   - `/interrupt`
   - `/continue`
+  - `/sessions`
+  - `/tail [session_id]`
+  - `/kill [session_id]`
   - `/continue yes` (required when replaying a prior high-risk tool prompt)
   - `/reset`
   - `/reinstall`
@@ -218,6 +221,11 @@ Environment variables override `.env`:
 - `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)
 - `APPROVAL_TTL_SEC` (default: `900`)
 - `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
+- `MAX_WALL_SEC` (default: `21600`; max process session wall time)
+- `IDLE_TIMEOUT_SEC` (default: `1200`; idle timeout for process sessions)
+- `MAX_OUTPUT_BYTES` (default: `5242880`; hard cap per process session output)
+- `RING_BUFFER_BYTES` (default: `65536`; in-memory output tail bytes)
+- `MAX_SESSIONS_PER_USER` (default: `3`; concurrent process sessions per chat/user)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
 - `DEFAULT_AGENT_POLICY_PROFILE` is `trusted` in seeded state; use `balanced`/`strict` if you want workspace-constrained file tools
 - `REPO_SCAN_MAX_FILES` (default: `3000`)
@@ -335,6 +343,11 @@ If your `codex` binary is in a different location, update the volume in `docker-
 - `/status`: includes context diagnostics (prompt chars + retrieval confidence)
 - `/help`: command taxonomy, examples, and active policy profile
 - `/workspace`: shows per-session isolated workspace path
+- `/sessions`: list process sessions for the current chat/user
+- `/tail [session_id]`: poll incremental output (`cursor_next` persisted)
+- `/interrupt`: send SIGINT to active process session (or current model run when no session exists)
+- `/kill [session_id]`: terminate process session with kill escalation
+- `/continue`: poll active process session output before replaying prompt continuation
 - `/reinstall`: clears stored token and restarts for onboarding
 - `/purge`: removes `.env` and restarts
 - `/restart`: immediate process restart

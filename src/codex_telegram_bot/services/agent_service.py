@@ -7,6 +7,7 @@ import uuid
 import json
 import hashlib
 import os
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -18,6 +19,7 @@ from codex_telegram_bot.domain.runs import RunRecord
 from codex_telegram_bot.domain.sessions import TelegramSessionRecord, TelegramSessionMessageRecord
 from codex_telegram_bot.events.event_bus import EventBus, RunEvent
 from codex_telegram_bot.execution.local_shell import LocalShellRunner
+from codex_telegram_bot.execution.process_manager import ProcessManager
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.observability.structured_log import log_json
@@ -78,7 +80,19 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
     "shell_exec": {
         "name": "shell_exec",
         "protocol": "!tool",
-        "args": {"cmd": "string (required)", "timeout_sec": "int (optional)"},
+        "args": {
+            "cmd": "string (required for short/start)",
+            "action": "string (optional: start|poll|write|terminate|status|list|search)",
+            "mode": "string (optional: short|session)",
+            "session_id": "string (required for non-start session actions)",
+            "stdin": "string (optional for write)",
+            "pty": "bool (optional; default true for session)",
+            "timeout_sec": "int (optional, short mode only)",
+            "cursor": "int (optional for poll/search)",
+            "query": "string (required for search)",
+            "max_results": "int (optional for search)",
+            "context_lines": "int (optional for search)",
+        },
     },
     "git_status": {
         "name": "git_status",
@@ -215,6 +229,23 @@ class ProbeDecision:
     max_steps: int
 
 
+@dataclass(frozen=True)
+class ToolCall:
+    kind: str
+    name: str
+    args: Dict[str, Any]
+    raw: str
+    confidence: float = 1.0
+    timeout_s: int = 60
+
+
+@dataclass(frozen=True)
+class TurnResult:
+    kind: str
+    text: str
+    session_id: str
+
+
 class AgentService:
     """Thin application service to isolate handlers from provider details."""
 
@@ -246,6 +277,7 @@ class AgentService:
         mcp_bridge: Optional[Any] = None,
         skill_pack_loader: Optional[Any] = None,
         tool_policy_engine: Optional[Any] = None,
+        process_manager: Optional[ProcessManager] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -278,6 +310,9 @@ class AgentService:
         self._mcp_bridge = mcp_bridge
         self._skill_pack_loader = skill_pack_loader
         self._tool_policy_engine = tool_policy_engine
+        self._process_manager = process_manager or ProcessManager(run_store=run_store)
+        self._last_process_cleanup_ts = 0.0
+        self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -562,6 +597,19 @@ class AgentService:
             "elapsed_ms": result.elapsed_ms,
         }
 
+    def tick_process_sessions_cleanup(self, force: bool = False) -> int:
+        if self._process_manager is None:
+            return 0
+        now = time.monotonic()
+        if not force and (now - self._last_process_cleanup_ts) < self._process_cleanup_interval_sec:
+            return 0
+        self._last_process_cleanup_ts = now
+        try:
+            return int(self._process_manager.cleanup_sessions() or 0)
+        except Exception:
+            logger.exception("process session cleanup tick failed")
+            return 0
+
     def scan_for_secrets(self, text: str) -> List[str]:
         """Return list of secret pattern names found in text (empty when no controller)."""
         if self._access_controller is None:
@@ -575,6 +623,10 @@ class AgentService:
     @property
     def access_controller(self) -> Optional[AccessController]:
         return self._access_controller
+
+    @property
+    def process_manager(self) -> Optional[ProcessManager]:
+        return self._process_manager
 
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
@@ -850,6 +902,9 @@ class AgentService:
                 workspace_root=self.session_workspace(session_id=session_id),
                 policy_profile=policy_profile,
                 extra_tools={},
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
             )
             text = (
                 f"[tool:{action_id}] rc={0 if result_obj.ok else 1}\n"
@@ -914,6 +969,85 @@ class AgentService:
         self.append_session_assistant_message(session_id=session_id, content=text, run_id=tool_run_id)
         return text
 
+    async def run_turn(
+        self,
+        prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> TurnResult:
+        text_prompt = str(prompt or "").strip()
+        if not text_prompt:
+            text_prompt = "(empty)"
+        self.tick_process_sessions_cleanup()
+        self.append_session_user_message(session_id=session_id, content=text_prompt)
+        output = await self.run_prompt_with_tool_loop(
+            prompt=text_prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+        )
+        hops = 0
+        while _contains_tool_call_signatures(output) and hops < 3:
+            hops += 1
+            log_json(
+                logger,
+                "output.firewall.reroute",
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                hop=hops,
+                preview=(output or "")[:200],
+            )
+            forced_actions, _, forced_final_prompt = _extract_loop_actions(
+                output,
+                preferred_tools=self._tool_registry.names(),
+            )
+            if forced_actions:
+                loop_payload = {
+                    "steps": [_loop_action_to_step(item) for item in forced_actions],
+                    "final_prompt": forced_final_prompt or _need_tools_summary_prompt(goal=text_prompt),
+                }
+                routed = "!loop " + json.dumps(loop_payload, ensure_ascii=True)
+                output = await self.run_prompt_with_tool_loop(
+                    prompt=routed,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=agent_id,
+                    progress_callback=progress_callback,
+                    autonomy_depth=1,
+                )
+                continue
+            output = await self.run_prompt_with_tool_loop(
+                prompt=output,
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                progress_callback=progress_callback,
+                autonomy_depth=1,
+            )
+        if _contains_tool_call_signatures(output):
+            output = (
+                "I hit a tool-call formatting loop while executing your request. "
+                "Reply with 'retry' and I will continue automatically."
+            )
+        output = (output or "").strip() or "(no output)"
+        lowered = output.lower()
+        if "approve once: /approve" in lowered or lowered.startswith("approval required"):
+            kind = "approval_request"
+        elif _is_blocking_question(output):
+            kind = "clarifying_question"
+        else:
+            kind = "final_text"
+        self.append_session_assistant_message(session_id=session_id, content=output)
+        return TurnResult(kind=kind, text=output, session_id=session_id)
+
     async def run_prompt_with_tool_loop(
         self,
         prompt: str,
@@ -951,6 +1085,64 @@ class AgentService:
                 },
             )
         available_tool_names = sorted(set(self._tool_registry.names()) | set(extra_tools.keys()))
+        if not actions:
+            reparsed_actions, reparsed_cleaned_prompt, reparsed_final_prompt = _extract_loop_actions(
+                prompt,
+                preferred_tools=available_tool_names,
+            )
+            if reparsed_actions:
+                actions = reparsed_actions
+                cleaned_prompt = reparsed_cleaned_prompt or cleaned_prompt
+                final_prompt = reparsed_final_prompt or final_prompt
+        if actions:
+            validated_actions, validation_error = self._validate_actions(
+                actions=actions,
+                workspace_root=workspace_root,
+                available_tool_names=available_tool_names,
+            )
+            if validation_error:
+                repaired = await self._request_tool_call_correction(
+                    prompt=(cleaned_prompt or prompt),
+                    model_output=(prompt or ""),
+                    selected_tools=available_tool_names,
+                    goal=(cleaned_prompt or prompt),
+                    agent_id=agent_id,
+                )
+                if repaired:
+                    repaired_actions, repaired_cleaned_prompt, repaired_final_prompt = _extract_loop_actions(
+                        repaired,
+                        preferred_tools=available_tool_names,
+                    )
+                    repaired_validated, repaired_error = self._validate_actions(
+                        actions=repaired_actions,
+                        workspace_root=workspace_root,
+                        available_tool_names=available_tool_names,
+                    )
+                    log_json(
+                        logger,
+                        "toolcall.repair",
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        repaired=bool(repaired_actions),
+                        error=(repaired_error or ""),
+                        preview=(repaired or "")[:200],
+                    )
+                    if repaired_validated and not repaired_error:
+                        actions = repaired_validated
+                        if repaired_cleaned_prompt:
+                            cleaned_prompt = repaired_cleaned_prompt
+                        if repaired_final_prompt:
+                            final_prompt = repaired_final_prompt
+                    else:
+                        msg = repaired_error or validation_error
+                        self.append_session_assistant_message(session_id=session_id, content=msg)
+                        return msg
+                else:
+                    self.append_session_assistant_message(session_id=session_id, content=validation_error)
+                    return validation_error
+            else:
+                actions = validated_actions
         if len(actions) > self._tool_loop_max_steps:
             msg = (
                 f"Error: tool step budget exceeded ({len(actions)} > {self._tool_loop_max_steps}). "
@@ -1056,8 +1248,14 @@ class AgentService:
                     preview=(need_tools_output or "")[:200],
                     protocol=bool(need_tools_protocol),
                     transpiled=bool(need_tools_transpiled),
+                    decoded=bool(need_tools_protocol),
+                    dialect=_detect_toolcall_dialect(need_tools_output),
+                    repaired=bool(need_tools_transpiled),
                 )
-                generated_actions, _, generated_final_prompt = _extract_loop_actions(need_tools_output)
+                generated_actions, _, generated_final_prompt = _extract_loop_actions(
+                    need_tools_output,
+                    preferred_tools=probe.tools,
+                )
                 if generated_actions:
                     max_probe_steps = max(1, min(int(probe.max_steps or 1), self._tool_loop_max_steps))
                     if len(generated_actions) > max_probe_steps:
@@ -1198,6 +1396,7 @@ class AgentService:
                     kind="tool",
                     tool_name=action.tool_name,
                     command=command,
+                    toolcall_ir=_loop_action_to_toolcall_ir(action),
                     allowed=True,
                     approval_required=approval_required,
                     approval_granted=not approval_required,
@@ -1275,6 +1474,7 @@ class AgentService:
                         kind="tool",
                         tool_name=action.tool_name,
                         command=command,
+                        toolcall_ir=_loop_action_to_toolcall_ir(action),
                         allowed=True,
                         approval_required=True,
                         approval_granted=False,
@@ -1296,6 +1496,9 @@ class AgentService:
                     workspace_root=session_workspace,
                     policy_profile=policy_profile,
                     extra_tools=extra_tools,
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
                 )
                 observations.append(result.output)
                 rc = 0 if result.ok else 1
@@ -1308,6 +1511,7 @@ class AgentService:
                     kind="tool",
                     tool_name=action.tool_name,
                     command=command,
+                    toolcall_ir=_loop_action_to_toolcall_ir(action),
                     allowed=True,
                     approval_required=False,
                     approval_granted=True,
@@ -1352,6 +1556,7 @@ class AgentService:
                 step=index,
                 kind="exec",
                 command=" ".join(argv),
+                toolcall_ir=_loop_action_to_toolcall_ir(action),
                 allowed=decision.allowed,
                 approval_required=approval_required,
                 approval_granted=(not approval_required),
@@ -1388,6 +1593,7 @@ class AgentService:
                     step=index,
                     kind="exec",
                     command=" ".join(argv),
+                    toolcall_ir=_loop_action_to_toolcall_ir(action),
                     allowed=False,
                     approval_required=approval_required,
                     approval_granted=False,
@@ -1438,6 +1644,7 @@ class AgentService:
                         step=index,
                         kind="exec",
                         command=" ".join(argv),
+                        toolcall_ir=_loop_action_to_toolcall_ir(action),
                         allowed=True,
                         approval_required=True,
                         approval_granted=False,
@@ -1499,6 +1706,7 @@ class AgentService:
                     step=index,
                     kind="exec",
                     command=" ".join(argv),
+                    toolcall_ir=_loop_action_to_toolcall_ir(action),
                     allowed=True,
                     approval_required=True,
                     approval_granted=False,
@@ -1532,6 +1740,7 @@ class AgentService:
                 step=index,
                 kind="exec",
                 command=" ".join(argv),
+                toolcall_ir=_loop_action_to_toolcall_ir(action),
                 allowed=True,
                 approval_required=False,
                 approval_granted=True,
@@ -1796,6 +2005,81 @@ class AgentService:
             payload=str(envelope),
         )
 
+    def _workspace_is_git_repo(self, workspace_root: Path) -> bool:
+        try:
+            return (workspace_root.resolve() / ".git").exists()
+        except Exception:
+            return False
+
+    def _validate_actions(
+        self,
+        actions: Sequence[LoopAction],
+        workspace_root: Path,
+        available_tool_names: Sequence[str],
+    ) -> tuple[List[LoopAction], str]:
+        normalized: List[LoopAction] = []
+        allowed_tools = set(_normalize_tool_names(list(available_tool_names)))
+        for action in actions:
+            if action.kind == "tool":
+                name = str(action.tool_name or "").strip().lower()
+                if not name:
+                    return [], "Error: invalid tool call (missing tool name)."
+                if name not in allowed_tools:
+                    return [], f"Error: tool '{name}' is not available in this turn."
+                args = dict(action.tool_args or {})
+                if name in {"read_file", "write_file"}:
+                    path = _resolve_workspace_bound_path(args.get("path"), workspace_root)
+                    if path is None:
+                        return [], "Error: file operation path must be inside WORKSPACE_ROOT."
+                    if path:
+                        args["path"] = path
+                if name.startswith("git_") and not self._workspace_is_git_repo(workspace_root):
+                    return [], (
+                        "Workspace is not a git repository yet. "
+                        "Should I initialize one here with `git init`?"
+                    )
+                normalized.append(
+                    LoopAction(
+                        kind="tool",
+                        argv=[],
+                        tool_name=name,
+                        tool_args=args,
+                        timeout_sec=max(1, int(action.timeout_sec or 60)),
+                    )
+                )
+                continue
+            if action.kind != "exec":
+                return [], f"Error: unsupported tool action kind '{action.kind}'."
+            argv = [str(x or "").strip() for x in list(action.argv or []) if str(x or "").strip()]
+            if not argv:
+                return [], "Error: invalid exec action (empty command)."
+            first = argv[0].lower()
+            rendered = " ".join(argv)
+            rendered_low = rendered.lower()
+            if first.startswith("{") or "{cmd:" in rendered_low:
+                return [], "Error: invalid exec action format. Expected canonical command syntax."
+            if re.search(r"(^|[^A-Za-z0-9_])find\s+/(?:\s|$)", rendered_low):
+                return [], "Error: unsafe search scope. Use absolute paths under WORKSPACE_ROOT only."
+            invokes_git = first == "git"
+            if (not invokes_git) and first in {"bash", "sh", "zsh"} and len(argv) >= 3:
+                inner = str(argv[2] or "").strip().lower()
+                invokes_git = bool(re.search(r"(^|\s)git(\s|$)", inner))
+            if invokes_git and not self._workspace_is_git_repo(workspace_root):
+                return [], (
+                    "Workspace is not a git repository yet. "
+                    "Should I initialize one here with `git init`?"
+                )
+            normalized.append(
+                LoopAction(
+                    kind="exec",
+                    argv=argv,
+                    tool_name="",
+                    tool_args={},
+                    timeout_sec=max(1, int(action.timeout_sec or 60)),
+                )
+            )
+        return normalized, ""
+
     async def _execute_registered_tool_action(
         self,
         action_id: str,
@@ -1804,6 +2088,9 @@ class AgentService:
         workspace_root: Path,
         policy_profile: str,
         extra_tools: Optional[Dict[str, Any]] = None,
+        chat_id: int = 0,
+        user_id: int = 0,
+        session_id: str = "",
     ):
         normalized_tool_name = (tool_name or "").strip().lower()
         normalized_args = _normalize_tool_args_for_workspace(
@@ -1817,6 +2104,10 @@ class AgentService:
                 ok=False,
                 output=f"{action_id} tool={tool_name} error=invalid_path outside_workspace",
             )
+        if normalized_tool_name == "shell_exec":
+            normalized_args.setdefault("_chat_id", int(chat_id or 0))
+            normalized_args.setdefault("_user_id", int(user_id or 0))
+            normalized_args.setdefault("_session_id", session_id or "")
         tool = (extra_tools or {}).get(tool_name) or self._tool_registry.get(tool_name)
         if not tool:
             if normalized_tool_name in {"send_email_smtp", "send_email"}:
@@ -1832,7 +2123,13 @@ class AgentService:
                 ok=False,
                 output=f"{action_id} tool={tool_name} error=tool_unavailable",
             )
-        context = ToolContext(workspace_root=workspace_root, policy_profile=policy_profile)
+        context = ToolContext(
+            workspace_root=workspace_root,
+            policy_profile=policy_profile,
+            chat_id=int(chat_id or 0),
+            user_id=int(user_id or 0),
+            session_id=session_id or "",
+        )
         req = ToolRequest(name=tool_name, args=normalized_args)
         try:
             arun = getattr(tool, "arun", None)
@@ -1888,6 +2185,7 @@ class AgentService:
             workspace_root=workspace_root,
             policy_profile=policy_profile,
             extra_tools=extra_tools,
+            session_id=session_id,
         )
         self.append_session_assistant_message(
             session_id=session_id,
@@ -1919,6 +2217,7 @@ class AgentService:
             workspace_root=workspace_root,
             policy_profile=policy_profile,
             extra_tools=extra_tools,
+            session_id=session_id,
         )
         self.append_session_assistant_message(
             session_id=session_id,
@@ -1948,6 +2247,7 @@ class AgentService:
             workspace_root=workspace_root,
             policy_profile=policy_profile,
             extra_tools=extra_tools,
+            session_id=session_id,
         )
         self.append_session_assistant_message(
             session_id=session_id,
@@ -2047,11 +2347,12 @@ class AgentService:
         text = (output or "").strip()
         if not text:
             return "", False, False
-        actions, _, _ = _extract_loop_actions(text)
+        text, auto_transpiled = _transpile_need_tools_output(text, selected_tools=selected_tools)
+        actions, _, _ = _extract_loop_actions(text, preferred_tools=selected_tools)
         if actions:
-            return text, True, False
+            return text, True, auto_transpiled
         if _is_blocking_question(text):
-            return text, False, False
+            return text, False, auto_transpiled
         original_command = _extract_exec_candidate_from_output(text)
 
         corrected = await self._request_tool_call_correction(
@@ -2063,11 +2364,12 @@ class AgentService:
         )
         corrected = (corrected or "").strip()
         if corrected:
-            actions, _, _ = _extract_loop_actions(corrected)
+            corrected, corrected_transpiled = _transpile_need_tools_output(corrected, selected_tools=selected_tools)
+            actions, _, _ = _extract_loop_actions(corrected, preferred_tools=selected_tools)
             if actions:
-                return corrected, True, False
+                return corrected, True, (auto_transpiled or corrected_transpiled)
             if _is_blocking_question(corrected):
-                return corrected, False, False
+                return corrected, False, (auto_transpiled or corrected_transpiled)
             text = corrected
 
         command = _extract_exec_candidate_from_output(text)
@@ -2076,7 +2378,7 @@ class AgentService:
         argv = _parse_exec_command_argv(command) if command else []
         if argv:
             return f"!exec {str(command).strip()}", True, True
-        return text, False, False
+        return text, False, auto_transpiled
 
     async def _resolve_autonomous_output(
         self,
@@ -2790,6 +3092,27 @@ def _loop_action_to_step(action: LoopAction) -> Dict[str, Any]:
     }
 
 
+def _loop_action_to_toolcall_ir(action: LoopAction) -> Dict[str, Any]:
+    if action.kind == "tool":
+        return {
+            "kind": "tool",
+            "name": action.tool_name,
+            "args": dict(action.tool_args or {}),
+            "raw": action.checkpoint_command(),
+            "confidence": 1.0,
+            "timeout_s": max(1, int(action.timeout_sec or 60)),
+        }
+    command = shlex.join(action.argv) if action.argv else ""
+    return {
+        "kind": "exec",
+        "name": "exec",
+        "args": {"command": command},
+        "raw": command,
+        "confidence": 1.0,
+        "timeout_s": max(1, int(action.timeout_sec or 60)),
+    }
+
+
 def _need_tools_summary_prompt(goal: str) -> str:
     g = (goal or "").strip()
     if not g:
@@ -2846,17 +3169,8 @@ def _normalize_tool_args_for_workspace(
 ) -> Optional[Dict[str, Any]]:
     normalized = dict(tool_args or {})
     name = (tool_name or "").strip().lower()
-    profile = (policy_profile or "").strip().lower()
     if name in {"read_file", "write_file"}:
         if "path" not in normalized:
-            return normalized
-        if profile == "trusted":
-            raw = str(normalized.get("path") or "").strip()
-            if not raw:
-                return normalized
-            candidate = Path(raw).expanduser()
-            resolved = candidate.resolve() if candidate.is_absolute() else (workspace_root / candidate).resolve()
-            normalized["path"] = str(resolved)
             return normalized
         path = _resolve_workspace_bound_path(normalized.get("path"), workspace_root)
         if path is None:
@@ -2888,9 +3202,46 @@ def _command_needs_shell_wrapper(command: str) -> bool:
     return any(marker in text for marker in shell_markers)
 
 
+def _extract_timeout_suffix(text: str) -> int:
+    raw = str(text or "").strip()
+    match = re.search(r"(?i)\|\s*timeout\s*=\s*(\d+)\s*$", raw)
+    if not match:
+        return 0
+    try:
+        return max(1, min(int(match.group(1)), 1800))
+    except Exception:
+        return 0
+
+
+def _strip_timeout_suffix(text: str) -> str:
+    raw = str(text or "").strip()
+    return re.sub(r"(?is)\|\s*timeout\s*=\s*\d+\s*$", "", raw).strip()
+
+
+def _unwrap_step_cmd_syntax(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    saw_step = False
+    step = re.match(r"(?is)^step\s*\d+\s*:\s*(.+)$", raw)
+    if step:
+        saw_step = True
+        raw = step.group(1).strip()
+    raw = _strip_timeout_suffix(raw)
+    if saw_step:
+        cmd_match = re.match(r"(?is)^\{cmd\s*:\s*(.+)\}$", raw)
+        if cmd_match:
+            return cmd_match.group(1).strip()
+    return raw
+
+
 def _parse_exec_command_argv(command: str) -> List[str]:
     cmd = str(command or "").strip()
+    if re.match(r"(?is)^step\s*\d+\s*:", cmd):
+        cmd = _unwrap_step_cmd_syntax(cmd)
     if not cmd:
+        return []
+    if re.match(r"(?is)^\{cmd\s*:", cmd):
         return []
     if re.search(r"(^|[^A-Za-z0-9_])find\s+/(?:\s|$)", cmd):
         return []
@@ -2898,7 +3249,13 @@ def _parse_exec_command_argv(command: str) -> List[str]:
         parsed = shlex.split(cmd)
     except ValueError:
         parsed = []
+    if parsed and (parsed[0].startswith("{") or "{cmd:" in " ".join(parsed).lower()):
+        return []
     if len(parsed) >= 3 and parsed[0] in {"bash", "sh", "zsh"} and parsed[1] == "-lc":
+        if "{cmd:" in str(parsed[2]).lower():
+            return []
+        if re.search(r"(^|[^A-Za-z0-9_])find\s+/(?:\s|$)", str(parsed[2]).lower()):
+            return []
         return parsed
     if _command_needs_shell_wrapper(cmd):
         return ["bash", "-lc", cmd]
@@ -2960,7 +3317,34 @@ def _prepare_exec_command(command: str, options: Dict[str, Any]) -> str:
     return cmd
 
 
-def _parse_tool_directive(body: str) -> Optional[LoopAction]:
+def _infer_tool_name_from_args(args: Dict[str, Any], preferred_tools: Sequence[str]) -> str:
+    allowed = set(_normalize_tool_names(list(preferred_tools or [])))
+    if not allowed:
+        return ""
+    keys = {str(k or "").strip().lower() for k in dict(args or {}).keys()}
+    if "cmd" in keys and "shell_exec" in allowed:
+        return "shell_exec"
+    if "query" in keys:
+        for name in ("mcp_search", "memory_search"):
+            if name in allowed:
+                return name
+    if "path" in keys:
+        if "content" in keys and "write_file" in allowed:
+            return "write_file"
+        if "read_file" in allowed:
+            return "read_file"
+    if {"to", "subject", "body"} <= keys:
+        for name in ("send_email_smtp", "send_email"):
+            if name in allowed:
+                return name
+    return ""
+
+
+def _parse_tool_directive(
+    body: str,
+    preferred_tool_name: str = "",
+    preferred_tools: Optional[Sequence[str]] = None,
+) -> Optional[LoopAction]:
     payload = (body or "").strip()
     if not payload:
         return None
@@ -2981,6 +3365,19 @@ def _parse_tool_directive(body: str) -> Optional[LoopAction]:
             argv = _parse_exec_command_argv(cmd)
             if argv:
                 return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=timeout_sec)
+            return None
+        if (not tool_name) and isinstance(obj, dict):
+            direct_args = dict(obj)
+            direct_args.pop("name", None)
+            direct_args.pop("tool", None)
+            direct_args.pop("args", None)
+            merged: Dict[str, Any] = {}
+            if isinstance(args, dict):
+                merged.update(dict(args))
+            merged.update(direct_args)
+            inferred = preferred_tool_name or _infer_tool_name_from_args(merged, preferred_tools or [])
+            if inferred:
+                return LoopAction(kind="tool", argv=[], tool_name=inferred, tool_args=merged)
             return None
         if tool_name and isinstance(args, dict):
             return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(args))
@@ -3034,17 +3431,41 @@ def _parse_tool_directive(body: str) -> Optional[LoopAction]:
     return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=args)
 
 
-def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
+def _extract_inline_protocol_suffix(line: str) -> str:
+    raw = str(line or "").strip()
+    if not raw:
+        return ""
+    patterns = [
+        r"(?is)(?:^|[\s])(![A-Za-z_][A-Za-z0-9_-]*\s+.+)\s*$",
+        r"(?is)(?:^|[\s])(!?loop\s+\{.*\})\s*$",
+        r"(?is)(?:^|[\s])(!?tool\s+\{.*\})\s*$",
+        r"(?is)(?:^|[\s])(!?exec\s+.+)\s*$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if match:
+            return str(match.group(1) or "").strip()
+    return ""
+
+
+def _extract_loop_actions(prompt: str, preferred_tools: Optional[Sequence[str]] = None) -> tuple[List[LoopAction], str, str]:
     actions: List[LoopAction] = []
     keep_lines: List[str] = []
     final_prompt = ""
+    normalized_preferred = _normalize_tool_names(list(preferred_tools or []))
+    preferred_tool_name = normalized_preferred[0] if len(normalized_preferred) == 1 else ""
     raw_lines = (prompt or "").splitlines()
     index = 0
     while index < len(raw_lines):
         raw = raw_lines[index]
         line = raw.strip()
-        if line.startswith("!loop "):
-            body = line[len("!loop "):].strip()
+        if line and not re.match(r"(?is)^!?\s*(loop|exec|tool)\b", line):
+            inline_suffix = _extract_inline_protocol_suffix(line)
+            if inline_suffix:
+                line = inline_suffix
+        loop_match = re.match(r"(?is)^!?loop\s+(.+)$", line)
+        if loop_match:
+            body = loop_match.group(1).strip()
             try:
                 obj = json.loads(body)
             except Exception:
@@ -3085,8 +3506,9 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
                     final_prompt = fp
             index += 1
             continue
-        if line == "!exec" or line.startswith("!exec "):
-            cmd_seed = line[len("!exec") :].strip()
+        exec_match = re.match(r"(?is)^!?exec(?:\s+(.*))?$", line)
+        if exec_match:
+            cmd_seed = str(exec_match.group(1) or "").strip()
             candidate = cmd_seed
             consumed = index + 1
             while (not candidate) and consumed < len(raw_lines):
@@ -3118,11 +3540,58 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
                 keep_lines.extend(raw_lines[index:consumed])
             index = consumed
             continue
-        if line.startswith("!tool "):
-            body = line[len("!tool "):].strip()
-            parsed = _parse_tool_directive(body)
+        tool_match = re.match(r"(?is)^!?tool\s+(.+)$", line)
+        if tool_match:
+            body = tool_match.group(1).strip()
+            parsed = _parse_tool_directive(
+                body,
+                preferred_tool_name=preferred_tool_name,
+                preferred_tools=normalized_preferred,
+            )
             if parsed:
                 actions.append(parsed)
+            else:
+                keep_lines.append(raw)
+            index += 1
+            continue
+        unknown_bang = re.match(r"(?is)^!([A-Za-z_][A-Za-z0-9_-]*)\s*(.*)$", line)
+        if unknown_bang:
+            name = str(unknown_bang.group(1) or "").strip().lower().replace("-", "_")
+            if name in {"exec", "tool", "loop"}:
+                keep_lines.append(raw)
+                index += 1
+                continue
+            body = str(unknown_bang.group(2) or "").strip()
+            args: Dict[str, Any] = {}
+            if body:
+                parsed_obj: Any = None
+                if body.startswith("{") and body.endswith("}"):
+                    try:
+                        parsed_obj = json.loads(body)
+                    except Exception:
+                        parsed_obj = None
+                if isinstance(parsed_obj, dict):
+                    args = dict(parsed_obj)
+                else:
+                    args = {"query": body}
+            actions.append(LoopAction(kind="tool", argv=[], tool_name=name, tool_args=args, timeout_sec=60))
+            index += 1
+            continue
+        step_match = re.match(r"(?is)^step\s*\d+\s*:\s*(.+)$", line)
+        if step_match:
+            timeout_override = _extract_timeout_suffix(line)
+            candidate = _unwrap_step_cmd_syntax(line)
+            argv = _parse_exec_command_argv(candidate)
+            if argv:
+                actions.append(
+                    LoopAction(
+                        kind="exec",
+                        argv=argv,
+                        tool_name="",
+                        tool_args={},
+                        timeout_sec=max(1, int(timeout_override or 60)),
+                    )
+                )
             else:
                 keep_lines.append(raw)
             index += 1
@@ -3130,6 +3599,82 @@ def _extract_loop_actions(prompt: str) -> tuple[List[LoopAction], str, str]:
         keep_lines.append(raw)
         index += 1
     return actions, "\n".join(keep_lines).strip(), final_prompt
+
+
+def _transpile_need_tools_output(text: str, selected_tools: Sequence[str]) -> tuple[str, bool]:
+    raw = (text or "").strip()
+    if not raw:
+        return raw, False
+    changed = False
+    out = raw
+    normalized_selected = _normalize_tool_names(list(selected_tools or []))
+    default_tool = normalized_selected[0] if len(normalized_selected) == 1 else ""
+
+    step_match = re.match(r"(?is)^step\s*\d+\s*:\s*(.+)$", out)
+    if step_match:
+        command = _unwrap_step_cmd_syntax(out)
+        timeout = _extract_timeout_suffix(out)
+        if command:
+            if timeout > 0:
+                out = "!loop " + json.dumps(
+                    {"steps": [{"kind": "exec", "command": command, "timeout_sec": timeout}]},
+                    ensure_ascii=True,
+                )
+            else:
+                out = f"!exec {command}"
+            changed = True
+
+    if out.startswith("!tool ") and default_tool:
+        payload_raw = out[len("!tool ") :].strip()
+        try:
+            payload_obj = json.loads(payload_raw)
+        except Exception:
+            payload_obj = None
+        if isinstance(payload_obj, dict) and not str(payload_obj.get("name") or payload_obj.get("tool") or "").strip():
+            out = "!tool " + json.dumps(
+                {"name": default_tool, "args": payload_obj},
+                ensure_ascii=True,
+                sort_keys=True,
+            )
+            changed = True
+    return out, changed
+
+
+def _contains_tool_call_signatures(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if re.search(r"(?is)![a-z_][a-z0-9_-]*(?:\s|$)", raw):
+        return True
+    if re.search(r"(?is)!(exec|tool|loop)\s", raw):
+        return True
+    if re.search(r"(?is)\b(exec|tool|loop)\s*\{", raw):
+        return True
+    if re.search(r"(?is)step\s*\d+\s*:.*\{cmd\s*:", raw) and re.search(r"(?is)\|\s*timeout\s*=", raw):
+        return True
+    if re.search(r"(?is)```.*?(?:!exec|!tool|!loop|\{cmd\s*:).*?```", raw):
+        return True
+    parsed = _parse_tool_invocation_json(raw)
+    if parsed is not None:
+        return True
+    return False
+
+
+def _detect_toolcall_dialect(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return "none"
+    if re.search(r"(?mi)^\s*!loop\b", raw):
+        return "legacy_loop"
+    if re.search(r"(?mi)^\s*!exec\b", raw):
+        return "legacy_exec"
+    if re.search(r"(?mi)^\s*!tool\b", raw):
+        return "legacy_tool"
+    if re.search(r"(?is)^step\s*\d+\s*:\s*", raw):
+        return "step_cmd"
+    if _parse_tool_invocation_json(raw):
+        return "json_wrapper"
+    return "none"
 
 
 def _parse_planner_output(raw: str) -> Dict[str, Any]:
@@ -3450,13 +3995,17 @@ def _extract_exec_candidate_from_output(text: str) -> str:
             continue
         step = re.match(r"(?i)^step\s*\d+\s*:\s*(.+)$", stripped)
         if step:
-            candidate = step.group(1).strip()
+            candidate = _unwrap_step_cmd_syntax(stripped)
             if _looks_like_shell_command_line(candidate):
                 return candidate
         if stripped.startswith("$"):
             candidate = stripped[1:].strip()
             if _looks_like_shell_command_line(candidate):
                 return candidate
+
+    wrapped = _unwrap_step_cmd_syntax(raw)
+    if wrapped and _looks_like_shell_command_line(wrapped):
+        return wrapped
 
     single = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     if len(single) == 1 and _looks_like_shell_command_line(single[0]):

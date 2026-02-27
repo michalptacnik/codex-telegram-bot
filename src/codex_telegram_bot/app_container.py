@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
 from codex_telegram_bot.agent_core.memory import resolve_memory_config
 from codex_telegram_bot.execution.local_shell import LocalShellRunner
+from codex_telegram_bot.execution.process_manager import ProcessManager
 from codex_telegram_bot.execution.profiles import ExecutionProfileResolver
 from codex_telegram_bot.events.event_bus import EventBus
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
@@ -94,10 +95,15 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     # Tool policy engine (Issue #107)
     tool_policy_engine = ToolPolicyEngine()
 
-    # Build tool registry with optional run_store (passed later for db-backed path)
+    run_store = SqliteRunStore(db_path=state_db_path) if state_db_path is not None else None
+    process_manager = ProcessManager(run_store=run_store)
+
+    # Build tool registry with optional run_store/process manager (db-backed path).
     tool_registry = build_default_tool_registry(
         provider_registry=provider_registry,
+        run_store=run_store,
         mcp_bridge=mcp_bridge,
+        process_manager=process_manager,
     )
     probe_loop: Optional[ProbeLoop] = None
     if (os.environ.get("ENABLE_PROBE_LOOP") or "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -125,11 +131,11 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         mcp_bridge=mcp_bridge,
         skill_pack_loader=skill_pack_loader,
         tool_policy_engine=tool_policy_engine,
+        process_manager=process_manager,
     )
 
-    if state_db_path is None:
+    if run_store is None:
         return AgentService(**common_kwargs)
-    run_store = SqliteRunStore(db_path=state_db_path)
     run_store.recover_interrupted_runs()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(60, approval_ttl_sec))
     run_store.expire_tool_approvals_before(cutoff.isoformat())
