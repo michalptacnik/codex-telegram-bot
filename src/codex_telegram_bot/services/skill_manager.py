@@ -34,6 +34,18 @@ class SkillSpec:
     enabled: bool
     source: str = "builtin"
     trusted: bool = True
+    version: str = ""
+    tags: List[str] = None  # type: ignore[assignment]
+    install_ref: Dict[str, Any] = None  # type: ignore[assignment]
+    sha256_manifest: Dict[str, str] = None  # type: ignore[assignment]
+    verified: bool = False
+    publisher: str = ""
+    public_key_id: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tags", list(self.tags or []))
+        object.__setattr__(self, "install_ref", dict(self.install_ref or {}))
+        object.__setattr__(self, "sha256_manifest", dict(self.sha256_manifest or {}))
 
 
 _SUPPORTED_TOOLS = {
@@ -102,6 +114,46 @@ class SkillManager:
         skill = _manifest_to_skill(payload, source=source_url, trusted=True)
         self._upsert(skill)
         return skill
+
+    def upsert_instruction_skill(
+        self,
+        *,
+        skill_id: str,
+        name: str,
+        description: str,
+        keywords: List[str],
+        source: str,
+        version: str = "",
+        tags: Optional[List[str]] = None,
+        install_ref: Optional[Dict[str, Any]] = None,
+        sha256_manifest: Optional[Dict[str, str]] = None,
+        enabled: bool = False,
+        verified: bool = False,
+        publisher: str = "",
+        public_key_id: str = "",
+    ) -> SkillSpec:
+        spec = SkillSpec(
+            skill_id=str(skill_id or "").strip().lower(),
+            name=str(name or skill_id).strip(),
+            description=str(description or "").strip(),
+            keywords=[str(x).strip().lower() for x in list(keywords or []) if str(x).strip()],
+            tools=[],
+            requires_env=[],
+            enabled=bool(enabled),
+            source=str(source or "market"),
+            trusted=True,
+            version=str(version or "").strip(),
+            tags=[str(x).strip().lower() for x in list(tags or []) if str(x).strip()],
+            install_ref=dict(install_ref or {}),
+            sha256_manifest=dict(sha256_manifest or {}),
+            verified=bool(verified),
+            publisher=str(publisher or "").strip(),
+            public_key_id=str(public_key_id or "").strip(),
+        )
+        if not spec.skill_id:
+            raise ValueError("skill_id is required.")
+        self._upsert(spec)
+        return spec
 
     def auto_activate(self, prompt: str) -> List[SkillSpec]:
         text = (prompt or "").lower()
@@ -274,6 +326,13 @@ def _dict_to_skill(row: Dict[str, Any]) -> SkillSpec:
         enabled=bool(row.get("enabled", False)),
         source=str(row.get("source") or "custom"),
         trusted=bool(row.get("trusted", False)),
+        version=str(row.get("version") or "").strip(),
+        tags=[str(x).strip().lower() for x in list(row.get("tags") or []) if str(x).strip()],
+        install_ref=dict(row.get("install_ref") or {}),
+        sha256_manifest=dict(row.get("sha256_manifest") or {}),
+        verified=bool(row.get("verified", False)),
+        publisher=str(row.get("publisher") or "").strip(),
+        public_key_id=str(row.get("public_key_id") or "").strip(),
     )
 
 
@@ -284,9 +343,9 @@ def _manifest_to_skill(payload: Dict[str, Any], source: str, trusted: bool) -> S
     tools = [str(x).strip().lower() for x in list(payload.get("tools") or []) if str(x).strip()]
     if not tools:
         raise ValueError("Skill manifest must declare at least one tool.")
-        for tool_name in tools:
-            if tool_name not in _SUPPORTED_TOOLS:
-                raise ValueError(f"Unsupported tool in manifest: {tool_name}")
+    for tool_name in tools:
+        if tool_name not in _SUPPORTED_TOOLS:
+            raise ValueError(f"Unsupported tool in manifest: {tool_name}")
     return SkillSpec(
         skill_id=skill_id,
         name=str(payload.get("name") or skill_id).strip(),
@@ -297,4 +356,11 @@ def _manifest_to_skill(payload: Dict[str, Any], source: str, trusted: bool) -> S
         enabled=bool(payload.get("enabled", True)),
         source=source,
         trusted=bool(trusted),
+        version=str(payload.get("version") or "").strip(),
+        tags=[str(x).strip().lower() for x in list(payload.get("tags") or []) if str(x).strip()],
+        install_ref=dict(payload.get("install_ref") or {}),
+        sha256_manifest=dict(payload.get("sha256_manifest") or {}),
+        verified=bool(payload.get("verified", False)),
+        publisher=str(payload.get("publisher") or "").strip(),
+        public_key_id=str(payload.get("public_key_id") or "").strip(),
     )

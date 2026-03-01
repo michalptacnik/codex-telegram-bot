@@ -205,6 +205,26 @@ class SqliteRunStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS skill_catalog_entries (
+                    id TEXT PRIMARY KEY,
+                    source_name TEXT NOT NULL,
+                    skill_name TEXT NOT NULL,
+                    version TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    tags_json TEXT NOT NULL DEFAULT '[]',
+                    install_ref_json TEXT NOT NULL DEFAULT '{}',
+                    last_fetched_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_skill_catalog_source_name
+                ON skill_catalog_entries (source_name, skill_name)
+                """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_heartbeat_due
                 ON heartbeat_state (heartbeat_enabled, next_heartbeat_at)
                 """
@@ -1688,6 +1708,83 @@ class SqliteRunStore:
             out.append(payload)
         return out
 
+    def upsert_skill_catalog_entries(self, source_name: str, rows: List[dict]) -> int:
+        now = _utc_now()
+        normalized_source = str(source_name or "").strip().lower()
+        if not normalized_source:
+            raise ValueError("source_name is required")
+        with self._connect() as conn:
+            for item in rows:
+                entry_id = str(item.get("id") or "").strip()
+                if not entry_id:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO skill_catalog_entries
+                    (id, source_name, skill_name, version, description, tags_json, install_ref_json, last_fetched_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET
+                        source_name = excluded.source_name,
+                        skill_name = excluded.skill_name,
+                        version = excluded.version,
+                        description = excluded.description,
+                        tags_json = excluded.tags_json,
+                        install_ref_json = excluded.install_ref_json,
+                        last_fetched_at = excluded.last_fetched_at
+                    """,
+                    (
+                        entry_id,
+                        normalized_source,
+                        str(item.get("skill_name") or "").strip(),
+                        str(item.get("version") or "").strip(),
+                        str(item.get("description") or "").strip(),
+                        json.dumps(list(item.get("tags") or []), ensure_ascii=True),
+                        json.dumps(dict(item.get("install_ref") or {}), ensure_ascii=True),
+                        str(item.get("last_fetched_at") or now),
+                    ),
+                )
+        return len(rows)
+
+    def list_skill_catalog_entries(
+        self,
+        *,
+        query: str = "",
+        source_name: str = "",
+        limit: int = 100,
+    ) -> List[dict]:
+        where = ["1=1"]
+        params: List[object] = []
+        source = str(source_name or "").strip().lower()
+        if source:
+            where.append("source_name = ?")
+            params.append(source)
+        q = str(query or "").strip().lower()
+        if q:
+            where.append("(LOWER(skill_name) LIKE ? OR LOWER(description) LIKE ?)")
+            like = f"%{q}%"
+            params.extend([like, like])
+        where_sql = " AND ".join(where)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM skill_catalog_entries
+                WHERE {where_sql}
+                ORDER BY source_name ASC, skill_name ASC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_skill_catalog_entry(row) for row in rows]
+
+    def clear_skill_catalog_source(self, source_name: str) -> int:
+        source = str(source_name or "").strip().lower()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM skill_catalog_entries WHERE source_name = ?",
+                (source,),
+            )
+        return int(cur.rowcount or 0)
+
     def create_cron_job(
         self,
         owner_user_id: str,
@@ -2962,6 +3059,27 @@ def _row_to_heartbeat_state(row: sqlite3.Row) -> dict:
         "last_heartbeat_at": str(row["last_heartbeat_at"] or ""),
         "next_heartbeat_at": str(row["next_heartbeat_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
+    }
+
+
+def _row_to_skill_catalog_entry(row: sqlite3.Row) -> dict:
+    try:
+        tags = json.loads(row["tags_json"] or "[]")
+    except Exception:
+        tags = []
+    try:
+        install_ref = json.loads(row["install_ref_json"] or "{}")
+    except Exception:
+        install_ref = {}
+    return {
+        "id": str(row["id"] or ""),
+        "source_name": str(row["source_name"] or ""),
+        "skill_name": str(row["skill_name"] or ""),
+        "version": str(row["version"] or ""),
+        "description": str(row["description"] or ""),
+        "tags": list(tags or []),
+        "install_ref": dict(install_ref or {}),
+        "last_fetched_at": str(row["last_fetched_at"] or ""),
     }
 
 
