@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Costs</h1>
+    <p class="subtitle">Daily token and cost rollups by user</p>
+  </div>
+</div>
+
+<section class="card table-card">
+  <table>
+    <thead>
+      <tr>
+        <th>User</th>
+        <th>Date</th>
+        <th>Total Tokens</th>
+        <th>Total Cost (USD)</th>
+        <th>Updated</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if items %}
+      {% for row in items %}
+      <tr>
+        <td class="mono">{{ row.user_id }}</td>
+        <td class="mono">{{ row.date }}</td>
+        <td class="mono">{{ row.total_tokens }}</td>
+        <td class="mono">{{ "%.6f"|format(row.total_cost_usd) }}</td>
+        <td class="dim">{{ row.updated_at[:19] | replace("T", " ") }}</td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="5" class="dim">No cost data yet.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}
+

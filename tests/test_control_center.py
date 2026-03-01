@@ -157,6 +157,10 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugins.status_code, 200)
         self.assertIn("Plugins", plugins.text)
 
+        chat = client.get("/chat")
+        self.assertEqual(chat.status_code, 200)
+        self.assertIn("Realtime Chat", chat.text)
+
     async def test_error_catalog_and_recovery_api(self):
         tmp = tempfile.TemporaryDirectory()
         try:
@@ -252,6 +256,12 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(retrieval_stats.status_code, 200)
             retrieval_refresh = client.post("/api/retrieval/refresh")
             self.assertEqual(retrieval_refresh.status_code, 200)
+            costs_api = client.get("/api/costs/daily")
+            self.assertEqual(costs_api.status_code, 200)
+            self.assertIn("items", costs_api.json())
+            costs_page = client.get("/costs")
+            self.assertEqual(costs_page.status_code, 200)
+            self.assertIn("Costs", costs_page.text)
 
             approvals_page = client.get("/approvals")
             self.assertEqual(approvals_page.status_code, 200)
@@ -296,6 +306,67 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
                 os.environ.pop("LOCAL_API_KEYS", None)
             else:
                 os.environ["LOCAL_API_KEYS"] = old_keys
+
+    async def test_websocket_chat_streaming_and_approval_events(self):
+        app = create_app(self.service)
+        client = TestClient(app)
+
+        with client.websocket_connect("/ws/chat") as ws:
+            ws.send_json(
+                {
+                    "type": "user_message",
+                    "text": "hello from web chat",
+                    "chat_id": 1001,
+                    "user_id": 2002,
+                }
+            )
+            first_events = []
+            for _ in range(60):
+                payload = ws.receive_json()
+                first_events.append(payload)
+                if payload.get("type") == "done":
+                    break
+            self.assertTrue(any(item.get("type") == "assistant_chunk" for item in first_events))
+            done_payload = next(item for item in first_events if item.get("type") == "done")
+            session_id = str(done_payload.get("session_id") or "")
+            self.assertTrue(session_id)
+
+            ws.send_json(
+                {
+                    "type": "user_message",
+                    "session_id": session_id,
+                    "text": "!exec codex --danger-full-access --help",
+                }
+            )
+            second_events = []
+            for _ in range(80):
+                payload = ws.receive_json()
+                second_events.append(payload)
+                if payload.get("type") == "done":
+                    break
+            pending = [
+                item
+                for item in second_events
+                if item.get("type") == "tool_event" and item.get("status") == "awaiting_approval"
+            ]
+            self.assertTrue(pending)
+            detail = pending[0].get("detail") or {}
+            approval_id = str(detail.get("approval_id") or "")
+            self.assertTrue(approval_id)
+
+            ws.send_json(
+                {
+                    "type": "deny",
+                    "session_id": session_id,
+                    "approval_id": approval_id,
+                    "chat_id": detail.get("chat_id"),
+                    "user_id": detail.get("user_id"),
+                }
+            )
+            deny_event = ws.receive_json()
+            self.assertEqual(deny_event.get("type"), "tool_event")
+            self.assertEqual(deny_event.get("status"), "result")
+            self.assertIn("Denied", str((deny_event.get("detail") or {}).get("output") or ""))
 
     async def test_agents_page_uses_registry_provider_options(self):
         tmp = tempfile.TemporaryDirectory()

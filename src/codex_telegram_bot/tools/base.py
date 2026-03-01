@@ -176,6 +176,70 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["query"],
         },
     },
+    "web_fetch": {
+        "name": "web_fetch",
+        "description": "Fetch a public URL and extract readable text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Public HTTP(S) URL"},
+                "max_chars": {"type": "integer", "description": "Maximum extracted text chars (default 10000)"},
+                "timeout_s": {"type": "integer", "description": "Timeout in seconds (default 15)"},
+                "user_agent": {"type": "string", "description": "Optional custom user-agent"},
+            },
+            "required": ["url"],
+        },
+    },
+    "send_message": {
+        "name": "send_message",
+        "description": "Send a proactive message to a target session owner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Target session ID. Defaults to current session"},
+                "text": {"type": "string", "description": "Message text to deliver"},
+                "markdown": {"type": "boolean", "description": "Render as markdown where supported"},
+                "silent": {"type": "boolean", "description": "Suppress notifications where supported"},
+            },
+            "required": ["text"],
+        },
+    },
+    "schedule_task": {
+        "name": "schedule_task",
+        "description": "Create a one-shot or recurring schedule for reminder delivery.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "when": {"type": "string", "description": "Natural language time (e.g. 'next Monday at 23:45')"},
+                "message": {"type": "string", "description": "Reminder text"},
+                "repeat": {"type": "string", "description": "none|hourly|daily|weekly|cron:<expr>"},
+                "session_id": {"type": "string", "description": "Target session ID; defaults to current session"},
+            },
+            "required": ["message"],
+        },
+    },
+    "list_schedules": {
+        "name": "list_schedules",
+        "description": "List active schedules.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Optional session filter"},
+            },
+            "required": [],
+        },
+    },
+    "cancel_schedule": {
+        "name": "cancel_schedule",
+        "description": "Cancel a schedule by id.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Schedule id"},
+            },
+            "required": ["id"],
+        },
+    },
     "send_email_smtp": {
         "name": "send_email_smtp",
         "description": "Send an email via SMTP.",

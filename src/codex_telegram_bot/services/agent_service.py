@@ -42,7 +42,10 @@ from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
+from codex_telegram_bot.services.cron_scheduler import CronScheduler
+from codex_telegram_bot.services.cost_tracking import estimate_cost_usd, normalize_usage
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
+from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
@@ -214,6 +217,46 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"query": "string (required)", "k": "int (optional)", "timeout_sec": "int (optional)"},
     },
+    "web_fetch": {
+        "name": "web_fetch",
+        "protocol": "!tool",
+        "args": {
+            "url": "string (required)",
+            "max_chars": "int (optional)",
+            "timeout_s": "int (optional)",
+            "user_agent": "string (optional)",
+        },
+    },
+    "send_message": {
+        "name": "send_message",
+        "protocol": "!tool",
+        "args": {
+            "session_id": "string (optional; defaults to current session)",
+            "text": "string (required)",
+            "markdown": "bool (optional)",
+            "silent": "bool (optional)",
+        },
+    },
+    "schedule_task": {
+        "name": "schedule_task",
+        "protocol": "!tool",
+        "args": {
+            "when": "string (optional; required for one-shot)",
+            "message": "string (required)",
+            "repeat": "string (optional; none|hourly|daily|weekly|cron:<expr>)",
+            "session_id": "string (optional; defaults to current session)",
+        },
+    },
+    "list_schedules": {
+        "name": "list_schedules",
+        "protocol": "!tool",
+        "args": {"session_id": "string (optional)"},
+    },
+    "cancel_schedule": {
+        "name": "cancel_schedule",
+        "protocol": "!tool",
+        "args": {"id": "string (required)"},
+    },
     # MCP tools (Issue #103)
     "mcp_search": {
         "name": "mcp_search",
@@ -301,6 +344,8 @@ class AgentService:
         skill_pack_loader: Optional[Any] = None,
         tool_policy_engine: Optional[Any] = None,
         process_manager: Optional[ProcessManager] = None,
+        proactive_messenger: Optional[ProactiveMessenger] = None,
+        config_dir: Optional[Path] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -335,6 +380,8 @@ class AgentService:
         self._skill_pack_loader = skill_pack_loader
         self._tool_policy_engine = tool_policy_engine
         self._process_manager = process_manager or ProcessManager(run_store=run_store)
+        self._proactive_messenger = proactive_messenger
+        self._config_dir = config_dir.expanduser().resolve() if config_dir is not None else None
         self._last_process_cleanup_ts = 0.0
         self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
 
@@ -343,6 +390,16 @@ class AgentService:
         self._scheduler = AgentScheduler(
             executor=self._execute_prompt,
             get_agent_concurrency=self._agent_max_concurrency,
+        )
+        self._cron_scheduler = (
+            CronScheduler(
+                store=self._run_store,
+                execute_fn=self._execute_cron_job,
+                tick_interval_sec=max(10, int(os.environ.get("CRON_TICK_INTERVAL_SEC", "60") or 60)),
+                max_failures=max(1, int(os.environ.get("CRON_MAX_FAILURES", "3") or 3)),
+            )
+            if self._run_store is not None
+            else None
         )
 
     # ------------------------------------------------------------------
@@ -356,6 +413,27 @@ class AgentService:
         return callable(getattr(provider, "generate_with_tools", None))
 
     async def run_native_tool_loop(
+        self,
+        user_message: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> str:
+        from codex_telegram_bot.agent.tool_loop import run_native_tool_loop as _run_native_tool_loop
+
+        return await _run_native_tool_loop(
+            service=self,
+            user_message=user_message,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+        )
+
+    async def _run_native_tool_loop_impl(
         self,
         user_message: str,
         chat_id: int,
@@ -458,6 +536,14 @@ class AgentService:
                     tool_schemas=tool_schemas,
                     correlation_id="",
                 )
+            self._record_usage_from_provider_response(
+                response=response if isinstance(response, dict) else {},
+                session_id=session_id,
+                user_id=user_id,
+                provider_name=self._provider_label(provider),
+                model_name=str((response or {}).get("model") or getattr(provider, "_model", "")),
+                meta={"source": "native_tool_loop", "turn": turn + 1},
+            )
 
             events = decode_provider_response(response, allowed_tools=snapshot.names())
             decode_error = next((ev for ev in events if isinstance(ev, RuntimeContractError)), None)
@@ -686,12 +772,29 @@ class AgentService:
         return self._scheduler.job_status(job_id)
 
     async def shutdown(self) -> None:
+        await self.stop_cron_scheduler()
         await self._scheduler.shutdown()
         if self._process_manager is not None:
             try:
                 self._process_manager.cleanup_sessions()
             except Exception:
                 logger.exception("process manager shutdown cleanup failed")
+
+    async def start_cron_scheduler(self) -> bool:
+        if self._cron_scheduler is None:
+            return False
+        await self._cron_scheduler.start()
+        return True
+
+    async def stop_cron_scheduler(self) -> None:
+        if self._cron_scheduler is None:
+            return
+        await self._cron_scheduler.stop()
+
+    async def run_cron_tick_once(self) -> Dict[str, int]:
+        if self._cron_scheduler is None:
+            return {"due": 0, "ran": 0, "failed": 0}
+        return await self._cron_scheduler.tick_once()
 
     async def handoff_prompt(
         self,
@@ -1045,7 +1148,27 @@ class AgentService:
     def process_manager(self) -> Optional[ProcessManager]:
         return self._process_manager
 
+    def register_proactive_transport(
+        self,
+        name: str,
+        handler: Callable[[Dict[str, Any]], Awaitable[None]],
+    ) -> bool:
+        if self._proactive_messenger is None:
+            return False
+        self._proactive_messenger.register(name=name, handler=handler)
+        return True
+
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
+        from codex_telegram_bot.agent.prompt_builder import build_session_prompt as _build_session_prompt
+
+        return _build_session_prompt(
+            service=self,
+            session_id=session_id,
+            user_prompt=user_prompt,
+            max_turns=max_turns,
+        )
+
+    def _build_session_prompt_impl(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         capability_lines = self._build_capability_context(user_prompt=user_prompt)
@@ -1397,6 +1520,27 @@ class AgentService:
         agent_id: str = "default",
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> TurnResult:
+        from codex_telegram_bot.agent.session_handler import run_turn as _run_turn
+
+        return await _run_turn(
+            service=self,
+            prompt=prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+        )
+
+    async def _run_turn_impl(
+        self,
+        prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> TurnResult:
         text_prompt = str(prompt or "").strip()
         if not text_prompt:
             text_prompt = "(empty)"
@@ -1471,6 +1615,29 @@ class AgentService:
         return TurnResult(kind=kind, text=output, session_id=session_id)
 
     async def run_prompt_with_tool_loop(
+        self,
+        prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        autonomy_depth: int = 0,
+    ) -> str:
+        from codex_telegram_bot.agent.tool_loop import run_prompt_with_tool_loop as _run_prompt_with_tool_loop
+
+        return await _run_prompt_with_tool_loop(
+            service=self,
+            prompt=prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+            autonomy_depth=autonomy_depth,
+        )
+
+    async def _run_prompt_with_tool_loop_impl(
         self,
         prompt: str,
         chat_id: int,
@@ -2279,6 +2446,72 @@ class AgentService:
             "tool_policy_enabled": bool(self._tool_policy_engine is not None),
         }
 
+    def _record_usage_from_provider_response(
+        self,
+        *,
+        response: Dict[str, Any],
+        session_id: str,
+        user_id: int,
+        provider_name: str,
+        model_name: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._run_store is None:
+            return
+        usage_raw = response.get("usage") if isinstance(response, dict) else None
+        usage = usage_raw if isinstance(usage_raw, dict) else {}
+        prompt_tokens, completion_tokens, total_tokens = normalize_usage(usage)
+        if total_tokens <= 0:
+            return
+        provider = self._normalize_provider_name(provider_name or "unknown")
+        model = (model_name or str(response.get("model") or "")).strip()
+        if not model:
+            model = "unknown"
+        estimated = estimate_cost_usd(
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            usage=usage,
+            config_dir=self._config_dir,
+        )
+        self._run_store.record_usage_event(
+            user_id=str(user_id),
+            session_id=session_id,
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_usd_estimate=estimated,
+            meta={
+                "usage": usage,
+                **(meta or {}),
+            },
+        )
+
+    def session_cost_summary(self, session_id: str) -> Dict[str, Any]:
+        if self._run_store is None:
+            return {"session_id": session_id, "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        return self._run_store.get_session_cost_rollup(session_id)
+
+    def user_daily_cost_summary(self, user_id: int, date: str = "") -> Dict[str, Any]:
+        if self._run_store is None:
+            return {"user_id": str(user_id), "date": "", "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        day = (date or datetime.now(timezone.utc).date().isoformat()).strip()
+        return self._run_store.get_user_daily_cost_rollup(str(user_id), day)
+
+    def list_daily_cost_summaries(self, date: str = "", limit: int = 100) -> List[Dict[str, Any]]:
+        if self._run_store is None:
+            return []
+        day = (date or "").strip()
+        return self._run_store.list_user_daily_cost_rollups(date=day, limit=limit)
+
+    def list_session_usage_events(self, session_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        if self._run_store is None:
+            return []
+        return self._run_store.list_usage_events(session_id=session_id, limit=limit)
+
     def reliability_snapshot(self, limit: int = 500) -> Dict[str, Any]:
         runs = self.list_recent_runs(limit=max(10, min(limit, 5000)))
         total = len(runs)
@@ -2589,6 +2822,50 @@ class AgentService:
             ok=result.ok,
             output=f"{action_id} tool={tool_name} status={status}\n{result.output}",
         )
+
+    async def _execute_cron_job(self, job: Dict[str, Any]) -> bool:
+        if self._run_store is None:
+            return False
+        session_id = str(job.get("session_id") or "").strip()
+        if not session_id:
+            return False
+        session = self.get_session(session_id)
+        if session is None:
+            return False
+        try:
+            payload = json.loads(job.get("payload_json") or "{}")
+        except Exception:
+            payload = {}
+        message = str(payload.get("message") or "").strip()
+        if not message:
+            return False
+        self.initialize_session_workspace(session_id=session_id)
+        result = await self._execute_registered_tool_action(
+            action_id="cron-" + uuid.uuid4().hex[:8],
+            tool_name="send_message",
+            tool_args={
+                "session_id": session_id,
+                "text": message,
+                "markdown": bool(payload.get("markdown", False)),
+                "silent": bool(payload.get("silent", True)),
+            },
+            workspace_root=self.session_workspace(session_id=session_id),
+            policy_profile="trusted",
+            extra_tools={"send_message": self._tool_registry.get("send_message")},
+            allowed_tool_names=["send_message"],
+            chat_id=int(session.chat_id),
+            user_id=int(job.get("owner_user_id") or session.user_id),
+            session_id=session_id,
+        )
+        log_json(
+            logger,
+            "cron.job.executed",
+            job_id=str(job.get("id") or ""),
+            session_id=session_id,
+            ok=bool(result.ok),
+            preview=(result.output or "")[:200],
+        )
+        return bool(result.ok)
 
     def _tool_action_requires_approval(self, tool_name: str) -> bool:
         name = (tool_name or "").strip().lower()

@@ -1,0 +1,253 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="header">
+  <div>
+    <h1 class="title">Realtime Chat</h1>
+    <p class="subtitle">WebSocket chat with live tool status and approvals.</p>
+  </div>
+  <span class="badge">MVP</span>
+</div>
+
+<div class="chat-grid">
+  <section class="card chat-panel">
+    <div class="toolbar">
+      <label for="session-select">Session</label>
+      <select id="session-select">
+        <option value="">New session</option>
+        {% for s in sessions %}
+        <option
+          value="{{ s.session_id }}"
+          data-chat-id="{{ s.chat_id }}"
+          data-user-id="{{ s.user_id }}"
+          {% if s.session_id == selected_session_id %}selected{% endif %}
+        >
+          {{ s.session_id[:12] }} · chat {{ s.chat_id }} · user {{ s.user_id }}
+        </option>
+        {% endfor %}
+      </select>
+      <label for="chat-id">Chat ID</label>
+      <input id="chat-id" type="number" value="{{ selected_session.chat_id if selected_session else 1 }}" />
+      <label for="user-id">User ID</label>
+      <input id="user-id" type="number" value="{{ selected_session.user_id if selected_session else 1 }}" />
+      <span id="ws-state" class="badge">connecting…</span>
+    </div>
+
+    <div id="chat-log" class="chat-log" aria-live="polite"></div>
+
+    <form id="chat-form" class="toolbar chat-input-row">
+      <input id="chat-input" type="text" placeholder="Send a prompt..." autocomplete="off" />
+      <button type="submit" class="btn">Send</button>
+    </form>
+  </section>
+
+  <section class="card side-panel">
+    <h3 class="mono">Session Cost</h3>
+    <div id="cost-summary" class="dim">
+      <div>Total tokens: <span id="cost-tokens">{{ selected_cost_summary.total_tokens or 0 }}</span></div>
+      <div>Total USD: <span id="cost-usd">{{ '%.6f'|format(selected_cost_summary.total_cost_usd or 0) }}</span></div>
+      <div>Updated: <span id="cost-updated">{{ selected_cost_summary.updated_at or '-' }}</span></div>
+    </div>
+    <hr />
+    <div class="dim">
+      Use the session selector to continue an existing Telegram session, or start a new web-only session with chat/user IDs.
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const sessionSelect = document.getElementById("session-select");
+  const chatIdInput = document.getElementById("chat-id");
+  const userIdInput = document.getElementById("user-id");
+  const chatForm = document.getElementById("chat-form");
+  const chatInput = document.getElementById("chat-input");
+  const chatLog = document.getElementById("chat-log");
+  const wsState = document.getElementById("ws-state");
+  const costTokens = document.getElementById("cost-tokens");
+  const costUsd = document.getElementById("cost-usd");
+  const costUpdated = document.getElementById("cost-updated");
+
+  let activeSessionId = "{{ selected_session_id }}";
+  let currentAssistant = null;
+
+  function wsUrl() {
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
+    return `${proto}://${window.location.host}/ws/chat`;
+  }
+
+  function appendMessage(role, text) {
+    const row = document.createElement("div");
+    row.className = `chat-msg ${role}`;
+    const bubble = document.createElement("div");
+    bubble.className = "chat-bubble";
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    chatLog.appendChild(row);
+    chatLog.scrollTop = chatLog.scrollHeight;
+    return bubble;
+  }
+
+  function appendToolEvent(ev) {
+    if (!currentAssistant) {
+      currentAssistant = appendMessage("assistant", "");
+    }
+    const block = document.createElement("div");
+    block.className = `tool-event tool-${ev.status || "result"}`;
+    const detail = ev.detail || {};
+    const title = `${ev.name || "tool"} · ${ev.status || ""}`;
+    const payload = [];
+    if (detail.step) payload.push(`step=${detail.step}`);
+    if (detail.returncode !== undefined) payload.push(`rc=${detail.returncode}`);
+    if (detail.approval_id) payload.push(`approval=${detail.approval_id.slice(0, 8)}`);
+    if (detail.message) payload.push(detail.message);
+    if (detail.output) payload.push(detail.output);
+    block.textContent = payload.length ? `${title} (${payload.join(", ")})` : title;
+    currentAssistant.appendChild(block);
+
+    if (ev.status === "awaiting_approval" && detail.approval_id) {
+      const actions = document.createElement("div");
+      actions.className = "tool-approval-actions";
+      const approveBtn = document.createElement("button");
+      approveBtn.type = "button";
+      approveBtn.className = "btn";
+      approveBtn.textContent = "Approve";
+      approveBtn.onclick = () => {
+        socket.send(JSON.stringify({
+          type: "approve",
+          approval_id: detail.approval_id,
+          session_id: activeSessionId,
+          chat_id: detail.chat_id,
+          user_id: detail.user_id,
+        }));
+      };
+      const denyBtn = document.createElement("button");
+      denyBtn.type = "button";
+      denyBtn.className = "btn";
+      denyBtn.textContent = "Deny";
+      denyBtn.onclick = () => {
+        socket.send(JSON.stringify({
+          type: "deny",
+          approval_id: detail.approval_id,
+          session_id: activeSessionId,
+          chat_id: detail.chat_id,
+          user_id: detail.user_id,
+        }));
+      };
+      actions.appendChild(approveBtn);
+      actions.appendChild(denyBtn);
+      currentAssistant.appendChild(actions);
+    }
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  async function refreshCostSummary(sessionId) {
+    if (!sessionId) return;
+    const resp = await fetch(`/api/sessions/${sessionId}/detail`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const summary = data.cost_summary || {};
+    costTokens.textContent = summary.total_tokens || 0;
+    costUsd.textContent = Number(summary.total_cost_usd || 0).toFixed(6);
+    costUpdated.textContent = summary.updated_at || "-";
+  }
+
+  async function loadSessionHistory(sessionId) {
+    chatLog.innerHTML = "";
+    currentAssistant = null;
+    if (!sessionId) return;
+    const resp = await fetch(`/api/sessions/${sessionId}/detail`);
+    if (!resp.ok) return;
+    const data = await resp.json();
+    for (const msg of (data.recent_messages || [])) {
+      appendMessage(msg.role === "assistant" ? "assistant" : "user", msg.content || "");
+    }
+    await refreshCostSummary(sessionId);
+  }
+
+  const socket = new WebSocket(wsUrl());
+  socket.onopen = () => {
+    wsState.textContent = "connected";
+    if (activeSessionId) {
+      socket.send(JSON.stringify({ type: "subscribe", session_id: activeSessionId }));
+      loadSessionHistory(activeSessionId);
+    }
+  };
+  socket.onclose = () => {
+    wsState.textContent = "disconnected";
+  };
+  socket.onerror = () => {
+    wsState.textContent = "error";
+  };
+  socket.onmessage = async (evt) => {
+    const payload = JSON.parse(evt.data || "{}");
+    if (payload.type === "session") {
+      activeSessionId = payload.session_id || activeSessionId;
+      if (activeSessionId && !Array.from(sessionSelect.options).find((o) => o.value === activeSessionId)) {
+        const opt = document.createElement("option");
+        opt.value = activeSessionId;
+        opt.textContent = `${activeSessionId.slice(0, 12)} · chat ${payload.chat_id} · user ${payload.user_id}`;
+        opt.dataset.chatId = payload.chat_id;
+        opt.dataset.userId = payload.user_id;
+        sessionSelect.appendChild(opt);
+      }
+      sessionSelect.value = activeSessionId || "";
+      if (payload.chat_id !== undefined) chatIdInput.value = String(payload.chat_id);
+      if (payload.user_id !== undefined) userIdInput.value = String(payload.user_id);
+      await refreshCostSummary(activeSessionId);
+      return;
+    }
+    if (payload.type === "assistant_chunk") {
+      if (!currentAssistant) {
+        currentAssistant = appendMessage("assistant", "");
+      }
+      currentAssistant.textContent += payload.text || "";
+      chatLog.scrollTop = chatLog.scrollHeight;
+      return;
+    }
+    if (payload.type === "tool_event") {
+      appendToolEvent(payload);
+      return;
+    }
+    if (payload.type === "done") {
+      currentAssistant = null;
+      await refreshCostSummary(payload.session_id || activeSessionId);
+      return;
+    }
+    if (payload.type === "error") {
+      appendMessage("assistant", `Error: ${payload.detail || "unknown error"}`);
+      currentAssistant = null;
+    }
+  };
+
+  sessionSelect.addEventListener("change", async () => {
+    activeSessionId = sessionSelect.value || "";
+    const selected = sessionSelect.selectedOptions[0];
+    if (selected) {
+      if (selected.dataset.chatId) chatIdInput.value = selected.dataset.chatId;
+      if (selected.dataset.userId) userIdInput.value = selected.dataset.userId;
+    }
+    if (activeSessionId) {
+      socket.send(JSON.stringify({ type: "subscribe", session_id: activeSessionId }));
+    }
+    await loadSessionHistory(activeSessionId);
+  });
+
+  chatForm.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const text = (chatInput.value || "").trim();
+    if (!text || socket.readyState !== WebSocket.OPEN) return;
+    appendMessage("user", text);
+    currentAssistant = null;
+    const payload = { type: "user_message", text: text };
+    if (activeSessionId) {
+      payload.session_id = activeSessionId;
+    } else {
+      payload.chat_id = Number(chatIdInput.value || "1");
+      payload.user_id = Number(userIdInput.value || "1");
+    }
+    socket.send(JSON.stringify(payload));
+    chatInput.value = "";
+  });
+})();
+</script>
+{% endblock %}

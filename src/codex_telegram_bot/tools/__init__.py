@@ -16,7 +16,9 @@ from codex_telegram_bot.tools.git import (
     GitStatusTool,
 )
 from codex_telegram_bot.tools.memory import MemoryGetTool, MemorySearchTool
+from codex_telegram_bot.tools.message import SendMessageTool
 from codex_telegram_bot.tools.provider import ProviderStatusTool, ProviderSwitchTool
+from codex_telegram_bot.tools.schedule import ScheduleTaskTool, ListSchedulesTool, CancelScheduleTool
 from codex_telegram_bot.tools.sessions import (
     SessionsListTool,
     SessionsHistoryTool,
@@ -26,7 +28,7 @@ from codex_telegram_bot.tools.sessions import (
 )
 from codex_telegram_bot.tools.shell import ShellExecTool
 from codex_telegram_bot.tools.ssh import SshDetectionTool
-from codex_telegram_bot.tools.web import WebSearchTool, web_search_tool_enabled
+from codex_telegram_bot.tools.web import WebSearchTool, WebFetchTool, web_search_tool_enabled
 
 
 def build_default_tool_registry(
@@ -34,6 +36,8 @@ def build_default_tool_registry(
     run_store=None,
     mcp_bridge=None,
     process_manager=None,
+    access_controller=None,
+    proactive_messenger=None,
 ) -> ToolRegistry:
     """Build the default tool registry.
 
@@ -54,6 +58,7 @@ def build_default_tool_registry(
     registry.register(SshDetectionTool())
     if web_search_tool_enabled(os.environ):
         registry.register(WebSearchTool())
+        registry.register(WebFetchTool())
     if email_tool_enabled(os.environ):
         registry.register(SendEmailSmtpTool())
     if is_email_tool_enabled(os.environ):
@@ -68,6 +73,16 @@ def build_default_tool_registry(
         registry.register(SessionsSendTool(run_store))
         registry.register(SessionsSpawnTool(run_store))
         registry.register(SessionStatusTool(run_store))
+        registry.register(
+            SendMessageTool(
+                run_store=run_store,
+                access_controller=access_controller,
+                messenger=proactive_messenger,
+            )
+        )
+        registry.register(ScheduleTaskTool(run_store=run_store, access_controller=access_controller))
+        registry.register(ListSchedulesTool(run_store=run_store, access_controller=access_controller))
+        registry.register(CancelScheduleTool(run_store=run_store, access_controller=access_controller))
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
@@ -98,11 +113,16 @@ __all__ = [
     "ShellExecTool",
     "SshDetectionTool",
     "WebSearchTool",
+    "WebFetchTool",
     "web_search_tool_enabled",
     "ProviderStatusTool",
     "ProviderSwitchTool",
+    "ScheduleTaskTool",
+    "ListSchedulesTool",
+    "CancelScheduleTool",
     "MemoryGetTool",
     "MemorySearchTool",
+    "SendMessageTool",
     "SessionsListTool",
     "SessionsHistoryTool",
     "SessionsSendTool",

@@ -26,11 +26,19 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
   - Native `web_search` tool for internet retrieval with source URLs/snippets
+  - Native `web_fetch` tool for SSRF-safe URL-to-readable-text extraction
+  - Persistent scheduler tools (`schedule_task`, `list_schedules`, `cancel_schedule`) with SQLite-backed jobs and automatic tick loop
+  - Proactive `send_message` tool for agent-initiated delivery to session owners
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
   - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
 - Gateway/control plane:
   - Control Center provides a Gateway-style admin API/UI for sessions, runs, reliability, and runtime visibility
+  - Real-time web chat page (`/chat`) over WebSocket (`/ws/chat`) with live tool status events and inline approval actions
   - Runtime backend visibility endpoint: `/api/runtime/capabilities`
+- Cost tracking:
+  - Usage events stored per provider turn
+  - Aggregated rollups per session and per user/day
+  - Control Center cost views + Telegram `/cost` command
 - Multi-provider architecture:
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing
@@ -207,6 +215,7 @@ Environment variables override `.env`:
 - `PROVIDER_RECOVERY_SEC` (default: `30`)
 - `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
 - `PROVIDER_BACKEND` (default: `codex-cli`; supported built-ins: `codex-cli`, `openai`, `anthropic`, `gemini`, `deepseek`, `qwen`, `responses-api`; also accepts names from `OPENAI_COMPATIBLE_PROVIDERS`)
+- `PROVIDERS_CONFIG` (optional path to providers config JSON; see provider config section below)
 - `OPENAI_COMPATIBLE_PROVIDERS` (optional comma-separated provider names; each provider reads `<NAME>_API_KEY`, `<NAME>_BASE_URL`, `<NAME>_MODEL`, `<NAME>_TIMEOUT_SEC`)
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_MAX_TOKENS`, `OPENAI_TIMEOUT_SEC`, `OPENAI_API_BASE` (used by `responses-api`)
 - `ENABLE_PROBE_LOOP` (default: `0`; when `1`, enables probe-loop service wiring in container)
@@ -241,6 +250,8 @@ Environment variables override `.env`:
 - `RING_BUFFER_BYTES` (default: `65536`; in-memory output tail bytes)
 - `MAX_SESSIONS_PER_USER` (default: `3`; concurrent process sessions per chat/user)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
+- `MESSAGE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_message`)
+- `MODEL_PRICE_CONFIG` (optional path to JSON model pricing map; falls back to `prices.json`)
 - `DEFAULT_AGENT_POLICY_PROFILE` is `trusted` in seeded state; use `balanced`/`strict` if you want workspace-constrained file tools
 - `REPO_SCAN_MAX_FILES` (default: `3000`)
 - `REPO_SCAN_MAX_FILE_BYTES` (default: `120000`)
@@ -264,6 +275,35 @@ Print active config summary (never prints token):
 
 ```bash
 codex-telegram-bot --print-config
+```
+
+### Provider Config (`providers.json`)
+
+Provider instantiation is config-driven. Add providers without code changes by updating `providers.json`.
+
+Search order:
+
+1. `<workspace_root>/providers.json`
+2. `~/.config/codex-telegram-bot/providers.json`
+3. path from `PROVIDERS_CONFIG`
+
+Example:
+
+```json
+{
+  "deepseek": {
+    "type": "openai_compatible",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "base_url": "https://api.deepseek.com/v1",
+    "model": "deepseek-chat"
+  },
+  "qwen": {
+    "type": "openai_compatible",
+    "api_key_env": "QWEN_API_KEY",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "model": "qwen-plus"
+  }
+}
 ```
 
 ## Service (systemd)
@@ -379,6 +419,7 @@ export EXECUTION_BACKEND=docker
 - `GET /` dashboard
 - `GET /runs`
 - `GET /sessions`
+- `GET /chat`
 - `GET /approvals`
 - `GET /runs/{run_id}`
 - `GET /agents`
@@ -390,9 +431,13 @@ export EXECUTION_BACKEND=docker
 - `GET /api/runs?limit=20`
 - `GET /api/sessions?limit=50`
 - `GET /api/sessions/{session_id}/detail`
+- `GET /api/costs/session/{session_id}`
+- `GET /api/costs/user/{user_id}/daily`
+- `GET /api/costs/daily`
 - `GET /api/approvals?limit=200`
 - `POST /api/approvals/approve`
 - `POST /api/approvals/deny`
+- `WS /ws/chat` (messages: `user_message`; events: `assistant_chunk`, `tool_event`, `done`)
 - `GET /api/retrieval?query=...`
 - `GET /api/retrieval/stats`
 - `POST /api/retrieval/refresh`
@@ -621,6 +666,7 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - `1) Allow once`
   - `2) Deny`
   - `3) Show pending`
+- Web chat exposes inline Approve/Deny buttons backed by the same approval gate.
 - `/interrupt` cancels active run for current chat (queued job + in-flight task).
 - `/continue` reuses latest user prompt and asks the agent to continue the task.
 - Shortcut command surface for common workflows:
@@ -630,6 +676,11 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - `/template save <id> | <subject> | <body> | list | show <id> | delete <id>`
   - `/email_template [--dry-run] <template_id> <to_email>`
   - `/gh comment|create|close ...`
+- Scheduler tools:
+  - `schedule_task(when, message, repeat, session_id?)`
+  - `list_schedules(session_id?)`
+  - `cancel_schedule(id)`
+  - scheduler tick starts automatically in both Telegram bot runtime and Control Center runtime
 - Safe replay guardrails:
   - high-risk replays require explicit confirmation (`/continue yes`)
   - completed tool steps can be checkpoint-skipped on identical replay to avoid duplicate execution

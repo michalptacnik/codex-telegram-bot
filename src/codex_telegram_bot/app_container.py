@@ -1,3 +1,4 @@
+import json
 import os
 import logging
 from datetime import datetime, timedelta, timezone
@@ -26,6 +27,7 @@ from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
+from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.mcp_bridge import McpBridge, _mcp_enabled
@@ -53,10 +55,20 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         max_file_bytes=_read_int_env("REPO_SCAN_MAX_FILE_BYTES", 120000),
         auto_refresh_sec=_read_int_env("REPO_INDEX_AUTO_REFRESH_SEC", 30),
     )
+    resolved_config_dir = (
+        config_dir.expanduser().resolve()
+        if config_dir is not None
+        else ((state_db_path.parent if state_db_path else (Path.home() / ".config" / "codex-telegram-bot")).expanduser().resolve())
+    )
     provider_runner = LocalShellRunner(profile_resolver=ExecutionProfileResolver(workspace_root))
     execution_runner = _build_execution_runner(workspace_root=workspace_root)
     provider_backend = _read_provider_backend()
-    provider_registry = _build_provider_registry(runner=provider_runner, preferred_backend=provider_backend)
+    provider_specs = _load_provider_specs(workspace_root=workspace_root, config_dir=resolved_config_dir)
+    provider_registry = _build_provider_registry(
+        runner=provider_runner,
+        preferred_backend=provider_backend,
+        provider_specs=provider_specs,
+    )
     capability_router = CapabilityRouter(provider_registry)
 
     fallback_mode = (os.environ.get("PROVIDER_FALLBACK_MODE", "none") or "none").strip().lower()
@@ -76,11 +88,6 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         max_file_count=_read_int_env("WORKSPACE_MAX_FILE_COUNT", 5000),
     )
     access_controller = AccessController()
-    resolved_config_dir = (
-        config_dir.expanduser().resolve()
-        if config_dir is not None
-        else ((state_db_path.parent if state_db_path else (Path.home() / ".config" / "codex-telegram-bot")).expanduser().resolve())
-    )
     skill_manager = SkillManager(config_dir=resolved_config_dir)
 
     # MCP bridge (Issue #103)
@@ -103,12 +110,16 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     run_store = SqliteRunStore(db_path=state_db_path) if state_db_path is not None else None
     process_manager = ProcessManager(run_store=run_store)
 
+    proactive_messenger = ProactiveMessenger()
+
     # Build tool registry with optional run_store/process manager (db-backed path).
     tool_registry = build_default_tool_registry(
         provider_registry=provider_registry,
         run_store=run_store,
         mcp_bridge=mcp_bridge,
         process_manager=process_manager,
+        access_controller=access_controller,
+        proactive_messenger=proactive_messenger,
     )
     probe_loop: Optional[ProbeLoop] = None
     if (os.environ.get("ENABLE_PROBE_LOOP") or "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -137,6 +148,8 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         skill_pack_loader=skill_pack_loader,
         tool_policy_engine=tool_policy_engine,
         process_manager=process_manager,
+        proactive_messenger=proactive_messenger,
+        config_dir=resolved_config_dir,
     )
 
     if run_store is None:
@@ -207,72 +220,151 @@ def _read_provider_backend() -> str:
     return aliases.get(raw, raw)
 
 
-def _build_provider_registry(runner: ExecutionRunner, preferred_backend: str) -> ProviderRegistry:
+def _build_provider_registry(
+    runner: ExecutionRunner,
+    preferred_backend: str,
+    provider_specs: Optional[Dict[str, Dict[str, str]]] = None,
+) -> ProviderRegistry:
+    specs = dict(provider_specs or _default_provider_specs())
     active = _registry_name_for_backend(preferred_backend)
-    extra_specs = _read_extra_openai_compatible_specs()
-    known_names = {
-        "codex_cli",
-        "anthropic",
-        "openai",
-        "deepseek",
-        "qwen",
-        "gemini",
-        "responses_api",
-        *[spec["name"] for spec in extra_specs],
-    }
-    default_name = active if active in known_names else "codex_cli"
+    default_name = active if active in specs else (next(iter(specs.keys()), "codex_cli"))
     registry = ProviderRegistry(default_provider_name=default_name)
-    registry.register("codex_cli", CodexCliProvider(runner=runner), make_active=(default_name == "codex_cli"))
-    registry.register("anthropic", AnthropicProvider(), make_active=(default_name == "anthropic"))
-    registry.register(
-        "openai",
-        OpenAICompatibleProvider(
-            provider_name="openai",
-            api_key_env="OPENAI_API_KEY",
-            default_base_url="https://api.openai.com/v1",
-            default_model="gpt-4.1-mini",
-        ),
-        make_active=(default_name == "openai"),
-    )
-    registry.register(
-        "deepseek",
-        OpenAICompatibleProvider(
-            provider_name="deepseek",
-            api_key_env="DEEPSEEK_API_KEY",
-            default_base_url="https://api.deepseek.com/v1",
-            default_model="deepseek-chat",
-        ),
-        make_active=(default_name == "deepseek"),
-    )
-    registry.register(
-        "qwen",
-        OpenAICompatibleProvider(
-            provider_name="qwen",
-            api_key_env="QWEN_API_KEY",
-            default_base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
-            default_model="qwen-plus",
-            api_key=os.environ.get("QWEN_API_KEY") or os.environ.get("DASHSCOPE_API_KEY") or "",
-        ),
-        make_active=(default_name == "qwen"),
-    )
-    registry.register("gemini", GeminiProvider(), make_active=(default_name == "gemini"))
-    registry.register("responses_api", ResponsesApiProvider(), make_active=(default_name == "responses_api"))
-    for spec in extra_specs:
-        name = spec["name"]
-        registry.register(
-            name,
-            OpenAICompatibleProvider(
-                provider_name=name,
-                api_key_env=spec["api_key_env"],
-                default_base_url=spec["base_url"],
-                default_model=spec["model"],
-                model_env=spec["model_env"],
-                base_url_env=spec["base_url_env"],
-                timeout_env=spec["timeout_env"],
-            ),
-            make_active=(default_name == name),
-        )
+    registered_names: List[str] = []
+    for name, spec in specs.items():
+        provider = _instantiate_provider_from_spec(name=name, spec=spec, runner=runner)
+        if provider is None:
+            continue
+        registry.register(name, provider, make_active=(name == default_name))
+        registered_names.append(name)
+    if not registered_names:
+        registry.register("codex_cli", CodexCliProvider(runner=runner), make_active=True)
     return registry
+
+
+def _load_provider_specs(workspace_root: Path, config_dir: Optional[Path]) -> Dict[str, Dict[str, str]]:
+    candidates: List[Path] = []
+    candidates.append((workspace_root / "providers.json").expanduser().resolve())
+    home_cfg = (Path.home() / ".config" / "codex-telegram-bot" / "providers.json").expanduser().resolve()
+    candidates.append(home_cfg)
+    env_path = (os.environ.get("PROVIDERS_CONFIG") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path).expanduser().resolve())
+    if config_dir is not None:
+        cfg_candidate = (config_dir / "providers.json").expanduser().resolve()
+        if cfg_candidate not in candidates:
+            candidates.insert(0, cfg_candidate)
+
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.error("providers config load failed path=%s error=%s", str(path), exc)
+            continue
+        if not isinstance(raw, dict):
+            logger.error("providers config invalid root path=%s", str(path))
+            continue
+        specs: Dict[str, Dict[str, str]] = {}
+        for name, spec in raw.items():
+            normalized = _normalize_provider_name(str(name))
+            if not normalized or not isinstance(spec, dict):
+                continue
+            normalized_spec = {str(k): str(v) for k, v in spec.items() if v is not None}
+            specs[normalized] = normalized_spec
+        if specs:
+            logger.info("providers config loaded path=%s providers=%s", str(path), ",".join(sorted(specs.keys())))
+            return specs
+    return _default_provider_specs()
+
+
+def _default_provider_specs() -> Dict[str, Dict[str, str]]:
+    base: Dict[str, Dict[str, str]] = {
+        "codex_cli": {"type": "codex_cli"},
+        "anthropic": {"type": "anthropic"},
+        "openai": {
+            "type": "openai_compatible",
+            "api_key_env": "OPENAI_API_KEY",
+            "base_url": "https://api.openai.com/v1",
+            "model": "gpt-4.1-mini",
+        },
+        "deepseek": {
+            "type": "openai_compatible",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "base_url": "https://api.deepseek.com/v1",
+            "model": "deepseek-chat",
+        },
+        "qwen": {
+            "type": "openai_compatible",
+            "api_key_env": "QWEN_API_KEY",
+            "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            "model": "qwen-plus",
+        },
+        "gemini": {"type": "gemini"},
+        "responses_api": {"type": "responses_api"},
+    }
+    for extra in _read_extra_openai_compatible_specs():
+        base[extra["name"]] = {
+            "type": "openai_compatible",
+            "api_key_env": extra["api_key_env"],
+            "base_url": extra["base_url"],
+            "model": extra["model"],
+            "model_env": extra["model_env"],
+            "base_url_env": extra["base_url_env"],
+            "timeout_env": extra["timeout_env"],
+        }
+    return base
+
+
+def _instantiate_provider_from_spec(
+    name: str,
+    spec: Dict[str, str],
+    runner: ExecutionRunner,
+):
+    kind = (spec.get("type") or "").strip().lower()
+    if kind == "codex_cli":
+        return CodexCliProvider(runner=runner)
+    if kind == "anthropic":
+        return AnthropicProvider(
+            model=spec.get("model") or None,
+        )
+    if kind == "responses_api":
+        return ResponsesApiProvider(
+            model=spec.get("model") or None,
+            api_base=spec.get("api_base") or None,
+        )
+    if kind == "gemini":
+        api_key_env = (spec.get("api_key_env") or "").strip()
+        return GeminiProvider(
+            api_key=(os.environ.get(api_key_env) if api_key_env else None),
+            model=spec.get("model") or None,
+        )
+    if kind in {"openai_compatible", "openai-compatible"}:
+        api_key_env = (spec.get("api_key_env") or "").strip()
+        base_url = (spec.get("base_url") or "").strip().rstrip("/")
+        model = (spec.get("model") or "").strip()
+        if not api_key_env or not base_url or not model:
+            logger.error(
+                "provider config invalid name=%s reason=missing_required_fields type=%s",
+                name,
+                kind,
+            )
+            return None
+        api_key = (os.environ.get(api_key_env) or "").strip()
+        if not api_key and name == "qwen":
+            api_key = (os.environ.get("DASHSCOPE_API_KEY") or "").strip()
+        return OpenAICompatibleProvider(
+            provider_name=name,
+            api_key_env=api_key_env,
+            default_base_url=base_url,
+            default_model=model,
+            model_env=spec.get("model_env") or None,
+            base_url_env=spec.get("base_url_env") or None,
+            timeout_env=spec.get("timeout_env") or None,
+            api_key=api_key or None,
+        )
+    logger.error("provider config invalid name=%s reason=unknown_type type=%s", name, kind)
+    return None
 
 
 def _build_execution_runner(workspace_root: Path) -> ExecutionRunner:

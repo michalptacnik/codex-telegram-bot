@@ -36,7 +36,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
 
 
 class SqliteRunStore:
@@ -167,6 +167,77 @@ class SqliteRunStore:
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_tool_loop_checkpoint_key
                 ON tool_loop_checkpoints (session_id, prompt_fingerprint, step_index)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cron_jobs (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    one_shot INTEGER NOT NULL DEFAULT 1,
+                    cron_expr TEXT,
+                    next_run TEXT NOT NULL,
+                    tz TEXT NOT NULL DEFAULT 'Europe/Amsterdam',
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    last_error TEXT,
+                    last_run TEXT,
+                    failure_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_cron_jobs_due
+                ON cron_jobs (status, next_run)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    cost_usd_estimate REAL,
+                    created_at TEXT NOT NULL,
+                    meta_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_usage_events_session_created
+                ON usage_events (session_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_cost_rollups (
+                    session_id TEXT PRIMARY KEY,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_cost_usd REAL NOT NULL DEFAULT 0.0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_daily_cost_rollups (
+                    user_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_cost_usd REAL NOT NULL DEFAULT 0.0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, date)
+                )
                 """
             )
             conn.execute(
@@ -1378,6 +1449,332 @@ class SqliteRunStore:
         ]
 
     # ------------------------------------------------------------------
+    # Cron jobs persistence
+    # ------------------------------------------------------------------
+
+    def count_active_cron_jobs_for_user(self, owner_user_id: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM cron_jobs
+                WHERE owner_user_id = ? AND status = 'active'
+                """,
+                (str(owner_user_id),),
+            ).fetchone()
+        return int(row["c"] or 0) if row else 0
+
+    def create_cron_job(
+        self,
+        owner_user_id: str,
+        session_id: str,
+        one_shot: bool,
+        cron_expr: Optional[str],
+        next_run: str,
+        tz: str,
+        payload: Dict[str, object],
+    ) -> str:
+        job_id = str(uuid.uuid4())
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO cron_jobs
+                (id, owner_user_id, session_id, created_at, updated_at, status,
+                 one_shot, cron_expr, next_run, tz, payload_json, last_error, last_run, failure_count)
+                VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, NULL, NULL, 0)
+                """,
+                (
+                    job_id,
+                    str(owner_user_id),
+                    session_id,
+                    now,
+                    now,
+                    1 if one_shot else 0,
+                    (cron_expr or "").strip() or None,
+                    next_run,
+                    tz or "Europe/Amsterdam",
+                    json.dumps(payload or {}, ensure_ascii=False),
+                ),
+            )
+        return job_id
+
+    def list_cron_jobs(
+        self,
+        *,
+        session_id: str = "",
+        owner_user_id: str = "",
+        include_non_active: bool = False,
+        limit: int = 200,
+    ) -> List[dict]:
+        clauses = []
+        params: List[object] = []
+        if not include_non_active:
+            clauses.append("status = 'active'")
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if owner_user_id:
+            clauses.append("owner_user_id = ?")
+            params.append(str(owner_user_id))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM cron_jobs
+                {where}
+                ORDER BY next_run ASC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_cron_job(r) for r in rows]
+
+    def get_cron_job(self, job_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM cron_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        return _row_to_cron_job(row)
+
+    def cancel_cron_job(self, job_id: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE cron_jobs
+                SET status = 'canceled', updated_at = ?
+                WHERE id = ? AND status != 'canceled'
+                """,
+                (_utc_now(), job_id),
+            )
+        return bool(cur.rowcount)
+
+    def list_due_cron_jobs(self, now_iso: str, limit: int = 100) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM cron_jobs
+                WHERE status = 'active' AND next_run <= ?
+                ORDER BY next_run ASC
+                LIMIT ?
+                """,
+                (now_iso, max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_cron_job(r) for r in rows]
+
+    def mark_cron_job_success(self, job_id: str, *, last_run: str, next_run: Optional[str]) -> None:
+        status = "canceled" if not next_run else "active"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE cron_jobs
+                SET status = ?, next_run = COALESCE(?, next_run), last_error = NULL,
+                    last_run = ?, failure_count = 0, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, next_run, last_run, _utc_now(), job_id),
+            )
+
+    def mark_cron_job_failure(
+        self,
+        job_id: str,
+        *,
+        error: str,
+        next_run: str,
+        failure_count: int,
+        max_failures: int,
+    ) -> None:
+        status = "error" if int(failure_count) >= int(max_failures) else "active"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE cron_jobs
+                SET status = ?, next_run = ?, last_error = ?, failure_count = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (status, next_run, str(error or "")[:400], int(failure_count), _utc_now(), job_id),
+            )
+
+    # ------------------------------------------------------------------
+    # Usage and cost tracking
+    # ------------------------------------------------------------------
+
+    def record_usage_event(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        cost_usd_estimate: Optional[float],
+        meta: Optional[Dict[str, object]] = None,
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        created_at = _utc_now()
+        date = created_at[:10]
+        prompt_tokens_i = max(0, int(prompt_tokens or 0))
+        completion_tokens_i = max(0, int(completion_tokens or 0))
+        total_tokens_i = max(0, int(total_tokens or (prompt_tokens_i + completion_tokens_i)))
+        cost_value = float(cost_usd_estimate) if cost_usd_estimate is not None else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage_events
+                (id, user_id, session_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_usd_estimate, created_at, meta_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    str(user_id),
+                    session_id,
+                    provider or "",
+                    model or "",
+                    prompt_tokens_i,
+                    completion_tokens_i,
+                    total_tokens_i,
+                    cost_value,
+                    created_at,
+                    json.dumps(meta or {}, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO session_cost_rollups (session_id, total_tokens, total_cost_usd, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    total_tokens = total_tokens + excluded.total_tokens,
+                    total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    total_tokens_i,
+                    float(cost_value or 0.0),
+                    created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO user_daily_cost_rollups (user_id, date, total_tokens, total_cost_usd, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    total_tokens = total_tokens + excluded.total_tokens,
+                    total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(user_id),
+                    date,
+                    total_tokens_i,
+                    float(cost_value or 0.0),
+                    created_at,
+                ),
+            )
+        return event_id
+
+    def get_session_cost_rollup(self, session_id: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_cost_rollups WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return {"session_id": session_id, "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        return {
+            "session_id": row["session_id"],
+            "total_tokens": int(row["total_tokens"] or 0),
+            "total_cost_usd": float(row["total_cost_usd"] or 0.0),
+            "updated_at": row["updated_at"] or "",
+        }
+
+    def get_user_daily_cost_rollup(self, user_id: str, date: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_daily_cost_rollups WHERE user_id = ? AND date = ?",
+                (str(user_id), date),
+            ).fetchone()
+        if row is None:
+            return {"user_id": str(user_id), "date": date, "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        return {
+            "user_id": str(row["user_id"]),
+            "date": row["date"],
+            "total_tokens": int(row["total_tokens"] or 0),
+            "total_cost_usd": float(row["total_cost_usd"] or 0.0),
+            "updated_at": row["updated_at"] or "",
+        }
+
+    def list_user_daily_cost_rollups(self, date: str = "", limit: int = 100) -> List[dict]:
+        clauses = []
+        params: List[object] = []
+        if date:
+            clauses.append("date = ?")
+            params.append(date)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM user_daily_cost_rollups
+                {where}
+                ORDER BY total_cost_usd DESC, total_tokens DESC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(r["user_id"]),
+                "date": r["date"],
+                "total_tokens": int(r["total_tokens"] or 0),
+                "total_cost_usd": float(r["total_cost_usd"] or 0.0),
+                "updated_at": r["updated_at"] or "",
+            }
+            for r in rows
+        ]
+
+    def list_usage_events(self, session_id: str = "", limit: int = 100) -> List[dict]:
+        clauses = []
+        params: List[object] = []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM usage_events
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        out: List[dict] = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+            except Exception:
+                meta = {}
+            out.append(
+                {
+                    "id": r["id"],
+                    "user_id": str(r["user_id"]),
+                    "session_id": r["session_id"],
+                    "provider": r["provider"],
+                    "model": r["model"],
+                    "prompt_tokens": int(r["prompt_tokens"] or 0),
+                    "completion_tokens": int(r["completion_tokens"] or 0),
+                    "total_tokens": int(r["total_tokens"] or 0),
+                    "cost_usd_estimate": float(r["cost_usd_estimate"]) if r["cost_usd_estimate"] is not None else None,
+                    "created_at": r["created_at"],
+                    "meta": meta,
+                }
+            )
+        return out
+
+    # ------------------------------------------------------------------
     # Mission persistence (EPIC 6)
     # ------------------------------------------------------------------
 
@@ -2008,6 +2405,25 @@ def _row_to_session(row: sqlite3.Row) -> TelegramSessionRecord:
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
     )
+
+
+def _row_to_cron_job(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "owner_user_id": row["owner_user_id"],
+        "session_id": row["session_id"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "status": row["status"],
+        "one_shot": bool(int(row["one_shot"] or 0)),
+        "cron_expr": row["cron_expr"] or "",
+        "next_run": row["next_run"],
+        "tz": row["tz"] or "Europe/Amsterdam",
+        "payload_json": row["payload_json"] or "{}",
+        "last_error": row["last_error"] or "",
+        "last_run": row["last_run"] or "",
+        "failure_count": int(row["failure_count"] or 0),
+    }
 
 
 def _row_to_mission(row: sqlite3.Row) -> MissionRecord:

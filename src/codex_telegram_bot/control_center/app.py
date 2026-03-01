@@ -1,10 +1,11 @@
+import asyncio
 from dataclasses import asdict
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Set
 
 from pydantic import BaseModel
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -50,6 +51,14 @@ class PluginUpdateRequest(BaseModel):
 
 class SkillInstallRequest(BaseModel):
     source_url: str
+
+
+def _chunk_text(text: str, chunk_size: int = 220) -> List[str]:
+    raw = str(text or "")
+    if not raw:
+        return []
+    size = max(80, min(int(chunk_size or 220), 1200))
+    return [raw[i : i + size] for i in range(0, len(raw), size)]
 
 
 def _run_to_dict(run) -> Dict[str, Any]:
@@ -346,6 +355,194 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             return names
         return [agent_service.default_provider_name()]
 
+    _chat_subscriptions: Dict[str, List[WebSocket]] = {}
+    _chat_subscriptions_lock = asyncio.Lock()
+
+    async def _chat_subscribe(session_id: str, websocket: WebSocket) -> None:
+        if not session_id:
+            return
+        async with _chat_subscriptions_lock:
+            bucket = _chat_subscriptions.setdefault(session_id, [])
+            if not any(ws is websocket for ws in bucket):
+                bucket.append(websocket)
+
+    async def _chat_unsubscribe(session_id: str, websocket: WebSocket) -> None:
+        if not session_id:
+            return
+        async with _chat_subscriptions_lock:
+            bucket = _chat_subscriptions.get(session_id) or []
+            kept = [ws for ws in bucket if ws is not websocket]
+            if kept:
+                _chat_subscriptions[session_id] = kept
+            else:
+                _chat_subscriptions.pop(session_id, None)
+
+    async def _chat_broadcast_session(session_id: str, payload: Dict[str, Any]) -> None:
+        if not session_id:
+            return
+        async with _chat_subscriptions_lock:
+            sockets = list(_chat_subscriptions.get(session_id) or [])
+        stale: List[WebSocket] = []
+        for ws in sockets:
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                stale.append(ws)
+        if not stale:
+            return
+        async with _chat_subscriptions_lock:
+            existing = list(_chat_subscriptions.get(session_id) or [])
+            kept = [ws for ws in existing if not any(ws is bad for bad in stale)]
+            if kept:
+                _chat_subscriptions[session_id] = kept
+            else:
+                _chat_subscriptions.pop(session_id, None)
+
+    def _ws_ui_authorized(websocket: WebSocket) -> bool:
+        secret = os.environ.get(_UI_SECRET_ENV, "").strip()
+        if not secret:
+            return True
+        cookie_token = (websocket.cookies.get(_UI_COOKIE) or "").strip()
+        query_token = (websocket.query_params.get("token") or "").strip()
+        return cookie_token == secret or query_token == secret
+
+    def _resolve_ws_session(payload: Dict[str, Any], current_session_id: str):
+        requested = str(payload.get("session_id") or current_session_id or "").strip()
+        if requested:
+            session = agent_service.get_session(requested)
+            if session is not None:
+                return session, ""
+            return None, "Session not found."
+        chat_raw = payload.get("chat_id")
+        user_raw = payload.get("user_id")
+        try:
+            chat_id = int(chat_raw if chat_raw is not None else 1)
+            user_id = int(user_raw if user_raw is not None else 1)
+        except (TypeError, ValueError):
+            return None, "chat_id and user_id must be integers."
+        try:
+            session = agent_service.get_or_create_session(chat_id=chat_id, user_id=user_id)
+        except Exception as exc:
+            return None, f"Failed to create session: {str(exc)[:200]}"
+        return session, ""
+
+    def _progress_to_tool_event(
+        update_payload: Dict[str, Any],
+        *,
+        chat_id: int,
+        user_id: int,
+    ) -> Dict[str, Any] | None:
+        event = str(update_payload.get("event") or "").strip()
+        if not event:
+            return None
+        if event == "native_loop.tool_call":
+            tool_name = str(update_payload.get("tool_name") or "tool")
+            return {
+                "type": "tool_event",
+                "name": tool_name,
+                "status": "called",
+                "detail": {
+                    "tool_use_id": str(update_payload.get("tool_use_id") or ""),
+                    "turn": int(update_payload.get("turn") or 0),
+                },
+            }
+        if event == "loop.step.started":
+            return {
+                "type": "tool_event",
+                "name": str(update_payload.get("command") or "step"),
+                "status": "called",
+                "detail": {
+                    "step": int(update_payload.get("step") or 0),
+                    "action_id": str(update_payload.get("action_id") or ""),
+                },
+            }
+        if event == "loop.step.awaiting_approval":
+            approval_id = str(update_payload.get("approval_id") or "")
+            return {
+                "type": "tool_event",
+                "name": "approval",
+                "status": "awaiting_approval",
+                "detail": {
+                    "step": int(update_payload.get("step") or 0),
+                    "action_id": str(update_payload.get("action_id") or ""),
+                    "approval_id": approval_id,
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                },
+            }
+        if event == "loop.step.completed":
+            rc = int(update_payload.get("returncode") or 0)
+            return {
+                "type": "tool_event",
+                "name": str(update_payload.get("action_id") or "step"),
+                "status": "result" if rc == 0 else "error",
+                "detail": {
+                    "step": int(update_payload.get("step") or 0),
+                    "action_id": str(update_payload.get("action_id") or ""),
+                    "returncode": rc,
+                },
+            }
+        if event == "loop.step.blocked":
+            return {
+                "type": "tool_event",
+                "name": str(update_payload.get("action_id") or "step"),
+                "status": "error",
+                "detail": {
+                    "step": int(update_payload.get("step") or 0),
+                    "action_id": str(update_payload.get("action_id") or ""),
+                    "risk_tier": str(update_payload.get("risk_tier") or ""),
+                },
+            }
+        return None
+
+    async def _deliver_websocket_proactive(payload: Dict[str, Any]) -> None:
+        session_id = str(payload.get("session_id") or "").strip()
+        text = str(payload.get("text") or "").strip()
+        if not session_id or not text:
+            return
+        await _chat_broadcast_session(
+            session_id,
+            {
+                "type": "assistant_chunk",
+                "session_id": session_id,
+                "text": text,
+                "proactive": True,
+            },
+        )
+        await _chat_broadcast_session(
+            session_id,
+            {
+                "type": "done",
+                "session_id": session_id,
+                "proactive": True,
+            },
+        )
+
+    agent_service.register_proactive_transport("websocket", _deliver_websocket_proactive)
+
+    @app.on_event("startup")
+    async def _startup_background_scheduler() -> None:
+        async def _cron_loop() -> None:
+            while True:
+                try:
+                    await agent_service.run_cron_tick_once()
+                except Exception:
+                    pass
+                await asyncio.sleep(60)
+
+        app.state.cron_task = asyncio.create_task(_cron_loop(), name="control-center-cron-tick")
+
+    @app.on_event("shutdown")
+    async def _shutdown_background_scheduler() -> None:
+        task = getattr(app.state, "cron_task", None)
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
     @app.get("/health")
     async def health() -> Dict[str, Any]:
         metrics = agent_service.metrics()
@@ -560,6 +757,24 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             }
             for s in sessions
         ]
+
+    @app.get("/api/costs/session/{session_id}")
+    async def api_session_costs(request: Request, session_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        summary = agent_service.session_cost_summary(session_id=session_id)
+        events = agent_service.list_session_usage_events(session_id=session_id, limit=50)
+        return {"summary": summary, "events": events}
+
+    @app.get("/api/costs/user/{user_id}/daily")
+    async def api_user_daily_costs(request: Request, user_id: int, date: str = "") -> Dict[str, Any]:
+        _opt_api_scope(request)
+        return agent_service.user_daily_cost_summary(user_id=user_id, date=date)
+
+    @app.get("/api/costs/daily")
+    async def api_costs_daily(request: Request, date: str = "", limit: int = 100) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        items = agent_service.list_daily_cost_summaries(date=date, limit=max(1, min(limit, 500)))
+        return {"date": date, "items": items}
 
     @app.get("/api/approvals")
     async def api_list_approvals(request: Request, limit: int = 200) -> List[Dict[str, Any]]:
@@ -1207,6 +1422,211 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             {"request": request, "nav": "sessions", "sessions": sessions},
         )
 
+    @app.get("/chat", response_class=HTMLResponse)
+    async def chat_page(request: Request, session_id: str = ""):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
+        sessions = agent_service.list_recent_sessions(limit=100)
+        selected = (session_id or "").strip()
+        if not selected and sessions:
+            selected = sessions[0].session_id
+        selected_session = agent_service.get_session(selected) if selected else None
+        return templates.TemplateResponse(
+            "chat.html",
+            {
+                "request": request,
+                "nav": "chat",
+                "sessions": sessions,
+                "selected_session_id": selected,
+                "selected_session": selected_session,
+                "selected_cost_summary": (agent_service.session_cost_summary(selected) if selected else {}),
+            },
+        )
+
+    @app.websocket("/ws/chat")
+    async def ws_chat(websocket: WebSocket) -> None:
+        if not _ws_ui_authorized(websocket):
+            await websocket.close(code=1008)
+            return
+        await websocket.accept()
+        subscribed_sessions: Set[str] = set()
+        current_session_id = ""
+        try:
+            while True:
+                inbound = await websocket.receive_json()
+                if not isinstance(inbound, dict):
+                    await websocket.send_json({"type": "error", "detail": "Invalid payload."})
+                    continue
+                msg_type = str(inbound.get("type") or "").strip().lower()
+                if msg_type == "ping":
+                    await websocket.send_json({"type": "pong"})
+                    continue
+                if msg_type == "subscribe":
+                    requested_session = str(inbound.get("session_id") or "").strip()
+                    session = agent_service.get_session(requested_session)
+                    if session is None:
+                        await websocket.send_json({"type": "error", "detail": "Session not found."})
+                        continue
+                    await _chat_subscribe(session.session_id, websocket)
+                    subscribed_sessions.add(session.session_id)
+                    current_session_id = session.session_id
+                    await websocket.send_json(
+                        {
+                            "type": "session",
+                            "session_id": session.session_id,
+                            "chat_id": int(session.chat_id),
+                            "user_id": int(session.user_id),
+                            "cost_summary": agent_service.session_cost_summary(session.session_id),
+                        }
+                    )
+                    continue
+                if msg_type in {"approve", "deny"}:
+                    approval_id = str(inbound.get("approval_id") or "").strip()
+                    if not approval_id:
+                        await websocket.send_json({"type": "error", "detail": "approval_id is required."})
+                        continue
+                    resolved_session_id = str(inbound.get("session_id") or current_session_id or "").strip()
+                    session = agent_service.get_session(resolved_session_id) if resolved_session_id else None
+                    chat_id = int(inbound.get("chat_id") or (session.chat_id if session else 0) or 0)
+                    user_id = int(inbound.get("user_id") or (session.user_id if session else 0) or 0)
+                    if chat_id == 0 or user_id == 0:
+                        await websocket.send_json({"type": "error", "detail": "chat_id and user_id are required."})
+                        continue
+                    if msg_type == "approve":
+                        output = await agent_service.approve_tool_action(
+                            approval_id=approval_id,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                        )
+                    else:
+                        output = agent_service.deny_tool_action(
+                            approval_id=approval_id,
+                            chat_id=chat_id,
+                            user_id=user_id,
+                        )
+                    status = "error" if str(output).strip().lower().startswith("error:") else "result"
+                    await websocket.send_json(
+                        {
+                            "type": "tool_event",
+                            "name": "approval",
+                            "status": status,
+                            "detail": {
+                                "approval_id": approval_id,
+                                "action": msg_type,
+                                "output": output,
+                                "chat_id": chat_id,
+                                "user_id": user_id,
+                            },
+                        }
+                    )
+                    continue
+                if msg_type != "user_message":
+                    await websocket.send_json({"type": "error", "detail": "Unsupported message type."})
+                    continue
+
+                text = str(inbound.get("text") or "").strip()
+                if not text:
+                    await websocket.send_json({"type": "error", "detail": "text is required."})
+                    continue
+                session, err = _resolve_ws_session(inbound, current_session_id=current_session_id)
+                if err:
+                    await websocket.send_json({"type": "error", "detail": err})
+                    continue
+                if session is None:
+                    await websocket.send_json({"type": "error", "detail": "Failed to resolve session."})
+                    continue
+                current_session_id = session.session_id
+                await _chat_subscribe(session.session_id, websocket)
+                subscribed_sessions.add(session.session_id)
+                await websocket.send_json(
+                    {
+                        "type": "session",
+                        "session_id": session.session_id,
+                        "chat_id": int(session.chat_id),
+                        "user_id": int(session.user_id),
+                        "cost_summary": agent_service.session_cost_summary(session.session_id),
+                    }
+                )
+
+                async def _progress(update_payload: Dict[str, Any]) -> None:
+                    if not isinstance(update_payload, dict):
+                        return
+                    event = _progress_to_tool_event(
+                        update_payload,
+                        chat_id=int(session.chat_id),
+                        user_id=int(session.user_id),
+                    )
+                    if event is not None:
+                        await websocket.send_json(
+                            {
+                                **event,
+                                "session_id": session.session_id,
+                            }
+                        )
+
+                try:
+                    turn = await agent_service.run_turn(
+                        prompt=text,
+                        chat_id=int(session.chat_id),
+                        user_id=int(session.user_id),
+                        session_id=session.session_id,
+                        agent_id=str(inbound.get("agent_id") or "default"),
+                        progress_callback=_progress,
+                    )
+                except Exception as exc:
+                    await websocket.send_json(
+                        {
+                            "type": "tool_event",
+                            "name": "runtime",
+                            "status": "error",
+                            "session_id": session.session_id,
+                            "detail": {"message": str(exc)[:300]},
+                        }
+                    )
+                    await websocket.send_json({"type": "done", "session_id": session.session_id})
+                    continue
+
+                chunks = _chunk_text(turn.text or "")
+                if not chunks:
+                    chunks = ["(no output)"]
+                for chunk in chunks:
+                    await websocket.send_json(
+                        {
+                            "type": "assistant_chunk",
+                            "session_id": session.session_id,
+                            "text": chunk,
+                        }
+                    )
+                await websocket.send_json(
+                    {
+                        "type": "done",
+                        "session_id": session.session_id,
+                        "kind": turn.kind,
+                        "cost_summary": agent_service.session_cost_summary(session.session_id),
+                    }
+                )
+        except WebSocketDisconnect:
+            pass
+        finally:
+            for session_id in list(subscribed_sessions):
+                await _chat_unsubscribe(session_id, websocket)
+
+    @app.get("/costs", response_class=HTMLResponse)
+    async def costs_page(request: Request, date: str = ""):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
+        day = (date or "").strip()
+        items = agent_service.list_daily_cost_summaries(date=day, limit=200)
+        return templates.TemplateResponse(
+            "costs.html",
+            {
+                "request": request,
+                "nav": "costs",
+                "items": items,
+                "date": day,
+            },
+        )
+
     @app.get("/approvals", response_class=HTMLResponse)
     async def approvals_page(request: Request):
         if (redir := _ui_auth_redirect(request)) is not None:
@@ -1445,6 +1865,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 }
                 for m in messages
             ],
+            "cost_summary": agent_service.session_cost_summary(session_id=session_id),
         }
 
     return app
