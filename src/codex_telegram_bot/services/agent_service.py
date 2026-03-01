@@ -1123,6 +1123,68 @@ class AgentService:
             return []
         return self._run_store.list_session_messages(session_id=session_id, limit=limit)
 
+    def record_channel_message(
+        self,
+        *,
+        session_id: str,
+        user_id: int,
+        channel: str,
+        channel_message_id: str,
+        sender: str,
+        text: str = "",
+    ) -> str:
+        if not self._run_store:
+            return ""
+        return self._run_store.create_channel_message(
+            session_id=session_id,
+            user_id=user_id,
+            channel=channel,
+            channel_message_id=channel_message_id,
+            sender=sender,
+            text=text,
+        )
+
+    def record_attachment(
+        self,
+        *,
+        message_id: str,
+        session_id: str,
+        user_id: int,
+        channel: str,
+        kind: str,
+        filename: str,
+        mime: str,
+        size_bytes: int,
+        sha256: str,
+        local_path: str,
+        remote_file_id: str = "",
+    ) -> str:
+        if not self._run_store:
+            return ""
+        return self._run_store.create_attachment(
+            message_id=message_id,
+            session_id=session_id,
+            user_id=user_id,
+            channel=channel,
+            kind=kind,
+            filename=filename,
+            mime=mime,
+            size_bytes=size_bytes,
+            sha256=sha256,
+            local_path=local_path,
+            remote_file_id=remote_file_id,
+        )
+
+    def list_session_attachments(self, session_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        if not self._run_store:
+            return []
+        return self._run_store.list_session_attachments(session_id=session_id, limit=limit)
+
+    def get_attachment(self, attachment_id: str) -> Optional[Dict[str, Any]]:
+        if not self._run_store:
+            return None
+        return self._run_store.get_attachment(attachment_id)
+
     def get_last_user_prompt(self, session_id: str) -> str:
         history = self.list_session_messages(session_id=session_id, limit=40)
         for msg in reversed(history):

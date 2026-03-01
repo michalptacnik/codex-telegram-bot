@@ -135,3 +135,28 @@ class WorkspaceManager:
     def cleanup_all(self) -> List[dict]:
         """Remove all provisioned workspaces. Returns cleanup summaries."""
         return [self.cleanup(sid) for sid in list(self._registry)]
+
+    def resolve_path(
+        self,
+        session_id: str,
+        raw_path: str,
+        *,
+        allow_absolute: bool = False,
+    ) -> Path:
+        """Resolve path under session workspace root with traversal protection."""
+        ws = self.provision(session_id).resolve()
+        candidate = Path(str(raw_path or "").strip()).expanduser()
+        if candidate.is_absolute():
+            resolved = candidate.resolve()
+            if not allow_absolute:
+                try:
+                    resolved.relative_to(ws)
+                except ValueError as exc:
+                    raise ValueError("absolute path outside session workspace") from exc
+            return resolved
+        resolved = (ws / candidate).resolve()
+        try:
+            resolved.relative_to(ws)
+        except ValueError as exc:
+            raise ValueError("path escapes session workspace") from exc
+        return resolved

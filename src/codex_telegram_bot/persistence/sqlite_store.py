@@ -132,6 +132,51 @@ class SqliteRunStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS messages (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    channel_message_id TEXT NOT NULL DEFAULT '',
+                    sender TEXT NOT NULL,
+                    text TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_messages_session_created
+                ON messages (session_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS attachments (
+                    id TEXT PRIMARY KEY,
+                    message_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    mime TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    sha256 TEXT NOT NULL DEFAULT '',
+                    local_path TEXT NOT NULL,
+                    remote_file_id TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_attachments_session_created
+                ON attachments (session_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS tool_approvals (
                     approval_id TEXT PRIMARY KEY,
                     chat_id INTEGER NOT NULL,
@@ -960,6 +1005,113 @@ class SqliteRunStore:
                         _utc_now(),
                     ),
                 )
+
+    def create_channel_message(
+        self,
+        *,
+        session_id: str,
+        user_id: int,
+        channel: str,
+        channel_message_id: str,
+        sender: str,
+        text: str = "",
+    ) -> str:
+        message_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO messages
+                (id, session_id, user_id, channel, channel_message_id, sender, text, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    message_id,
+                    session_id,
+                    str(user_id),
+                    str(channel or "").strip().lower(),
+                    str(channel_message_id or "").strip(),
+                    str(sender or "").strip().lower(),
+                    str(text or ""),
+                    _utc_now(),
+                ),
+            )
+        return message_id
+
+    def create_attachment(
+        self,
+        *,
+        message_id: str,
+        session_id: str,
+        user_id: int,
+        channel: str,
+        kind: str,
+        filename: str,
+        mime: str,
+        size_bytes: int,
+        sha256: str,
+        local_path: str,
+        remote_file_id: str = "",
+    ) -> str:
+        attachment_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO attachments
+                (id, message_id, session_id, user_id, channel, kind, filename, mime, size_bytes, sha256, local_path, remote_file_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    attachment_id,
+                    message_id,
+                    session_id,
+                    str(user_id),
+                    str(channel or "").strip().lower(),
+                    str(kind or "").strip().lower(),
+                    str(filename or "").strip(),
+                    str(mime or "").strip(),
+                    max(0, int(size_bytes or 0)),
+                    str(sha256 or "").strip(),
+                    str(local_path or "").strip(),
+                    str(remote_file_id or "").strip(),
+                    _utc_now(),
+                ),
+            )
+        return attachment_id
+
+    def list_session_attachments(self, session_id: str, limit: int = 100) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM attachments
+                WHERE session_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (session_id, max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_attachment(row) for row in rows]
+
+    def get_attachment(self, attachment_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM attachments WHERE id = ?",
+                (attachment_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return _row_to_attachment(row)
+
+    def count_attachments_for_session_day(self, session_id: str, day_iso: str) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM attachments
+                WHERE session_id = ? AND substr(created_at, 1, 10) = ?
+                """,
+                (session_id, str(day_iso or "").strip()),
+            ).fetchone()
+        return int(row["c"] or 0) if row else 0
 
     def list_session_messages(self, session_id: str, limit: int = 20) -> List[TelegramSessionMessageRecord]:
         with self._connect() as conn:
@@ -3080,6 +3232,24 @@ def _row_to_skill_catalog_entry(row: sqlite3.Row) -> dict:
         "tags": list(tags or []),
         "install_ref": dict(install_ref or {}),
         "last_fetched_at": str(row["last_fetched_at"] or ""),
+    }
+
+
+def _row_to_attachment(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"] or ""),
+        "message_id": str(row["message_id"] or ""),
+        "session_id": str(row["session_id"] or ""),
+        "user_id": str(row["user_id"] or ""),
+        "channel": str(row["channel"] or ""),
+        "kind": str(row["kind"] or ""),
+        "filename": str(row["filename"] or ""),
+        "mime": str(row["mime"] or ""),
+        "size_bytes": int(row["size_bytes"] or 0),
+        "sha256": str(row["sha256"] or ""),
+        "local_path": str(row["local_path"] or ""),
+        "remote_file_id": str(row["remote_file_id"] or ""),
+        "created_at": str(row["created_at"] or ""),
     }
 
 
