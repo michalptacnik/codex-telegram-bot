@@ -551,13 +551,67 @@ class AgentService:
 
                 # Check if approval is required
                 if self._tool_action_requires_approval(tool_name):
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": f"Error: tool '{tool_name}' requires approval. Use /approve to grant permission.",
-                        "is_error": True,
-                    })
-                    continue
+                    if not self._run_store:
+                        return "Error: approval registry unavailable."
+                    if self._run_store.count_pending_tool_approvals(chat_id=chat_id, user_id=user_id) >= self._max_pending_approvals_per_user:
+                        return (
+                            "Error: too many pending approvals for this user. "
+                            "Resolve existing approvals with /pending, /approve, or /deny."
+                        )
+                    tool_argv = [
+                        TOOL_APPROVAL_SENTINEL,
+                        tool_name,
+                        json.dumps(tool_input or {}, sort_keys=True, ensure_ascii=True),
+                    ]
+                    existing = self._run_store.find_pending_tool_approval(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        argv=tool_argv,
+                    )
+                    if existing:
+                        approval_id = existing["approval_id"]
+                    else:
+                        run_id = self._run_store.create_run(f"Approval requested for tool: {tool_name}")
+                        self._run_store.mark_running(run_id)
+                        approval_id = self._run_store.create_tool_approval(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            run_id=run_id,
+                            argv=tool_argv,
+                            stdin_text="",
+                            timeout_sec=60,
+                            risk_tier="high",
+                        )
+                        self._emit_tool_event(
+                            run_id=run_id,
+                            event_type="tool.approval.requested",
+                            payload=f"approval_id={approval_id}, tool_use_id={tool_use_id}, risk=high",
+                        )
+                        self._run_store.mark_completed(
+                            run_id,
+                            f"Approval requested approval_id={approval_id} tool_use_id={tool_use_id}",
+                        )
+                    await self._notify_progress(
+                        progress_callback,
+                        {
+                            "event": "loop.step.awaiting_approval",
+                            "step": turn + 1,
+                            "action_id": tool_use_id,
+                            "approval_id": approval_id,
+                        },
+                    )
+                    action_preview = _format_tool_action_preview(tool_name, tool_input)
+                    msg = (
+                        "Approval required for high-risk tool action before I can continue.\n"
+                        f"Action: {action_preview}\n"
+                        f"Approve once: /approve {approval_id[:8]}\n"
+                        f"Deny: /deny {approval_id[:8]}"
+                    )
+                    self.append_session_assistant_message(session_id=session_id, content=msg)
+                    return msg
 
                 action_id = "tool-" + uuid.uuid4().hex[:8]
                 result = await self._execute_registered_tool_action(
@@ -2541,7 +2595,9 @@ class AgentService:
         if name not in APPROVAL_REQUIRED_TOOLS:
             return False
         if name in {"send_email_smtp", "send_email"}:
-            return email_tool_enabled(os.environ)
+            raw = str(os.environ.get("EMAIL_SEND_REQUIRE_APPROVAL", "1") or "1").strip().lower()
+            require_email_approval = raw not in {"0", "false", "no", "off"}
+            return require_email_approval and email_tool_enabled(os.environ)
         return True
 
     async def _attempt_autonomous_email_send_recovery(

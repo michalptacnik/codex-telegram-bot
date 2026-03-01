@@ -211,6 +211,8 @@ Environment variables override `.env`:
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_MAX_TOKENS`, `OPENAI_TIMEOUT_SEC`, `OPENAI_API_BASE` (used by `responses-api`)
 - `ENABLE_PROBE_LOOP` (default: `0`; when `1`, enables probe-loop service wiring in container)
 - `ENABLE_WEB_SEARCH_TOOL` (default: `1`; when `0`, disables `web_search`)
+- `EMAIL_SEND_REQUIRE_APPROVAL` (default: `1`; when `0`, email tools can send without approval gate)
+- `STATUS_HEARTBEAT_PUSH_ENABLED` (default: `0`; when `1`, posts periodic heartbeat chat messages in addition to status-message updates)
 - `CODEX_EXEC_TIMEOUT_SEC` (default: `900`, bounded by policy profile max timeout)
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `CODEX_TIMEOUT_CONTINUE_RETRIES` (default: `1`; auto-continue attempts after timeout `124`)

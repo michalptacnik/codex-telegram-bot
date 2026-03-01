@@ -13,6 +13,7 @@ from codex_telegram_bot.telegram_bot import (
     _parse_email_template_spec,
     _parse_gh_command_spec,
     _parse_template_spec,
+    _humanize_action_preview,
 )
 
 
@@ -118,3 +119,13 @@ class TestOutputFirewallDetection(unittest.TestCase):
     def test_does_not_flag_regular_assistant_text(self):
         text = "Here are 10 companies and why each is a fit."
         self.assertFalse(_looks_like_tool_leak(text))
+
+
+class TestProgressNarrationHelpers(unittest.TestCase):
+    def test_humanize_action_preview_for_tool_sentinel(self):
+        text = "__tool__ send_email_smtp {\"to\":\"user@example.com\"}"
+        self.assertIn("send_email_smtp", _humanize_action_preview(text))
+
+    def test_humanize_action_preview_for_loop_tool_format(self):
+        text = "tool:send_email_smtp:{\"to\":\"user@example.com\"}"
+        self.assertIn("send_email_smtp", _humanize_action_preview(text))

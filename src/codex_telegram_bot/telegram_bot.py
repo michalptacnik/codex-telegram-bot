@@ -76,6 +76,12 @@ MAX_OUTPUT_CHARS = 3800
 EPHEMERAL_STATUS_TTL_SEC = 12
 STATUS_HEARTBEAT_SEC = 15
 STATUS_HEARTBEAT_PUSH_SEC = 45
+STATUS_HEARTBEAT_PUSH_ENABLED = (os.environ.get("STATUS_HEARTBEAT_PUSH_ENABLED", "0") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 USER_WINDOW_SEC = 60
 MAX_USER_COMMANDS_PER_WINDOW = 20
 COMMAND_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
@@ -330,6 +336,21 @@ def _humanize_approval_execution_output(raw: str) -> str:
     return text
 
 
+def _humanize_action_preview(command: str) -> str:
+    text = str(command or "").strip()
+    if not text:
+        return "working step"
+    if text.startswith("tool:"):
+        parts = text.split(":", 2)
+        if len(parts) >= 2 and parts[1]:
+            return f"tool `{parts[1]}`"
+    if text.startswith("__tool__ "):
+        tokens = text.split()
+        if len(tokens) >= 2:
+            return f"tool `{tokens[1]}`"
+    return f"`{text[:120]}`"
+
+
 def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
     now = asyncio.get_running_loop().time()
     limiter = context.application.bot_data.setdefault("user_command_limiter", {})
@@ -420,9 +441,10 @@ async def _send_approval_options(
     command_preview: str,
 ) -> None:
     chat_id = update.effective_chat.id if update.effective_chat else 0
+    preview = _humanize_action_preview(command_preview)
     msg = (
         "Approval required: allow this high-risk action?\n"
-        f"`{command_preview[:180]}`\n"
+        f"{preview}\n"
         "1) Allow once\n"
         "2) Deny\n"
         "3) Show pending list"
@@ -1218,18 +1240,46 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             fallback_send=False,
         )
 
+    last_voice_key = ""
+    last_voice_ts = 0.0
+
+    async def narrate(text_value: str, key: str) -> None:
+        nonlocal last_voice_key, last_voice_ts
+        text_clean = str(text_value or "").strip()
+        key_clean = str(key or "").strip()
+        if not text_clean or not key_clean:
+            return
+        now = asyncio.get_running_loop().time()
+        if key_clean == last_voice_key and (now - last_voice_ts) < 20:
+            return
+        if (now - last_voice_ts) < 2:
+            return
+        last_voice_key = key_clean
+        last_voice_ts = now
+        try:
+            await update.message.reply_text(text_clean[:500])
+        except Exception:
+            pass
+
     async def progress(update_payload: dict) -> None:
         event = update_payload.get("event", "")
         if event == "loop.started":
             run_state[update.effective_chat.id]["steps_total"] = int(update_payload.get("steps_total", 0) or 0)
             await set_status(f"Working on it: started {update_payload.get('steps_total', 0)} step(s).")
+            await narrate("I’m starting execution and will keep you updated step-by-step.", "voice:loop.started")
         elif event == "loop.autoplan.started":
             await set_status("Planning the next concrete actions...")
+            await narrate("I’m planning concrete actions now.", "voice:loop.autoplan.started")
         elif event == "loop.autoplan.ready":
             run_state[update.effective_chat.id]["steps_total"] = int(update_payload.get("steps_total", 0) or 0)
             await set_status(f"Plan ready: {update_payload.get('steps_total', 0)} executable step(s).")
+            await narrate(
+                f"I prepared {int(update_payload.get('steps_total', 0) or 0)} execution step(s) and I’m running them now.",
+                "voice:loop.autoplan.ready",
+            )
         elif event == "loop.autoplan.none":
             await set_status("No tool steps needed; drafting the answer.")
+            await narrate("No tools were needed, so I’m drafting the final answer.", "voice:loop.autoplan.none")
         elif event == "skills.activated":
             skills = ", ".join([str(x) for x in list(update_payload.get("skills") or [])][:4])
             await set_status(f"Using skill(s): {skills or 'n/a'}")
@@ -1238,7 +1288,28 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             await set_status(f"Finished with skill(s): {skills or 'n/a'}")
         elif event == "loop.step.started":
             run_state[update.effective_chat.id]["active_step"] = int(update_payload.get("step", 0) or 0)
-            await set_status(f"Step {update_payload.get('step')}: {update_payload.get('command', '')[:120]}")
+            step = int(update_payload.get("step", 0) or 0)
+            command = str(update_payload.get("command", "") or "").strip()
+            await set_status(f"Step {step}: {command[:120]}")
+            steps_total = int(run_state[update.effective_chat.id].get("steps_total", 0) or 0)
+            await narrate(
+                f"I’m running step {step}/{steps_total or '?'}: {_humanize_action_preview(command)}",
+                f"voice:loop.step.started:{step}:{command[:80]}",
+            )
+        elif event == "native_loop.tool_call":
+            tool_name = str(update_payload.get("tool_name", "") or "tool")
+            await set_status(f"Running tool: {tool_name}")
+            await narrate(
+                f"I’m calling tool `{tool_name}` now.",
+                f"voice:native_loop.tool_call:{tool_name}:{str(update_payload.get('tool_use_id', ''))[:20]}",
+            )
+        elif event == "loop.step.completed":
+            step = int(update_payload.get("step", 0) or 0)
+            rc = int(update_payload.get("returncode", 0) or 0)
+            if rc == 0:
+                await narrate(f"Step {step} finished successfully.", f"voice:loop.step.completed:{step}:ok")
+            else:
+                await narrate(f"Step {step} failed (rc={rc}). I’m handling it.", f"voice:loop.step.completed:{step}:{rc}")
         elif event == "loop.step.awaiting_approval":
             approval_id = str(update_payload.get("approval_id", ""))
             await set_status(f"Paused: waiting for approval `{approval_id[:8]}`.")
@@ -1257,6 +1328,10 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     approval_id=match["approval_id"],
                     command_preview=cmd,
                 )
+            await narrate(
+                f"I need your approval to continue this high-risk action. Use the buttons in the approval card (`{approval_id[:8]}`).",
+                f"voice:loop.step.awaiting_approval:{approval_id[:8]}",
+            )
         elif event == "model.job.queued":
             active_jobs[update.effective_chat.id] = update_payload.get("job_id", "")
             await set_status(f"Model job queued `{str(update_payload.get('job_id', ''))[:8]}`.")
@@ -1273,7 +1348,6 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     async def heartbeat() -> None:
         chat_id = update.effective_chat.id
         loop = asyncio.get_running_loop()
-        last_push = 0.0
         while True:
             await asyncio.sleep(STATUS_HEARTBEAT_SEC)
             state = run_state.get(chat_id, {})
@@ -1291,7 +1365,7 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
             else:
                 msg = f"Still processing ({elapsed}s)."
             await set_status(msg)
-            if now - last_push >= STATUS_HEARTBEAT_PUSH_SEC:
+            if STATUS_HEARTBEAT_PUSH_ENABLED and now - last_voice_ts >= STATUS_HEARTBEAT_PUSH_SEC:
                 try:
                     sent = await context.bot.send_message(chat_id=chat_id, text=msg)
                     asyncio.create_task(
@@ -1304,7 +1378,6 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
                     )
                 except Exception:
                     pass
-                last_push = now
 
     heartbeat_task = asyncio.create_task(heartbeat())
     try:
