@@ -8,6 +8,7 @@ from codex_telegram_bot.tools.email import (
     is_email_tool_enabled,
 )
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
+from codex_telegram_bot.tools.file_transfer import SendFileTool
 from codex_telegram_bot.tools.git import (
     GitAddTool,
     GitCommitTool,
@@ -103,6 +104,13 @@ def build_default_tool_registry(
                 messenger=proactive_messenger,
             )
         )
+        registry.register(
+            SendFileTool(
+                run_store=run_store,
+                access_controller=access_controller,
+                messenger=proactive_messenger,
+            )
+        )
         registry.register(ScheduleTaskTool(run_store=run_store, access_controller=access_controller))
         registry.register(ListSchedulesTool(run_store=run_store, access_controller=access_controller))
         registry.register(CancelScheduleTool(run_store=run_store, access_controller=access_controller))
@@ -187,6 +195,7 @@ __all__ = [
     "SkillsMarketDisableTool",
     "SkillsMarketRemoveTool",
     "SendMessageTool",
+    "SendFileTool",
     "SessionsListTool",
     "SessionsHistoryTool",
     "SessionsSendTool",

@@ -39,7 +39,7 @@ TOOL_GROUPS: Dict[str, List[str]] = {
         "heartbeat_update",
         "heartbeat_run_once",
     ],
-    "messaging": ["send_message"],
+    "messaging": ["send_message", "send_file"],
     "memory": [
         "memory_get",
         "memory_search",

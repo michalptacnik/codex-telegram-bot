@@ -301,6 +301,20 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["text"],
         },
     },
+    "send_file": {
+        "name": "send_file",
+        "description": "Send a workspace file as proactive attachment.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Target session ID; defaults to current session"},
+                "path": {"type": "string", "description": "File path relative to workspace root"},
+                "caption": {"type": "string", "description": "Optional caption"},
+                "kind": {"type": "string", "description": "document|photo|video|audio"},
+            },
+            "required": ["path"],
+        },
+    },
     "schedule_task": {
         "name": "schedule_task",
         "description": "Create a one-shot or recurring schedule for reminder delivery.",

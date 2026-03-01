@@ -302,6 +302,16 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "silent": "bool (optional)",
         },
     },
+    "send_file": {
+        "name": "send_file",
+        "protocol": "!tool",
+        "args": {
+            "session_id": "string (optional; defaults to current session)",
+            "path": "string (required)",
+            "caption": "string (optional)",
+            "kind": "string (optional; document|photo|video|audio)",
+        },
+    },
     "schedule_task": {
         "name": "schedule_task",
         "protocol": "!tool",
