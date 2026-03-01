@@ -3,7 +3,10 @@ import logging
 import os
 import shlex
 import json
+import hashlib
 import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, List
 from types import SimpleNamespace
 
@@ -29,6 +32,9 @@ except Exception:  # pragma: no cover - exercised only in minimal test environme
 
     class _FilterStub:
         def __and__(self, _other):
+            return self
+
+        def __or__(self, _other):
             return self
 
         def __invert__(self):
@@ -60,7 +66,15 @@ except Exception:  # pragma: no cover - exercised only in minimal test environme
     class ContextTypes:  # type: ignore[override]
         DEFAULT_TYPE = object
 
-    filters = SimpleNamespace(TEXT=_FilterStub(), COMMAND=_FilterStub())
+    filters = SimpleNamespace(
+        TEXT=_FilterStub(),
+        COMMAND=_FilterStub(),
+        DOCUMENT=_FilterStub(),
+        Document=SimpleNamespace(ALL=_FilterStub()),
+        PHOTO=_FilterStub(),
+        VIDEO=_FilterStub(),
+        AUDIO=_FilterStub(),
+    )
 
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
@@ -85,6 +99,14 @@ STATUS_HEARTBEAT_PUSH_ENABLED = (os.environ.get("STATUS_HEARTBEAT_PUSH_ENABLED",
 }
 USER_WINDOW_SEC = 60
 MAX_USER_COMMANDS_PER_WINDOW = 20
+MAX_TELEGRAM_ATTACHMENT_BYTES = max(
+    1024 * 1024,
+    int((os.environ.get("TELEGRAM_MAX_ATTACHMENT_BYTES") or str(25 * 1024 * 1024)).strip()),
+)
+MAX_TELEGRAM_ATTACHMENTS_PER_DAY = max(
+    1,
+    int((os.environ.get("TELEGRAM_MAX_ATTACHMENTS_PER_DAY") or "50").strip()),
+)
 COMMAND_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 TOOL_LEAK_RE = re.compile(
     r"(?is)(^\s*!(exec|tool|loop)\b|step\s*\d+\s*:.*\{cmd\s*:|\|\s*timeout\s*=|```.*!(exec|tool|loop).*```)"
@@ -417,6 +439,26 @@ def _looks_like_tool_leak(text: str) -> bool:
     if re.search(r"(?is)```.*?(?:!exec|!tool|!loop|\{cmd\s*:).*?```", raw):
         return True
     return bool(re.match(r"(?is)^\s*\{.*\"(name|tool|args)\"\s*:", raw))
+
+
+def _safe_attachment_filename(raw: str, fallback: str = "attachment.bin") -> str:
+    value = (raw or "").strip().replace("\\", "/").split("/")[-1]
+    value = re.sub(r"[^A-Za-z0-9._-]", "_", value)
+    value = value.strip("._")
+    if not value:
+        value = fallback
+    return value[:180]
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _looks_like_direct_execution_prompt(text: str) -> bool:
@@ -1295,6 +1337,151 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.exception("Message handler error: %s", exc)
 
 
+async def handle_attachment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
+            return
+        agent_service = context.bot_data.get("agent_service")
+        chat_id = update.effective_chat.id
+        session = agent_service.get_or_create_session(chat_id=chat_id, user_id=user_id)
+        agent_service.initialize_session_workspace(session_id=session.session_id)
+        workspace = agent_service.session_workspace(session.session_id)
+        day = datetime.now(timezone.utc).date().isoformat()
+        count_today = agent_service.run_store.count_attachments_for_session_day(session.session_id, day) if agent_service.run_store else 0
+        file_specs = []
+        msg = update.message
+        if getattr(msg, "document", None):
+            doc = msg.document
+            file_specs.append(
+                {
+                    "kind": "document",
+                    "file_id": str(getattr(doc, "file_id", "") or ""),
+                    "filename": str(getattr(doc, "file_name", "") or "document.bin"),
+                    "mime": str(getattr(doc, "mime_type", "") or "application/octet-stream"),
+                    "size": int(getattr(doc, "file_size", 0) or 0),
+                }
+            )
+        if getattr(msg, "photo", None):
+            photo = msg.photo[-1]
+            file_specs.append(
+                {
+                    "kind": "photo",
+                    "file_id": str(getattr(photo, "file_id", "") or ""),
+                    "filename": f"photo_{msg.message_id}.jpg",
+                    "mime": "image/jpeg",
+                    "size": int(getattr(photo, "file_size", 0) or 0),
+                }
+            )
+        if getattr(msg, "audio", None):
+            audio = msg.audio
+            file_specs.append(
+                {
+                    "kind": "audio",
+                    "file_id": str(getattr(audio, "file_id", "") or ""),
+                    "filename": str(getattr(audio, "file_name", "") or f"audio_{msg.message_id}.bin"),
+                    "mime": str(getattr(audio, "mime_type", "") or "audio/mpeg"),
+                    "size": int(getattr(audio, "file_size", 0) or 0),
+                }
+            )
+        if getattr(msg, "video", None):
+            video = msg.video
+            file_specs.append(
+                {
+                    "kind": "video",
+                    "file_id": str(getattr(video, "file_id", "") or ""),
+                    "filename": str(getattr(video, "file_name", "") or f"video_{msg.message_id}.mp4"),
+                    "mime": str(getattr(video, "mime_type", "") or "video/mp4"),
+                    "size": int(getattr(video, "file_size", 0) or 0),
+                }
+            )
+        if not file_specs:
+            return
+        valid_specs = [item for item in file_specs if int(item.get("size", 0) or 0) <= MAX_TELEGRAM_ATTACHMENT_BYTES]
+        if count_today + len(valid_specs) > MAX_TELEGRAM_ATTACHMENTS_PER_DAY:
+            await update.message.reply_text("Attachment limit reached for today.")
+            return
+
+        incoming_text = str(getattr(msg, "caption", "") or "").strip()
+        inbound_message_id = agent_service.record_channel_message(
+            session_id=session.session_id,
+            user_id=user_id,
+            channel="telegram",
+            channel_message_id=str(getattr(msg, "message_id", "") or ""),
+            sender="user",
+            text=incoming_text,
+        )
+        receipts = []
+        skipped = []
+        for item in file_specs:
+            if int(item["size"]) > MAX_TELEGRAM_ATTACHMENT_BYTES:
+                skipped.append(
+                    f"Skipped oversized {item['kind']} `{item['filename']}` ({item['size']} bytes > {MAX_TELEGRAM_ATTACHMENT_BYTES})."
+                )
+                continue
+            file_id = str(item["file_id"] or "")
+            if not file_id:
+                skipped.append(f"Skipped {item['kind']} `{item['filename']}` (missing file_id).")
+                continue
+            safe_name = _safe_attachment_filename(str(item["filename"] or "attachment.bin"))
+            rel_path = Path("attachments") / str(getattr(msg, "message_id", "0")) / safe_name
+            abs_path = (workspace / rel_path).resolve()
+            try:
+                abs_path.relative_to(workspace.resolve())
+            except ValueError:
+                skipped.append(f"Skipped {item['kind']} `{safe_name}` (invalid path).")
+                continue
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            telegram_file = await context.bot.get_file(file_id)
+            await telegram_file.download_to_drive(custom_path=str(abs_path))
+            sha = _sha256_file(abs_path)
+            agent_service.record_attachment(
+                message_id=inbound_message_id,
+                session_id=session.session_id,
+                user_id=user_id,
+                channel="telegram",
+                kind=str(item["kind"]),
+                filename=safe_name,
+                mime=str(item["mime"]),
+                size_bytes=int(abs_path.stat().st_size),
+                sha256=sha,
+                local_path=str(abs_path),
+                remote_file_id=file_id,
+            )
+            receipts.append(
+                "User uploaded file: "
+                f"{safe_name} ({item['mime']}, {int(abs_path.stat().st_size)} bytes, sha256:{sha}) "
+                f"saved at {rel_path.as_posix()}"
+            )
+        if not receipts:
+            msg = "No valid attachments were stored."
+            if skipped:
+                msg = "\n".join([msg] + skipped[:3])
+            await update.message.reply_text(msg)
+            return
+        injected_lines = []
+        if incoming_text:
+            injected_lines.append(incoming_text)
+        injected_lines.extend(receipts)
+        injected_lines.extend(skipped[:2])
+        injected = "\n\n".join(injected_lines) if incoming_text else "\n".join(injected_lines)
+        await _process_prompt(
+            update=update,
+            context=context,
+            text=injected,
+            user_id=user_id,
+            record_channel=False,
+        )
+    except Exception as exc:
+        logger.exception("Attachment handler error: %s", exc)
+
+
 async def handle_reinstall(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         user_id = update.message.from_user.id if update.message and update.message.from_user else 0
@@ -1431,10 +1618,27 @@ async def handle_approval_callback(update: Update, context: ContextTypes.DEFAULT
         logger.exception("Approval callback handler error: %s", exc)
 
 
-async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, user_id: int) -> None:
+async def _process_prompt(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    user_id: int,
+    *,
+    record_channel: bool = True,
+) -> None:
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.TYPING)
     agent = context.bot_data.get("agent")
     agent_service = context.bot_data.get("agent_service")
+    session = agent_service.get_or_create_session(chat_id=update.effective_chat.id, user_id=user_id)
+    if record_channel and update.message:
+        agent_service.record_channel_message(
+            session_id=session.session_id,
+            user_id=user_id,
+            channel="telegram",
+            channel_message_id=str(getattr(update.message, "message_id", "") or ""),
+            sender="user",
+            text=text,
+        )
     active_jobs = context.application.bot_data.setdefault("active_jobs", {})
     active_tasks = context.application.bot_data.setdefault("active_tasks", {})
     run_state = context.application.bot_data.setdefault("run_state", {})
@@ -1644,6 +1848,14 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
     )
     for chunk in chunk_text(output, MAX_OUTPUT_CHARS):
         await update.message.reply_text(chunk)
+    agent_service.record_channel_message(
+        session_id=response.session_id,
+        user_id=user_id,
+        channel="telegram",
+        channel_message_id="",
+        sender="assistant",
+        text=output,
+    )
 
 
 def build_application(
@@ -1699,12 +1911,41 @@ def build_application(
         app.add_handler(CommandHandler(command_name, handler))
     app.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r"^approval:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    try:
+        attachment_filter = (filters.Document.ALL | filters.PHOTO | filters.VIDEO | filters.AUDIO) & ~filters.COMMAND
+    except Exception:
+        attachment_filter = (filters.DOCUMENT | filters.PHOTO | filters.VIDEO | filters.AUDIO) & ~filters.COMMAND
+    app.add_handler(MessageHandler(attachment_filter, handle_attachment))
     app.add_error_handler(handle_error)
 
     async def _telegram_proactive_sender(payload: dict) -> None:
         chat_id = int(payload.get("chat_id") or 0)
+        if not chat_id:
+            return
+        file_path = str(payload.get("file_path") or "").strip()
+        if file_path:
+            path = Path(file_path).expanduser().resolve()
+            if not path.exists() or not path.is_file():
+                return
+            kind = str(payload.get("kind") or "document").strip().lower()
+            caption = str(payload.get("caption") or "").strip()
+            if kind == "photo":
+                with path.open("rb") as f:
+                    await app.bot.send_photo(chat_id=chat_id, photo=f, caption=caption)
+                return
+            if kind == "video":
+                with path.open("rb") as f:
+                    await app.bot.send_video(chat_id=chat_id, video=f, caption=caption)
+                return
+            if kind == "audio":
+                with path.open("rb") as f:
+                    await app.bot.send_audio(chat_id=chat_id, audio=f, caption=caption)
+                return
+            with path.open("rb") as f:
+                await app.bot.send_document(chat_id=chat_id, document=f, caption=caption or None)
+            return
         text = str(payload.get("text") or "")
-        if not chat_id or not text:
+        if not text:
             return
         kwargs = {"chat_id": chat_id, "text": text}
         if bool(payload.get("silent", False)):
