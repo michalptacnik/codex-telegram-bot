@@ -163,6 +163,19 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["query"],
         },
     },
+    "web_search": {
+        "name": "web_search",
+        "description": "Search the public web and return source links with snippets.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Web query string"},
+                "k": {"type": "integer", "description": "Maximum results to return (default 5, max 10)"},
+                "timeout_sec": {"type": "integer", "description": "Network timeout in seconds (default 15)"},
+            },
+            "required": ["query"],
+        },
+    },
     "send_email_smtp": {
         "name": "send_email_smtp",
         "description": "Send an email via SMTP.",

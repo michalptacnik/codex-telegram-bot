@@ -6,6 +6,7 @@ import shlex
 import uuid
 import json
 import hashlib
+import difflib
 import os
 import time
 from dataclasses import dataclass
@@ -207,6 +208,11 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "name": "memory_search",
         "protocol": "!tool",
         "args": {"query": "string (required)", "k": "int (optional)"},
+    },
+    "web_search": {
+        "name": "web_search",
+        "protocol": "!tool",
+        "args": {"query": "string (required)", "k": "int (optional)", "timeout_sec": "int (optional)"},
     },
     # MCP tools (Issue #103)
     "mcp_search": {
@@ -2886,7 +2892,12 @@ class AgentService:
             and (not has_executed_tool)
             and executed_slash is None
             and _prompt_expects_action(base_prompt)
-            and (_output_sounds_like_action_promise(text) or _contains_tool_call_signatures(text))
+            and (
+                _output_sounds_like_action_promise(text)
+                or _contains_tool_call_signatures(text)
+                or _looks_like_prompt_echo(base_prompt, text)
+                or _looks_like_prompt_handoff(text)
+            )
             and autonomy_depth < self._autonomous_protocol_max_depth()
         ):
             corrected = await self._request_tool_call_correction(
@@ -2913,6 +2924,11 @@ class AgentService:
                     selected_tools=selected_tools,
                     goal=goal,
                     allow_correction=False,
+                )
+            if _looks_like_prompt_echo(base_prompt, text) or _looks_like_prompt_handoff(text):
+                return (
+                    "Error: model returned non-executable prompt text instead of an action step. "
+                    "I requested a protocol correction but did not receive an executable tool call."
                 )
         return text
 
@@ -3412,6 +3428,9 @@ def _prompt_expects_action(prompt: str) -> bool:
         "run ",
         "execute ",
         "find ",
+        "search ",
+        "look up",
+        "lookup ",
         "implement",
         "do ",
     ]
@@ -3442,6 +3461,11 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
             picks.append("send_email")
     if "provider" in low and "provider_status" in available and "provider_status" not in picks:
         picks.append("provider_status")
+    web_markers = ("search", "internet", "web", "latest", "recent", "news", "lookup", "look up")
+    if any(marker in low for marker in web_markers):
+        for name in ("web_search", "mcp_search"):
+            if name in available and name not in picks:
+                picks.append(name)
     return picks[:6]
 
 
@@ -3733,7 +3757,7 @@ def _infer_tool_name_from_args(args: Dict[str, Any], preferred_tools: Sequence[s
     if "cmd" in keys and "shell_exec" in allowed:
         return "shell_exec"
     if "query" in keys:
-        for name in ("mcp_search", "memory_search"):
+        for name in ("web_search", "mcp_search", "memory_search"):
             if name in allowed:
                 return name
     if "path" in keys:
@@ -4284,6 +4308,34 @@ def _output_sounds_like_action_promise(text: str) -> bool:
     if "about to do" in low or "going to do" in low:
         return True
     return False
+
+
+def _looks_like_prompt_echo(prompt: str, output: str) -> bool:
+    a = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+    b = re.sub(r"\s+", " ", str(output or "").strip().lower())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(b) >= 24 and b in a:
+        return True
+    ratio = difflib.SequenceMatcher(a=a, b=b).ratio()
+    return ratio >= 0.78
+
+
+def _looks_like_prompt_handoff(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return False
+    markers = (
+        "here is a prompt",
+        "use this prompt",
+        "you can use the following prompt",
+        "paste this prompt",
+        "prompt:",
+        "copy this prompt",
+    )
+    return any(marker in low for marker in markers)
 
 
 def _is_internal_assistant_trace(content: str) -> bool:

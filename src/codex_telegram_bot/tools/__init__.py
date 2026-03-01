@@ -26,6 +26,7 @@ from codex_telegram_bot.tools.sessions import (
 )
 from codex_telegram_bot.tools.shell import ShellExecTool
 from codex_telegram_bot.tools.ssh import SshDetectionTool
+from codex_telegram_bot.tools.web import WebSearchTool, web_search_tool_enabled
 
 
 def build_default_tool_registry(
@@ -51,6 +52,8 @@ def build_default_tool_registry(
     registry.register(GitCommitTool())
     registry.register(ShellExecTool(process_manager=process_manager))
     registry.register(SshDetectionTool())
+    if web_search_tool_enabled(os.environ):
+        registry.register(WebSearchTool())
     if email_tool_enabled(os.environ):
         registry.register(SendEmailSmtpTool())
     if is_email_tool_enabled(os.environ):
@@ -94,6 +97,8 @@ __all__ = [
     "GitCommitTool",
     "ShellExecTool",
     "SshDetectionTool",
+    "WebSearchTool",
+    "web_search_tool_enabled",
     "ProviderStatusTool",
     "ProviderSwitchTool",
     "MemoryGetTool",

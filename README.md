@@ -25,6 +25,7 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Probe → expand prompt path keeps base context small
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
+  - Native `web_search` tool for internet retrieval with source URLs/snippets
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
   - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
 - Gateway/control plane:
@@ -209,6 +210,7 @@ Environment variables override `.env`:
 - `OPENAI_COMPATIBLE_PROVIDERS` (optional comma-separated provider names; each provider reads `<NAME>_API_KEY`, `<NAME>_BASE_URL`, `<NAME>_MODEL`, `<NAME>_TIMEOUT_SEC`)
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_MAX_TOKENS`, `OPENAI_TIMEOUT_SEC`, `OPENAI_API_BASE` (used by `responses-api`)
 - `ENABLE_PROBE_LOOP` (default: `0`; when `1`, enables probe-loop service wiring in container)
+- `ENABLE_WEB_SEARCH_TOOL` (default: `1`; when `0`, disables `web_search`)
 - `CODEX_EXEC_TIMEOUT_SEC` (default: `900`, bounded by policy profile max timeout)
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `CODEX_TIMEOUT_CONTINUE_RETRIES` (default: `1`; auto-continue attempts after timeout `124`)
