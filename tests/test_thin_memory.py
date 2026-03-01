@@ -149,8 +149,11 @@ class TestThinMemoryLayout(unittest.TestCase):
             daily.parent.mkdir(parents=True, exist_ok=True)
             daily.write_text("# Daily\nsecret-daily-detail", encoding="utf-8")
             prompt = service.build_session_prompt(session_id=session_id, user_prompt="hello")
+            self.assertIn("SOUL kernel:", prompt)
+            self.assertIn("SOUL contract:", prompt)
             self.assertIn("Thin memory index:", prompt)
             self.assertIn("Memory usage contract:", prompt)
+            self.assertLess(prompt.find("SOUL kernel:"), prompt.find("Thin memory index:"))
             self.assertNotIn("secret-daily-detail", prompt)
 
     def test_message_compaction_updates_obligations_and_keeps_index_bounded(self):

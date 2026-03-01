@@ -57,6 +57,7 @@ from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.thin_memory import ensure_memory_layout
 from codex_telegram_bot.services.thin_memory import ThinMemoryStore
+from codex_telegram_bot.services.soul import SoulStore
 from codex_telegram_bot.services.heartbeat import HeartbeatStore
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
@@ -90,6 +91,10 @@ MEMORY_USAGE_CONTRACT = (
     "Memory usage contract: A thin MEMORY_INDEX is always available. "
     "Use memory_pointer_open only when detailed context is required. "
     "Do not assume full memory pages or daily logs are preloaded."
+)
+SOUL_USAGE_CONTRACT = (
+    "SOUL contract: SOUL is identity; do not expand it. "
+    "Use it to keep voice and values consistent."
 )
 SKILL_DISCLOSURE_CONTRACT = (
     "Skill usage contract: do not dump all skills. "
@@ -1382,10 +1387,11 @@ class AgentService:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         capability_lines = self._build_capability_context(user_prompt=user_prompt)
-        style_lines = [f"Style guide: {MICRO_STYLE_GUIDE}", MEMORY_USAGE_CONTRACT, SKILL_DISCLOSURE_CONTRACT]
+        style_lines = [SOUL_USAGE_CONTRACT, f"Style guide: {MICRO_STYLE_GUIDE}", MEMORY_USAGE_CONTRACT, SKILL_DISCLOSURE_CONTRACT]
+        soul_lines = self._build_soul_context(session_id=session_id)
         memory_lines = self._build_thin_memory_context(session_id=session_id)
         if not self._run_store:
-            prefix = style_lines + memory_lines + capability_lines + planning_lines + retrieval_lines
+            prefix = soul_lines + memory_lines + style_lines + capability_lines + planning_lines + retrieval_lines
             if prefix:
                 return "\n".join(prefix + [user_prompt])
             return user_prompt
@@ -1393,12 +1399,13 @@ class AgentService:
         summary = (session.summary or "").strip() if session else ""
         history = self._run_store.list_session_messages(session_id=session_id, limit=max_turns * 2)
         if not history:
-            prefix = style_lines + memory_lines + capability_lines + planning_lines + retrieval_lines
+            prefix = soul_lines + memory_lines + style_lines + capability_lines + planning_lines + retrieval_lines
             if summary:
                 prefix = [f"Session memory summary:\n{summary[:CONTEXT_SUMMARY_BUDGET_CHARS]}"] + prefix
             if prefix:
                 self._session_context_diagnostics[session_id] = {
                     "summary_chars": min(len(summary), CONTEXT_SUMMARY_BUDGET_CHARS) if summary else 0,
+                    "soul_chars": sum(len(x) for x in soul_lines),
                     "memory_index_chars": sum(len(x) for x in memory_lines),
                     "history_chars": 0,
                     "retrieval_chars": sum(len(x) for x in retrieval_lines),
@@ -1417,8 +1424,11 @@ class AgentService:
             used_summary = summary[:CONTEXT_SUMMARY_BUDGET_CHARS]
             lines.append("Session memory summary:")
             lines.append(used_summary)
+        if soul_lines:
+            lines.extend(soul_lines)
         if memory_lines:
             lines.extend(memory_lines)
+        lines.extend(style_lines)
         if capability_lines:
             lines.extend(capability_lines)
         if planning_lines:
@@ -1441,6 +1451,7 @@ class AgentService:
             prompt = "\n".join(lines)
         self._session_context_diagnostics[session_id] = {
             "summary_chars": len(used_summary),
+            "soul_chars": sum(len(x) for x in soul_lines),
             "memory_index_chars": sum(len(x) for x in memory_lines),
             "history_chars": sum(len(x) for x in history_lines),
             "retrieval_chars": sum(len(x) for x in retrieval_lines),
@@ -1450,6 +1461,22 @@ class AgentService:
             "prompt_chars": len(prompt),
         }
         return prompt
+
+    def _build_soul_context(self, session_id: str) -> List[str]:
+        try:
+            workspace = self.session_workspace(session_id=session_id)
+            store = SoulStore(workspace_root=workspace)
+            soul_text = store.read_text().strip()
+        except Exception:
+            return []
+        if not soul_text:
+            return []
+        if len(soul_text) > 2000:
+            soul_text = soul_text[:2000]
+        return [
+            "SOUL kernel:",
+            soul_text,
+        ]
 
     def _build_thin_memory_context(self, session_id: str) -> List[str]:
         try:
