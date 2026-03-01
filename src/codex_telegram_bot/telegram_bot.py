@@ -1480,7 +1480,38 @@ def build_application(
         agent_service = build_agent_service()
     if agent is None:
         agent = Agent(agent_service=agent_service)
-    app = ApplicationBuilder().token(token).build()
+    async def _start_fallback_cron(application) -> None:
+        job_queue = getattr(application, "_job_queue", None)
+        if job_queue is not None:
+            return
+
+        async def _cron_loop() -> None:
+            while True:
+                try:
+                    await agent_service.run_cron_tick_once()
+                except Exception:
+                    logger.exception("cron tick loop failed")
+                await asyncio.sleep(60)
+
+        application.bot_data["cron_task"] = asyncio.create_task(_cron_loop(), name="telegram-cron-tick")
+
+    async def _stop_fallback_cron(application) -> None:
+        task = application.bot_data.pop("cron_task", None)
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    app = (
+        ApplicationBuilder()
+        .token(token)
+        .post_init(_start_fallback_cron)
+        .post_shutdown(_stop_fallback_cron)
+        .build()
+    )
     app.bot_data["allowlist"] = allowlist
     app.bot_data["agent_service"] = agent_service
     app.bot_data["agent"] = agent
@@ -1506,13 +1537,14 @@ def build_application(
         await app.bot.send_message(**kwargs)
 
     agent_service.register_proactive_transport("telegram", _telegram_proactive_sender)
-    if getattr(app, "job_queue", None) is not None:
+    job_queue = getattr(app, "_job_queue", None)
+    if job_queue is not None:
         async def _cron_tick_callback(_context):
             try:
                 await agent_service.run_cron_tick_once()
             except Exception:
                 logger.exception("cron tick job failed")
 
-        app.job_queue.run_repeating(_cron_tick_callback, interval=60, first=10, name="cron_tick")
+        job_queue.run_repeating(_cron_tick_callback, interval=60, first=10, name="cron_tick")
 
     return app
