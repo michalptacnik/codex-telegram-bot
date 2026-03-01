@@ -22,7 +22,7 @@ from codex_telegram_bot.tools.base import (
     ToolRequest,
     ToolResult,
 )
-from codex_telegram_bot.services.continuation_guard import PRELIMINARY_TERMINAL_FALLBACK
+from codex_telegram_bot.services.continuation_guard import PRELIMINARY_CONTINUE_HANDOFF
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
 from codex_telegram_bot.tools.git import GitStatusTool
 from codex_telegram_bot.providers.openai_compatible import _convert_openai_response_to_anthropic
@@ -289,7 +289,8 @@ class TestNativeToolLoop(unittest.IsolatedAsyncioTestCase):
                 user_id=1,
                 session_id="test-sess",
             )
-        self.assertEqual(result, PRELIMINARY_TERMINAL_FALLBACK)
+        self.assertIn(preliminary, result)
+        self.assertIn(PRELIMINARY_CONTINUE_HANDOFF, result)
         self.assertEqual(len(provider.calls), 3)
 
     async def test_tool_call_then_final_reply(self):

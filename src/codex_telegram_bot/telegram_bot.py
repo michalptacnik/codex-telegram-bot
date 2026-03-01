@@ -81,6 +81,7 @@ from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.presentation.formatter import format_message, format_tool_result
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.continuation_guard import CONTINUE_SESSION_PROMPT
 from codex_telegram_bot.services.execution_profile import UNSAFE_UNLOCK_PHRASE
 from codex_telegram_bot.services.message_updater import MessageUpdater
 from codex_telegram_bot.services.soul import SoulStore
@@ -1311,9 +1312,7 @@ async def handle_continue(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if not last:
             await update.message.reply_text("No previous prompt to continue from.")
             return
-        followup = pending_continue.get(chat_id) or (
-            f"{last}\n\nContinue from the last response and proceed with the next best step."
-        )
+        followup = pending_continue.get(chat_id) or CONTINUE_SESSION_PROMPT
         if not force_continue and _prompt_has_high_risk_tool_actions(last):
             pending_continue[chat_id] = followup
             await update.message.reply_text(

@@ -12,9 +12,14 @@ PRELIMINARY_CONTINUE_PROMPT = (
     "Return only when either (a) the task is done with concrete results, or (b) you are blocked and ask one short question."
 )
 
-PRELIMINARY_TERMINAL_FALLBACK = (
-    "I have not finished this task yet. I paused to avoid sending another preliminary progress report. "
-    "Reply with 'continue' and I will resume immediately from the current state."
+PRELIMINARY_CONTINUE_HANDOFF = (
+    "Reply with 'continue' to run the next step. I keep full session context and workspace state."
+)
+
+CONTINUE_SESSION_PROMPT = (
+    "Continue the same task from the current session and workspace state. "
+    "Use the full conversation context in this session, do not restart, and do not repeat completed work. "
+    "Execute the next best step and return a concise preliminary progress report."
 )
 
 _PRELIM_MARKERS = (
@@ -105,7 +110,10 @@ def sanitize_terminal_output(text: str) -> str:
     if not raw:
         return raw
     if looks_like_preliminary_report(raw):
-        return PRELIMINARY_TERMINAL_FALLBACK
+        low = raw.lower()
+        if "reply with 'continue'" in low or 'reply with "continue"' in low:
+            return raw
+        return f"{raw}\n\n{PRELIMINARY_CONTINUE_HANDOFF}"
     return raw
 
 

@@ -1,7 +1,7 @@
 import unittest
 
 from codex_telegram_bot.services.continuation_guard import (
-    PRELIMINARY_TERMINAL_FALLBACK,
+    PRELIMINARY_CONTINUE_HANDOFF,
     continuation_status_line,
     looks_like_preliminary_report,
     sanitize_terminal_output,
@@ -31,11 +31,18 @@ class TestContinuationGuard(unittest.TestCase):
 
     def test_terminal_sanitizer_rewrites_preliminary_output(self):
         text = "I'll continue and check one more thing."
-        self.assertEqual(sanitize_terminal_output(text), PRELIMINARY_TERMINAL_FALLBACK)
+        out = sanitize_terminal_output(text)
+        self.assertIn(text, out)
+        self.assertIn(PRELIMINARY_CONTINUE_HANDOFF, out)
         self.assertEqual(
             sanitize_terminal_output("Final status report: completed with concrete outcome."),
             "Final status report: completed with concrete outcome.",
         )
+
+    def test_terminal_sanitizer_does_not_duplicate_continue_handoff(self):
+        text = "I'll continue and check one more thing.\n\nReply with 'continue' to run the next step."
+        out = sanitize_terminal_output(text)
+        self.assertEqual(out, text)
 
 
 if __name__ == "__main__":

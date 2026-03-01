@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.agent_core.memory import resolve_memory_config
-from codex_telegram_bot.services.continuation_guard import PRELIMINARY_TERMINAL_FALLBACK
+from codex_telegram_bot.services.continuation_guard import PRELIMINARY_CONTINUE_HANDOFF
 
 
 class _Session:
@@ -83,8 +83,9 @@ class TestAgentCore(unittest.IsolatedAsyncioTestCase):
         result = await agent.handle_message(chat_id=1, user_id=2, text="do work")
 
         self.assertEqual(router.route_prompt.await_count, 3)
-        self.assertEqual(result.output, PRELIMINARY_TERMINAL_FALLBACK)
-        self.assertEqual(service.appended_assistant, [("sess-123", PRELIMINARY_TERMINAL_FALLBACK)])
+        self.assertIn("I'll continue executing this task", result.output)
+        self.assertIn(PRELIMINARY_CONTINUE_HANDOFF, result.output)
+        self.assertEqual(service.appended_assistant, [("sess-123", result.output)])
 
     async def test_agent_reset_delegates_to_service(self):
         service = _StubService()
