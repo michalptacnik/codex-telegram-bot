@@ -23,6 +23,7 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Per-session isolated workspace directories with disk-byte and file-count quotas
 - Agentic execution:
   - Probe → expand prompt path keeps base context small
+  - SOUL kernel (`memory/SOUL.md`) is always loaded as a tiny identity profile with strict caps and gated patching
   - Thin persistent memory index (`memory/MEMORY_INDEX.md`) is always loaded with strict size cap; heavy memory pages are pointer-opened on demand
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
@@ -34,6 +35,7 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Skill marketplace tools (`skills_market_*`) support search/install/enable/disable/remove with cache, hash verification, and progressive disclosure
   - Proactive `send_message` tool for agent-initiated delivery to session owners
   - Proactive `send_file` tool sends workspace files as Telegram attachments with path and access controls
+  - Channel-aware output formatter improves readability for Telegram/Web without extra model calls by default
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
   - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
 - Gateway/control plane:
@@ -260,6 +262,8 @@ Environment variables override `.env`:
 - `FILE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_file`)
 - `ENABLE_HEARTBEAT` (default: `0`; heartbeat proactivity is opt-in)
 - `MEMORY_INDEX_MAX_CHARS` (default: `8000`; hard cap for always-loaded thin memory index)
+- `SOUL_MAX_CHARS` (default: `2000`; hard cap for always-loaded SOUL kernel)
+- `ENABLE_POLISH_PROBE` (default: `0`; optional final formatting pass with strict +5% length cap)
 - `TELEGRAM_MAX_ATTACHMENT_BYTES` (default: `26214400` = 25 MB per attachment)
 - `TELEGRAM_MAX_ATTACHMENTS_PER_DAY` (default: `50` per session/day)
 - `WHATSAPP_ENABLED` (default: `1`; set `0` to disable WhatsApp bridge endpoints)
@@ -663,6 +667,20 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - thin index is injected by default
   - detailed pages/daily logs are opened only on-demand via pointers
 
+## SOUL Kernel (Minimal Persona)
+
+- Session workspace includes `memory/SOUL.md` with strict `SOUL v1` format and max size (`SOUL_MAX_CHARS`, default 2000).
+- SOUL is always loaded first in prompt assembly, before `MEMORY_INDEX.md`, to keep voice/values consistent with minimal token impact.
+- Direct edits via `write_file` are blocked for `memory/SOUL.md`.
+- Safe edit flow:
+  - `soul_get` to inspect current SOUL + validation status
+  - `soul_propose_patch` to validate structured patch and preview unified diff
+  - `soul_apply_patch` (approval-gated, high risk) to apply bounded patch only
+- History and audit:
+  - snapshots in `memory/.soul_history/*`
+  - SQLite audit rows in `soul_versions`
+  - Control Center SOUL panel supports history browsing and admin restore requests (approval-gated)
+
 ## Heartbeat Proactivity
 
 - Heartbeat is opt-in by default:
@@ -706,6 +724,23 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
   - use `send_file(path, caption?, kind?, session_id?)`
   - path must resolve inside workspace root (absolute paths require trusted profile and still must be inside workspace)
   - delivery is audited and linked to an assistant message row
+
+## Output Presentation (Telegram + Web)
+
+- A deterministic presentation layer post-processes assistant text per channel:
+  - paragraph splitting for long walls
+  - lightweight heading/list cleanup
+  - optional light emoji based on SOUL style
+- Telegram output uses MarkdownV2-safe escaping.
+- Web output keeps equivalent markdown structure and is rendered in Control Center chat.
+- SOUL style controls:
+  - `style.emoji`: `off|light|on`
+  - `style.emphasis`: `plain|light|rich`
+  - `style.brevity`: `short|normal`
+- Control Center `/chat` includes SOUL presentation controls (style update requests are approval-gated via `soul_apply_patch`).
+- Optional micro-style probe:
+  - disabled by default (`ENABLE_POLISH_PROBE=0`)
+  - if enabled, formatting pass is still heuristic-only and capped to +5% length growth.
 
 ## Tool Loop (Probe -> Expand)
 

@@ -22,7 +22,7 @@ from codex_telegram_bot.services.agent_service import (
 from codex_telegram_bot.services.error_codes import ERROR_CATALOG, detect_error_code, get_catalog_entry
 from codex_telegram_bot.services.onboarding import OnboardingStore
 from codex_telegram_bot.services.plugin_lifecycle import PluginLifecycleManager
-from codex_telegram_bot.services.soul import parse_soul
+from codex_telegram_bot.services.soul import SoulStore, parse_soul
 from codex_telegram_bot.services.whatsapp_bridge import WhatsAppBridge
 from codex_telegram_bot.services.whatsapp_transport import build_twilio_whatsapp_sender_from_env
 from codex_telegram_bot.config import get_env_path, load_env_file, write_env_file
@@ -88,6 +88,14 @@ class WhatsAppLinkCodeRequest(BaseModel):
 class SoulRestoreRequest(BaseModel):
     version_id: str
     reason: str = "restore requested from control center"
+    admin_user_id: int = 0
+
+
+class SoulStyleRequest(BaseModel):
+    emoji: str
+    emphasis: str
+    brevity: str
+    reason: str = "style update requested from control center"
     admin_user_id: int = 0
 
 
@@ -544,6 +552,45 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         if isinstance(style, dict):
             return dict(style)
         return {}
+
+    def _request_soul_patch_approval(
+        *,
+        session: Any,
+        session_id: str,
+        admin_user_id: int,
+        patch: Dict[str, Any],
+        reason: str,
+        tool_use_id: str,
+    ) -> str:
+        if agent_service.run_store is None:
+            raise HTTPException(status_code=503, detail="Approval store unavailable")
+        payload = {
+            "patch": patch,
+            "reason": str(reason or "SOUL update requested from control center").strip()[:240],
+        }
+        run_id = agent_service.run_store.create_run("Approval requested for tool: soul_apply_patch")
+        agent_service.run_store.mark_running(run_id)
+        approval_id = agent_service.run_store.create_tool_approval(
+            chat_id=int(session.chat_id),
+            user_id=int(admin_user_id),
+            session_id=session_id,
+            agent_id=str(session.current_agent_id or "default"),
+            run_id=run_id,
+            argv=[TOOL_APPROVAL_SENTINEL, "soul_apply_patch", json.dumps(payload, sort_keys=True, ensure_ascii=True)],
+            stdin_text="",
+            timeout_sec=60,
+            risk_tier="high",
+        )
+        agent_service.append_run_event(
+            run_id=run_id,
+            event_type="tool.approval.requested",
+            payload=f"approval_id={approval_id}, tool_use_id={tool_use_id}, risk=high",
+        )
+        agent_service.run_store.mark_completed(
+            run_id,
+            f"Approval requested approval_id={approval_id} tool_use_id={tool_use_id}",
+        )
+        return approval_id
 
     async def _deliver_websocket_proactive(payload: Dict[str, Any]) -> None:
         session_id = str(payload.get("session_id") or "").strip()
@@ -2265,37 +2312,60 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 "brevity": profile.style.brevity,
             },
         }
-        payload = {
-            "patch": patch,
-            "reason": str(req.reason or "restore requested from control center").strip()[:240],
-        }
-        run_id = agent_service.run_store.create_run(f"Approval requested for tool: soul_apply_patch")
-        agent_service.run_store.mark_running(run_id)
-        approval_id = agent_service.run_store.create_tool_approval(
-            chat_id=int(session.chat_id),
-            user_id=int(req.admin_user_id),
+        approval_id = _request_soul_patch_approval(
+            session=session,
             session_id=session_id,
-            agent_id=str(session.current_agent_id or "default"),
-            run_id=run_id,
-            argv=[TOOL_APPROVAL_SENTINEL, "soul_apply_patch", json.dumps(payload, sort_keys=True, ensure_ascii=True)],
-            stdin_text="",
-            timeout_sec=60,
-            risk_tier="high",
-        )
-        agent_service.append_run_event(
-            run_id=run_id,
-            event_type="tool.approval.requested",
-            payload=f"approval_id={approval_id}, tool_use_id=soul_restore, risk=high",
-        )
-        agent_service.run_store.mark_completed(
-            run_id,
-            f"Approval requested approval_id={approval_id} tool_use_id=soul_restore",
+            admin_user_id=int(req.admin_user_id),
+            patch=patch,
+            reason=str(req.reason or "restore requested from control center"),
+            tool_use_id="soul_restore",
         )
         return {
             "status": "pending_approval",
             "approval_id": approval_id,
             "session_id": session_id,
             "requested_version_id": req.version_id,
+        }
+
+    @app.post("/api/sessions/{session_id}/soul/style-request")
+    async def api_session_soul_style_request(request: Request, session_id: str, req: SoulStyleRequest):
+        _opt_api_scope(request, write_scope="admin:*")
+        session = agent_service.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if req.admin_user_id <= 0:
+            raise HTTPException(status_code=400, detail="admin_user_id is required")
+        if agent_service.access_controller is not None:
+            try:
+                agent_service.access_controller.check_action(req.admin_user_id, "manage_agents", int(session.chat_id))
+            except Exception as exc:
+                raise HTTPException(status_code=403, detail=f"admin check failed: {exc}")
+
+        patch = {
+            "style": {
+                "emoji": str(req.emoji or "").strip().lower(),
+                "emphasis": str(req.emphasis or "").strip().lower(),
+                "brevity": str(req.brevity or "").strip().lower(),
+            }
+        }
+        ws = agent_service.session_workspace(session_id=session_id)
+        try:
+            proposal = SoulStore(ws).propose_patch(patch)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid SOUL style patch: {exc}")
+        approval_id = _request_soul_patch_approval(
+            session=session,
+            session_id=session_id,
+            admin_user_id=int(req.admin_user_id),
+            patch=patch,
+            reason=str(req.reason or "style update requested from control center"),
+            tool_use_id="soul_style_update",
+        )
+        return {
+            "status": "pending_approval",
+            "approval_id": approval_id,
+            "session_id": session_id,
+            "diff": str(proposal.get("diff") or ""),
         }
 
     @app.get("/api/attachments/{attachment_id}/download")

@@ -65,6 +65,27 @@
       <label for="soul-admin-user-id">Admin user ID</label>
       <input id="soul-admin-user-id" type="number" value="1" />
     </div>
+    <div class="toolbar">
+      <label for="soul-style-emoji">Emoji</label>
+      <select id="soul-style-emoji">
+        <option value="off">off</option>
+        <option value="light">light</option>
+        <option value="on">on</option>
+      </select>
+      <label for="soul-style-emphasis">Emphasis</label>
+      <select id="soul-style-emphasis">
+        <option value="plain">plain</option>
+        <option value="light">light</option>
+        <option value="rich">rich</option>
+      </select>
+      <label for="soul-style-brevity">Brevity</label>
+      <select id="soul-style-brevity">
+        <option value="short">short</option>
+        <option value="normal">normal</option>
+      </select>
+      <button id="soul-style-save" type="button" class="btn">Request style update</button>
+    </div>
+    <pre id="soul-style-diff" class="output"></pre>
     <div id="soul-history" class="dim"></div>
   </section>
 </div>
@@ -87,6 +108,11 @@
   const soulText = document.getElementById("soul-text");
   const soulHistory = document.getElementById("soul-history");
   const soulAdminUserId = document.getElementById("soul-admin-user-id");
+  const soulStyleEmoji = document.getElementById("soul-style-emoji");
+  const soulStyleEmphasis = document.getElementById("soul-style-emphasis");
+  const soulStyleBrevity = document.getElementById("soul-style-brevity");
+  const soulStyleSave = document.getElementById("soul-style-save");
+  const soulStyleDiff = document.getElementById("soul-style-diff");
 
   let activeSessionId = "{{ selected_session_id }}";
   let currentAssistant = null;
@@ -235,6 +261,7 @@
     soulMeta.textContent = "";
     soulText.textContent = "(no SOUL loaded)";
     soulHistory.innerHTML = "";
+    soulStyleDiff.textContent = "";
     if (!sessionId) return;
     const resp = await fetch(`/api/sessions/${sessionId}/detail`);
     if (!resp.ok) return;
@@ -272,6 +299,9 @@
     const soul = data.soul || {};
     soulMeta.textContent = `name=${soul.name || "-"} | voice=${soul.voice || "-"} | style=${JSON.stringify(soul.style || {})} | valid=${soul.ok ? "yes" : "fallback"}`;
     soulText.textContent = soul.text || "(empty)";
+    soulStyleEmoji.value = (soul.style || {}).emoji || "light";
+    soulStyleEmphasis.value = (soul.style || {}).emphasis || "light";
+    soulStyleBrevity.value = (soul.style || {}).brevity || "short";
     const versions = data.soul_history || [];
     if (!versions.length) {
       soulHistory.textContent = "No SOUL history snapshots yet.";
@@ -400,6 +430,35 @@
     }
     socket.send(JSON.stringify(payload));
     chatInput.value = "";
+  });
+
+  soulStyleSave.addEventListener("click", async () => {
+    const sessionId = activeSessionId || "";
+    if (!sessionId) {
+      window.alert("Select a session first.");
+      return;
+    }
+    const reason = window.prompt("Reason for SOUL style update", "presentation tuning") || "";
+    if (!reason.trim()) return;
+    const payload = {
+      emoji: soulStyleEmoji.value || "light",
+      emphasis: soulStyleEmphasis.value || "light",
+      brevity: soulStyleBrevity.value || "short",
+      reason: reason,
+      admin_user_id: Number(soulAdminUserId.value || "0"),
+    };
+    const resp = await fetch(`/api/sessions/${sessionId}/soul/style-request`, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify(payload),
+    });
+    const body = await resp.json();
+    if (!resp.ok) {
+      window.alert(`Style update request failed: ${body.detail || JSON.stringify(body)}`);
+      return;
+    }
+    soulStyleDiff.textContent = body.diff || "";
+    window.alert(`Style update approval requested: ${String(body.approval_id || "").slice(0, 8)}`);
   });
 })();
 </script>
