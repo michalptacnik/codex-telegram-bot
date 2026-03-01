@@ -1,6 +1,8 @@
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
+from codex_telegram_bot.execution.docker_sandbox import DockerSandboxRunner
 from codex_telegram_bot.execution.local_shell import LocalShellRunner
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.execution.profiles import ExecutionProfileResolver
@@ -74,3 +76,59 @@ class TestExecutionProfiles(unittest.TestCase):
         self.assertTrue(strict.enforce_workspace_root)
         self.assertTrue(balanced.enforce_workspace_root)
         self.assertFalse(trusted.enforce_workspace_root)
+
+
+class _FakeProc:
+    def __init__(self, returncode: int = 0, stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self, _stdin: bytes = b""):
+        return self._stdout, self._stderr
+
+    def kill(self):
+        return None
+
+
+class TestDockerSandboxRunner(unittest.IsolatedAsyncioTestCase):
+    async def test_runner_reports_missing_docker_binary(self):
+        runner = DockerSandboxRunner(profile_resolver=ExecutionProfileResolver(Path("/tmp/workspace")))
+        with patch("shutil.which", return_value=None):
+            result = await runner.run(
+                ["codex", "exec", "-", "--sandbox=workspace-write"],
+                workspace_root="/tmp/workspace",
+            )
+        self.assertEqual(result.returncode, 126)
+        self.assertIn("docker binary is not available", result.stderr)
+
+    async def test_runner_dry_run_builds_docker_command(self):
+        with patch.dict("os.environ", {"DOCKER_SANDBOX_DRY_RUN": "1"}, clear=False):
+            runner = DockerSandboxRunner(profile_resolver=ExecutionProfileResolver(Path("/tmp/workspace")))
+            with patch("shutil.which", return_value="/usr/bin/docker"):
+                result = await runner.run(
+                    ["codex", "exec", "-", "--sandbox=workspace-write"],
+                    workspace_root="/tmp/workspace",
+                )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("/usr/bin/docker run --rm", result.stdout)
+        self.assertIn("--network none", result.stdout)
+        self.assertIn("sh -lc", result.stdout)
+        self.assertIn("codex exec - --sandbox=workspace-write", result.stdout)
+
+    async def test_runner_executes_docker_subprocess(self):
+        runner = DockerSandboxRunner(profile_resolver=ExecutionProfileResolver(Path("/tmp/workspace")))
+        proc = _FakeProc(returncode=0, stdout=b"ok\n", stderr=b"")
+        with patch("shutil.which", return_value="/usr/bin/docker"):
+            with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=proc)) as mocked_exec:
+                result = await runner.run(
+                    ["codex", "exec", "-", "--sandbox=workspace-write"],
+                    workspace_root="/tmp/workspace",
+                )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "ok\n")
+        args = mocked_exec.await_args.args
+        self.assertEqual(args[0], "/usr/bin/docker")
+        self.assertEqual(args[1], "run")
+        self.assertIn("--network", args)
+        self.assertIn("sh", args)

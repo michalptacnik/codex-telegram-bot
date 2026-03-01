@@ -2207,6 +2207,18 @@ class AgentService:
             "pending_runs": len([r for r in runs if r.status == "pending"]),
         }
 
+    def runtime_capabilities(self) -> Dict[str, Any]:
+        runner_name = self._execution_runner.__class__.__name__
+        backend = "docker" if "docker" in runner_name.lower() else "local"
+        return {
+            "execution_backend": backend,
+            "execution_runner": runner_name,
+            "probe_loop_enabled": bool(self._probe_loop is not None),
+            "mcp_bridge_enabled": bool(self._mcp_bridge is not None),
+            "skill_packs_enabled": bool(self._skill_pack_loader is not None),
+            "tool_policy_enabled": bool(self._tool_policy_engine is not None),
+        }
+
     def reliability_snapshot(self, limit: int = 500) -> Dict[str, Any]:
         runs = self.list_recent_runs(limit=max(10, min(limit, 5000)))
         total = len(runs)

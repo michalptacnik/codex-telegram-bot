@@ -350,15 +350,22 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     async def health() -> Dict[str, Any]:
         metrics = agent_service.metrics()
         reliability = agent_service.reliability_snapshot(limit=300)
+        runtime = agent_service.runtime_capabilities()
         provider_version = await agent_service.provider_version()
         provider_health = await agent_service.provider_health()
         return {
             "status": "ok",
             "provider_version": provider_version,
             "provider_health": provider_health,
+            "runtime": runtime,
             "metrics": metrics,
             "reliability": reliability,
         }
+
+    @app.get("/api/runtime/capabilities")
+    async def api_runtime_capabilities(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        return agent_service.runtime_capabilities()
 
     @app.get("/api/metrics")
     async def api_metrics(request: Request) -> Dict[str, int]:

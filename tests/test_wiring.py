@@ -21,6 +21,7 @@ from codex_telegram_bot.services.access_control import (
     ROLE_VIEWER,
 )
 from codex_telegram_bot.services.capability_router import CapabilityRouter
+from codex_telegram_bot.execution.docker_sandbox import DockerSandboxRunner
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 
@@ -300,6 +301,19 @@ class TestAppContainerWiring(unittest.TestCase):
         # session_workspace() should delegate to WorkspaceManager
         path = svc.session_workspace("wiring-test-session")
         self.assertTrue(path.exists())
+
+    def test_build_with_docker_backend_uses_docker_runner(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict("os.environ", {
+                "EXECUTION_WORKSPACE_ROOT": tmpdir,
+                "SESSION_WORKSPACES_ROOT": tmpdir,
+                "EXECUTION_BACKEND": "docker",
+            }):
+                from codex_telegram_bot.app_container import build_agent_service
+                svc = build_agent_service(state_db_path=None)
+        self.assertIsInstance(svc._execution_runner, DockerSandboxRunner)
+        caps = svc.runtime_capabilities()
+        self.assertEqual(caps.get("execution_backend"), "docker")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 
 from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
 from codex_telegram_bot.agent_core.memory import resolve_memory_config
+from codex_telegram_bot.domain.contracts import ExecutionRunner
+from codex_telegram_bot.execution.docker_sandbox import DockerSandboxRunner
 from codex_telegram_bot.execution.local_shell import LocalShellRunner
 from codex_telegram_bot.execution.process_manager import ProcessManager
 from codex_telegram_bot.execution.profiles import ExecutionProfileResolver
@@ -51,9 +53,10 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         max_file_bytes=_read_int_env("REPO_SCAN_MAX_FILE_BYTES", 120000),
         auto_refresh_sec=_read_int_env("REPO_INDEX_AUTO_REFRESH_SEC", 30),
     )
-    runner = LocalShellRunner(profile_resolver=ExecutionProfileResolver(workspace_root))
+    provider_runner = LocalShellRunner(profile_resolver=ExecutionProfileResolver(workspace_root))
+    execution_runner = _build_execution_runner(workspace_root=workspace_root)
     provider_backend = _read_provider_backend()
-    provider_registry = _build_provider_registry(runner=runner, preferred_backend=provider_backend)
+    provider_registry = _build_provider_registry(runner=provider_runner, preferred_backend=provider_backend)
     capability_router = CapabilityRouter(provider_registry)
 
     fallback_mode = (os.environ.get("PROVIDER_FALLBACK_MODE", "none") or "none").strip().lower()
@@ -114,7 +117,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     approval_ttl_sec = _read_int_env("APPROVAL_TTL_SEC", 900)
     common_kwargs = dict(
         provider=provider,
-        execution_runner=runner,
+        execution_runner=execution_runner,
         repo_retriever=repo_retriever,
         session_max_messages=memory_cfg.max_messages,
         session_compact_keep=memory_cfg.keep_recent_messages,
@@ -204,7 +207,7 @@ def _read_provider_backend() -> str:
     return aliases.get(raw, raw)
 
 
-def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -> ProviderRegistry:
+def _build_provider_registry(runner: ExecutionRunner, preferred_backend: str) -> ProviderRegistry:
     active = _registry_name_for_backend(preferred_backend)
     extra_specs = _read_extra_openai_compatible_specs()
     known_names = {
@@ -270,6 +273,16 @@ def _build_provider_registry(runner: LocalShellRunner, preferred_backend: str) -
             make_active=(default_name == name),
         )
     return registry
+
+
+def _build_execution_runner(workspace_root: Path) -> ExecutionRunner:
+    resolver = ExecutionProfileResolver(workspace_root)
+    backend = (os.environ.get("EXECUTION_BACKEND") or "local").strip().lower()
+    if backend in {"docker", "docker-sandbox", "sandbox"}:
+        logger.info("Execution backend: docker sandbox")
+        return DockerSandboxRunner(profile_resolver=resolver)
+    logger.info("Execution backend: local shell")
+    return LocalShellRunner(profile_resolver=resolver)
 
 
 def _registry_name_for_backend(value: str) -> str:

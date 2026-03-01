@@ -27,6 +27,9 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
   - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
+- Gateway/control plane:
+  - Control Center provides a Gateway-style admin API/UI for sessions, runs, reliability, and runtime visibility
+  - Runtime backend visibility endpoint: `/api/runtime/capabilities`
 - Multi-provider architecture:
   - Runtime provider registry with hot-switch support
   - Capability-based provider routing
@@ -85,6 +88,8 @@ Current module boundaries:
 - `providers/*.py`: provider abstraction + codex-cli implementation
 - `tools/*.py`: explicit tool registry (`read_file`, `write_file`, `git_status`)
 - `execution/local_shell.py`: local subprocess execution boundary
+- `execution/docker_sandbox.py`: optional Docker sandbox execution backend
+- `control_center/app.py`: Gateway-style control plane API/UI
 
 The runtime is stateful per chat/user session with bounded memory and explicit reset/branch/resume controls.
 
@@ -208,6 +213,11 @@ Environment variables override `.env`:
 - `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
 - `CODEX_TIMEOUT_CONTINUE_RETRIES` (default: `1`; auto-continue attempts after timeout `124`)
 - `EXECUTION_WORKSPACE_ROOT` (default: current working directory)
+- `EXECUTION_BACKEND` (default: `local`; set to `docker` for Docker sandbox execution backend)
+- `DOCKER_SANDBOX_IMAGE` (default: `python:3.12-slim`)
+- `DOCKER_SANDBOX_NETWORK` (default: `none`)
+- `DOCKER_SANDBOX_WORKDIR` (default: `/workspace`)
+- `DOCKER_SANDBOX_DRY_RUN` (default: `0`; when `1`, prints resolved docker command instead of executing)
 - `CAPABILITIES_DIR` (default: `<EXECUTION_WORKSPACE_ROOT>/capabilities`)
 - `REDACTION_EXTRA_PATTERNS` (optional regex list separated by `;;`)
 - `SESSION_MAX_TURNS` (default: `20`)
@@ -295,6 +305,8 @@ Versioning and provenance details:
 - `docs/plugin_manifest.md`
 - `docs/plugin_lifecycle.md`
 - `docs/parity_matrix_openclaw.md`
+- `docs/openclaw_parity_matrix.md`
+- `docs/runtime_map.md`
 
 Bootstrap behavior:
 
@@ -335,6 +347,12 @@ docker compose up --build
 ```
 
 If your `codex` binary is in a different location, update the volume in `docker-compose.yml`.
+
+To run tool execution through Docker sandbox backend (instead of local shell), set:
+
+```bash
+export EXECUTION_BACKEND=docker
+```
 
 ## Admin Commands
 
@@ -447,6 +465,7 @@ Current benchmark: **20 cases** across all categories (minimum 15 required by ga
 Parity gates and milestone plan:
 
 - `docs/parity_exit_criteria.md`
+- `scripts/demo_golden_scenarios.sh`
 
 Onboarding:
 
