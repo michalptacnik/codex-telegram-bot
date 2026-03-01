@@ -221,6 +221,31 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"query": "string (required)", "k": "int (optional)"},
     },
+    "memory_index_get": {
+        "name": "memory_index_get",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "memory_pointer_open": {
+        "name": "memory_pointer_open",
+        "protocol": "!tool",
+        "args": {"pointer_id": "string (required)", "max_chars": "int (optional)"},
+    },
+    "memory_page_list": {
+        "name": "memory_page_list",
+        "protocol": "!tool",
+        "args": {"prefix": "string (optional)"},
+    },
+    "memory_append_daily": {
+        "name": "memory_append_daily",
+        "protocol": "!tool",
+        "args": {"text": "string (required)", "date": "string (optional; YYYY-MM-DD)"},
+    },
+    "memory_index_update": {
+        "name": "memory_index_update",
+        "protocol": "!tool",
+        "args": {"patch": "object (required)"},
+    },
     "web_search": {
         "name": "web_search",
         "protocol": "!tool",

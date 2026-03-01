@@ -283,4 +283,285 @@ class ThinMemoryStore:
             raise ValueError("daily memory log size limit exceeded")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(candidate, encoding="utf-8")
+        index = self.load_index()
+        pointer_id = "D" + d.isoformat()
+        target = f"memory/daily/{d.isoformat()}.md"
+        _upsert_pointer(index=index, pointer_id=pointer_id, target=target)
+        self.save_index(index)
         return p
+
+    def list_pages(self, prefix: str = "") -> List[Dict[str, object]]:
+        normalized_prefix = (prefix or "").strip().lower()
+        index = self.load_index()
+        pointer_map: Dict[str, List[str]] = {}
+        for pointer_id, target in index.pointers.items():
+            path_only = target.split("#", 1)[0].strip()
+            pointer_map.setdefault(path_only, []).append(pointer_id)
+        out: List[Dict[str, object]] = []
+        for path in sorted(self._layout.pages_dir.glob("**/*.md")):
+            rel = str(path.relative_to(self._layout.root))
+            pointer_ids = sorted(pointer_map.get(rel, []))
+            bucket = f"{rel} {' '.join(pointer_ids)}".lower()
+            if normalized_prefix and normalized_prefix not in bucket:
+                continue
+            out.append(
+                {
+                    "path": rel,
+                    "pointer_ids": pointer_ids,
+                }
+            )
+        return out
+
+    def open_pointer(self, pointer_id: str, max_chars: int = 12_000) -> Dict[str, str]:
+        normalized_pointer = (pointer_id or "").strip()
+        if not normalized_pointer:
+            raise ValueError("pointer_id is required")
+        index = self.load_index()
+        target = index.pointers.get(normalized_pointer)
+        if not target:
+            raise ValueError(f"unknown pointer_id: {normalized_pointer}")
+        target_path, anchor = _split_target(target)
+        resolved = (self._layout.root / target_path).resolve()
+        if not _is_within(resolved, self._layout.memory_dir):
+            raise ValueError("pointer target escapes memory root")
+        if not resolved.exists() or not resolved.is_file():
+            raise ValueError("pointer target does not exist")
+        raw = resolved.read_text(encoding="utf-8", errors="replace")
+        excerpt = _extract_anchor_excerpt(raw, anchor=anchor)
+        cap = max(100, min(int(max_chars or 12_000), 20_000))
+        return {
+            "pointer_id": normalized_pointer,
+            "target": target,
+            "excerpt": excerpt[:cap],
+        }
+
+    def update_index_patch(self, patch: Dict[str, object]) -> ThinMemoryIndex:
+        if not isinstance(patch, dict):
+            raise ValueError("patch must be an object")
+        index = self.load_index()
+
+        _apply_kv_section_patch(index.identity, patch.get("identity"), max_items=50)
+        _apply_kv_section_patch(index.preferences, patch.get("preferences"), max_items=MEMORY_INDEX_MAX_PREFERENCES)
+        _apply_kv_section_patch(index.pointers, patch.get("pointers"), max_items=MEMORY_INDEX_MAX_POINTERS)
+
+        projects_patch = patch.get("active_projects")
+        if projects_patch is not None:
+            index.active_projects = _apply_projects_patch(index.active_projects, projects_patch)
+
+        obligations_patch = patch.get("obligations")
+        if obligations_patch is not None:
+            index.obligations = _apply_obligations_patch(index.obligations, obligations_patch)
+
+        # Enforce that pointers are declared only through the Pointers section.
+        known_project_ids = {p.project_id for p in index.active_projects}
+        for pid in known_project_ids:
+            if pid not in index.pointers:
+                project = next((p for p in index.active_projects if p.project_id == pid), None)
+                if project is not None:
+                    _upsert_pointer(index=index, pointer_id=pid, target=project.path)
+
+        self.save_index(index)
+        return index
+
+
+def _apply_kv_section_patch(target: Dict[str, str], patch: object, max_items: int) -> None:
+    if patch is None:
+        return
+    if not isinstance(patch, dict):
+        raise ValueError("section patch must be an object")
+    replace_obj = patch.get("set_all")
+    if replace_obj is not None:
+        if not isinstance(replace_obj, dict):
+            raise ValueError("set_all must be an object")
+        target.clear()
+        for key, value in replace_obj.items():
+            k = str(key or "").strip()
+            if not k:
+                continue
+            target[k] = str(value or "").strip()
+    set_obj = patch.get("set")
+    if set_obj is not None:
+        if not isinstance(set_obj, dict):
+            raise ValueError("set must be an object")
+        for key, value in set_obj.items():
+            k = str(key or "").strip()
+            if not k:
+                continue
+            target[k] = str(value or "").strip()
+    remove_obj = patch.get("remove")
+    if remove_obj is not None:
+        if not isinstance(remove_obj, list):
+            raise ValueError("remove must be a list")
+        for key in remove_obj:
+            target.pop(str(key or "").strip(), None)
+    if len(target) > max_items:
+        raise ValueError("section exceeds max items")
+
+
+def _apply_projects_patch(
+    current: List[ActiveProject],
+    patch: object,
+) -> List[ActiveProject]:
+    if not isinstance(patch, dict):
+        raise ValueError("active_projects patch must be an object")
+    rows = list(current)
+    set_all = patch.get("set_all")
+    if set_all is not None:
+        if not isinstance(set_all, list):
+            raise ValueError("active_projects.set_all must be a list")
+        rows = [_project_from_dict(x) for x in set_all]
+    upsert = patch.get("upsert")
+    if upsert is not None:
+        if not isinstance(upsert, list):
+            raise ValueError("active_projects.upsert must be a list")
+        by_id = {row.project_id: row for row in rows}
+        for item in upsert:
+            row = _project_from_dict(item)
+            by_id[row.project_id] = row
+        rows = [by_id[k] for k in sorted(by_id.keys())]
+    remove = patch.get("remove")
+    if remove is not None:
+        if not isinstance(remove, list):
+            raise ValueError("active_projects.remove must be a list")
+        remove_set = {str(x or "").strip() for x in remove if str(x or "").strip()}
+        rows = [row for row in rows if row.project_id not in remove_set]
+    dedup: Dict[str, ActiveProject] = {}
+    for row in rows:
+        dedup[row.project_id] = row
+    if len(dedup) > MEMORY_INDEX_MAX_ACTIVE_PROJECTS:
+        raise ValueError("Active Projects section exceeds max items")
+    result = list(dedup.values())
+    return sorted(result, key=lambda x: x.project_id)
+
+
+def _apply_obligations_patch(
+    current: List[Obligation],
+    patch: object,
+) -> List[Obligation]:
+    if not isinstance(patch, dict):
+        raise ValueError("obligations patch must be an object")
+    rows = list(current)
+    set_all = patch.get("set_all")
+    if set_all is not None:
+        if not isinstance(set_all, list):
+            raise ValueError("obligations.set_all must be a list")
+        rows = [_obligation_from_dict(x) for x in set_all]
+    upsert = patch.get("upsert")
+    if upsert is not None:
+        if not isinstance(upsert, list):
+            raise ValueError("obligations.upsert must be a list")
+        by_id = {row.obligation_id: row for row in rows}
+        for item in upsert:
+            row = _obligation_from_dict(item)
+            by_id[row.obligation_id] = row
+        rows = [by_id[k] for k in sorted(by_id.keys())]
+    remove = patch.get("remove")
+    if remove is not None:
+        if not isinstance(remove, list):
+            raise ValueError("obligations.remove must be a list")
+        remove_set = {str(x or "").strip() for x in remove if str(x or "").strip()}
+        rows = [row for row in rows if row.obligation_id not in remove_set]
+    dedup: Dict[str, Obligation] = {}
+    for row in rows:
+        dedup[row.obligation_id] = row
+    if len(dedup) > MEMORY_INDEX_MAX_OBLIGATIONS:
+        raise ValueError("Obligations section exceeds max items")
+    result = list(dedup.values())
+    return sorted(result, key=lambda x: x.obligation_id)
+
+
+def _project_from_dict(value: object) -> ActiveProject:
+    if not isinstance(value, dict):
+        raise ValueError("project row must be an object")
+    project_id = str(
+        value.get("project_id")
+        or value.get("id")
+        or ""
+    ).strip()
+    title = str(value.get("title") or "").strip()
+    path = str(value.get("path") or "").strip()
+    if not project_id or not title or not path:
+        raise ValueError("project row requires project_id/title/path")
+    return ActiveProject(project_id=project_id, title=title, path=path)
+
+
+def _obligation_from_dict(value: object) -> Obligation:
+    if not isinstance(value, dict):
+        raise ValueError("obligation row must be an object")
+    obligation_id = str(
+        value.get("obligation_id")
+        or value.get("id")
+        or ""
+    ).strip()
+    text = str(value.get("text") or value.get("title") or "").strip()
+    due = str(value.get("due") or "").strip()
+    ref = str(value.get("ref") or "").strip()
+    if not obligation_id or not text:
+        raise ValueError("obligation row requires obligation_id/text")
+    return Obligation(obligation_id=obligation_id, text=text, due=due, ref=ref)
+
+
+def _is_within(candidate: Path, root: Path) -> bool:
+    try:
+        candidate.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _split_target(target: str) -> tuple[str, str]:
+    raw = (target or "").strip()
+    if "#" not in raw:
+        return raw, ""
+    base, anchor = raw.split("#", 1)
+    return base.strip(), anchor.strip()
+
+
+def _slugify_heading(value: str) -> str:
+    base = re.sub(r"[^\w\s-]", "", (value or "").strip().lower())
+    return re.sub(r"\s+", "-", base).strip("-")
+
+
+def _extract_anchor_excerpt(content: str, anchor: str = "") -> str:
+    if not anchor:
+        return content
+    lines = content.splitlines()
+    desired = _slugify_heading(anchor)
+    start = 0
+    level = 7
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        heading_level = len(stripped) - len(stripped.lstrip("#"))
+        heading_text = stripped.lstrip("#").strip()
+        if _slugify_heading(heading_text) == desired:
+            start = idx
+            level = heading_level
+            break
+    else:
+        return content
+    end = len(lines)
+    for idx in range(start + 1, len(lines)):
+        stripped = lines[idx].strip()
+        if not stripped.startswith("#"):
+            continue
+        heading_level = len(stripped) - len(stripped.lstrip("#"))
+        if heading_level <= level:
+            end = idx
+            break
+    return "\n".join(lines[start:end]).strip()
+
+
+def _upsert_pointer(index: ThinMemoryIndex, pointer_id: str, target: str) -> None:
+    pid = (pointer_id or "").strip()
+    tgt = (target or "").strip()
+    if not pid or not tgt:
+        raise ValueError("pointer id and target are required")
+    if pid not in index.pointers and len(index.pointers) >= MEMORY_INDEX_MAX_POINTERS:
+        daily_keys = sorted([k for k in index.pointers.keys() if k.startswith("D")])
+        if daily_keys:
+            index.pointers.pop(daily_keys[0], None)
+        else:
+            raise ValueError("pointer section is full")
+    index.pointers[pid] = tgt

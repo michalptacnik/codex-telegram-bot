@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import os
 import re
+import json
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from codex_telegram_bot.services.thin_memory import ThinMemoryStore
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
 
 _PRELOAD_BUDGET_CHARS = 8000
 _MAX_SEARCH_RESULTS = 20
+_MAX_POINTER_OPEN_CHARS = 20_000
 
 
 class MemoryStore:
@@ -191,3 +194,146 @@ class MemorySearchTool:
         for r in results:
             lines.append(f"{r['file']}:{r['line']} — {r['content']}")
         return ToolResult(ok=True, output="\n".join(lines))
+
+
+class MemoryIndexGetTool:
+    """Tool: memory_index_get — return the thin memory index (budgeted)."""
+
+    name = "memory_index_get"
+    description = "Return MEMORY_INDEX.md content within strict size limits."
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        store = ThinMemoryStore(workspace_root=context.workspace_root)
+        return ToolResult(ok=True, output=store.read_index_text())
+
+
+class MemoryPageListTool:
+    """Tool: memory_page_list — list curated pages and pointers."""
+
+    name = "memory_page_list"
+    description = "List memory/pages markdown files and pointer IDs."
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        store = ThinMemoryStore(workspace_root=context.workspace_root)
+        prefix = str(request.args.get("prefix") or "").strip()
+        pages = store.list_pages(prefix=prefix)
+        index = store.load_index()
+        lines: List[str] = []
+        lines.append("Pointers:")
+        pointer_rows = sorted(index.pointers.items())
+        if pointer_rows:
+            for pointer_id, target in pointer_rows:
+                blob = f"{pointer_id} -> {target}"
+                if prefix and prefix.lower() not in blob.lower():
+                    continue
+                lines.append(f"- {blob}")
+        else:
+            lines.append("- (none)")
+        lines.append("")
+        lines.append("Pages:")
+        if pages:
+            for page in pages:
+                path = str(page.get("path") or "")
+                pointer_ids = list(page.get("pointer_ids") or [])
+                lines.append(f"- {path} | pointers: {','.join(pointer_ids) if pointer_ids else '-'}")
+        else:
+            lines.append("- (none)")
+        return ToolResult(ok=True, output="\n".join(lines))
+
+
+class MemoryPointerOpenTool:
+    """Tool: memory_pointer_open — open a pointer target and return excerpt."""
+
+    name = "memory_pointer_open"
+    description = "Open a pointer from MEMORY_INDEX and return bounded markdown excerpt."
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        store = ThinMemoryStore(workspace_root=context.workspace_root)
+        pointer_id = str(
+            request.args.get("pointer_id")
+            or request.args.get("pointerId")
+            or ""
+        ).strip()
+        if not pointer_id:
+            return ToolResult(ok=False, output="pointer_id is required.")
+        try:
+            max_chars = int(request.args.get("max_chars", 12_000) or 12_000)
+        except Exception:
+            max_chars = 12_000
+        max_chars = max(100, min(max_chars, _MAX_POINTER_OPEN_CHARS))
+        try:
+            opened = store.open_pointer(pointer_id=pointer_id, max_chars=max_chars)
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"Failed to open pointer: {exc}")
+        output = (
+            f"pointer_id: {opened['pointer_id']}\n"
+            f"target: {opened['target']}\n\n"
+            f"{opened['excerpt']}"
+        )
+        return ToolResult(ok=True, output=output)
+
+
+class MemoryAppendDailyTool:
+    """Tool: memory_append_daily — append a daily memory note."""
+
+    name = "memory_append_daily"
+    description = "Append text to memory/daily/YYYY-MM-DD.md and refresh date pointer."
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        text = str(request.args.get("text") or "").strip()
+        if not text:
+            return ToolResult(ok=False, output="text is required.")
+        raw_date = str(request.args.get("date") or "").strip()
+        parsed: Optional[date] = None
+        if raw_date:
+            try:
+                parsed = datetime.strptime(raw_date, "%Y-%m-%d").date()
+            except ValueError:
+                return ToolResult(ok=False, output="date must be YYYY-MM-DD.")
+        store = ThinMemoryStore(workspace_root=context.workspace_root)
+        try:
+            p = store.append_daily(text=text, on_date=parsed)
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"Failed to append daily memory: {exc}")
+        return ToolResult(ok=True, output=f"Appended daily memory at {p}.")
+
+
+class MemoryIndexUpdateTool:
+    """Tool: memory_index_update — apply bounded structured patch to index."""
+
+    name = "memory_index_update"
+    description = "Apply a structured patch to MEMORY_INDEX sections with cap enforcement."
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        patch = request.args.get("patch")
+        if patch is None:
+            return ToolResult(ok=False, output="patch is required.")
+        if isinstance(patch, str):
+            raw = patch.strip()
+            if not raw:
+                return ToolResult(ok=False, output="patch cannot be empty.")
+            try:
+                parsed = json.loads(raw)
+            except Exception as exc:
+                return ToolResult(ok=False, output=f"patch must be valid JSON object: {exc}")
+            patch = parsed
+        if not isinstance(patch, dict):
+            return ToolResult(ok=False, output="patch must be an object.")
+        if len(json.dumps(patch, ensure_ascii=True)) > 24_000:
+            return ToolResult(ok=False, output="patch too large.")
+        store = ThinMemoryStore(workspace_root=context.workspace_root)
+        try:
+            index = store.update_index_patch(patch)
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"Failed to update index: {exc}")
+        return ToolResult(
+            ok=True,
+            output=(
+                "Updated MEMORY_INDEX.\n"
+                f"identity={len(index.identity)} "
+                f"active_projects={len(index.active_projects)} "
+                f"obligations={len(index.obligations)} "
+                f"preferences={len(index.preferences)} "
+                f"pointers={len(index.pointers)}"
+            ),
+        )

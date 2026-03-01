@@ -15,7 +15,15 @@ from codex_telegram_bot.tools.git import (
     GitLogTool,
     GitStatusTool,
 )
-from codex_telegram_bot.tools.memory import MemoryGetTool, MemorySearchTool
+from codex_telegram_bot.tools.memory import (
+    MemoryAppendDailyTool,
+    MemoryGetTool,
+    MemoryIndexGetTool,
+    MemoryIndexUpdateTool,
+    MemoryPageListTool,
+    MemoryPointerOpenTool,
+    MemorySearchTool,
+)
 from codex_telegram_bot.tools.message import SendMessageTool
 from codex_telegram_bot.tools.provider import ProviderStatusTool, ProviderSwitchTool
 from codex_telegram_bot.tools.schedule import ScheduleTaskTool, ListSchedulesTool, CancelScheduleTool
@@ -86,6 +94,11 @@ def build_default_tool_registry(
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
+    registry.register(MemoryIndexGetTool())
+    registry.register(MemoryPageListTool())
+    registry.register(MemoryPointerOpenTool())
+    registry.register(MemoryAppendDailyTool())
+    registry.register(MemoryIndexUpdateTool())
     # MCP tools (Issue #103)
     if mcp_bridge is not None:
         from codex_telegram_bot.services.mcp_bridge import McpSearchTool, McpCallTool
@@ -122,6 +135,11 @@ __all__ = [
     "CancelScheduleTool",
     "MemoryGetTool",
     "MemorySearchTool",
+    "MemoryIndexGetTool",
+    "MemoryPageListTool",
+    "MemoryPointerOpenTool",
+    "MemoryAppendDailyTool",
+    "MemoryIndexUpdateTool",
     "SendMessageTool",
     "SessionsListTool",
     "SessionsHistoryTool",

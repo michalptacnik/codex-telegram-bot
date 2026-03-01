@@ -163,6 +163,61 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["query"],
         },
     },
+    "memory_index_get": {
+        "name": "memory_index_get",
+        "description": "Read the thin memory index (MEMORY_INDEX.md) within size cap.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "memory_pointer_open": {
+        "name": "memory_pointer_open",
+        "description": "Open a pointer from MEMORY_INDEX and return bounded excerpt.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pointer_id": {"type": "string", "description": "Pointer ID from MEMORY_INDEX Pointers section"},
+                "max_chars": {"type": "integer", "description": "Maximum chars to return (default 12000)"},
+            },
+            "required": ["pointer_id"],
+        },
+    },
+    "memory_page_list": {
+        "name": "memory_page_list",
+        "description": "List memory pages and associated pointer IDs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "prefix": {"type": "string", "description": "Optional path/pointer filter prefix"},
+            },
+            "required": [],
+        },
+    },
+    "memory_append_daily": {
+        "name": "memory_append_daily",
+        "description": "Append text to daily memory log and update date pointer.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Text to append"},
+                "date": {"type": "string", "description": "Optional date in YYYY-MM-DD"},
+            },
+            "required": ["text"],
+        },
+    },
+    "memory_index_update": {
+        "name": "memory_index_update",
+        "description": "Apply bounded structured patch to MEMORY_INDEX sections.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patch": {"type": "object", "description": "Structured patch payload"},
+            },
+            "required": ["patch"],
+        },
+    },
     "web_search": {
         "name": "web_search",
         "description": "Search the public web and return source links with snippets.",
