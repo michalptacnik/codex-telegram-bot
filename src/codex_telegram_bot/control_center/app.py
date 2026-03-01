@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from codex_telegram_bot.presentation.formatter import format_message
+from codex_telegram_bot.presentation.formatter import format_message, format_tool_result
 from codex_telegram_bot.services.agent_service import (
     AgentService,
     AUTONOMOUS_TOOL_LOOP_ENV,
@@ -951,7 +951,11 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             chat_id=req.chat_id,
             user_id=req.user_id,
         )
-        return {"approval_id": req.approval_id, "output": output}
+        failed = str(output).strip().lower().startswith("error:")
+        return {
+            "approval_id": req.approval_id,
+            "output": format_tool_result(ok=not failed, output=str(output), max_chars=360),
+        }
 
     @app.post("/api/approvals/deny")
     async def api_deny_tool(request: Request, req: ApproveToolRequest) -> Dict[str, Any]:
@@ -961,7 +965,11 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             chat_id=req.chat_id,
             user_id=req.user_id,
         )
-        return {"approval_id": req.approval_id, "output": output}
+        failed = str(output).strip().lower().startswith("error:")
+        return {
+            "approval_id": req.approval_id,
+            "output": format_tool_result(ok=not failed, output=str(output), max_chars=360),
+        }
 
     @app.post("/api/jobs/{job_id}/cancel")
     async def api_cancel_job(request: Request, job_id: str) -> Dict[str, Any]:
@@ -1732,7 +1740,9 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                             chat_id=chat_id,
                             user_id=user_id,
                         )
-                    status = "error" if str(output).strip().lower().startswith("error:") else "result"
+                    failed = str(output).strip().lower().startswith("error:")
+                    status = "error" if failed else "result"
+                    rendered = format_tool_result(ok=not failed, output=str(output), max_chars=360)
                     await websocket.send_json(
                         {
                             "type": "tool_event",
@@ -1741,7 +1751,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                             "detail": {
                                 "approval_id": approval_id,
                                 "action": msg_type,
-                                "output": output,
+                                "output": rendered,
                                 "chat_id": chat_id,
                                 "user_id": user_id,
                             },

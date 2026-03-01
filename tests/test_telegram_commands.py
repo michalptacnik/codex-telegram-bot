@@ -14,6 +14,7 @@ from codex_telegram_bot.telegram_bot import (
     _parse_email_template_spec,
     _parse_gh_command_spec,
     _parse_template_spec,
+    _humanize_approval_execution_output,
     _humanize_action_preview,
 )
 
@@ -143,3 +144,13 @@ class TestProgressNarrationHelpers(unittest.TestCase):
     def test_initial_status_text_uses_execution_wording_for_tool_prompt(self):
         status = _initial_status_text("!tool {\"name\":\"read_file\",\"args\":{\"path\":\"README.md\"}}")
         self.assertIn("preparing execution", status.lower())
+
+    def test_humanize_approval_execution_output_success(self):
+        text = "[tool:tool-123] rc=0\n✅ Done: wrote file"
+        out = _humanize_approval_execution_output(text)
+        self.assertTrue(out.startswith("✅ Done:"))
+
+    def test_humanize_approval_execution_output_error(self):
+        text = "[tool:tool-123] rc=1\nError: PERMISSION_DENIED"
+        out = _humanize_approval_execution_output(text)
+        self.assertTrue(out.startswith("⚠️ Tool error"))

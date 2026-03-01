@@ -26,6 +26,7 @@ from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.observability.alerts import AlertDispatcher
 from codex_telegram_bot.observability.structured_log import log_json
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
+from codex_telegram_bot.presentation.formatter import format_tool_result
 from codex_telegram_bot.runtime_contract import (
     AssistantText as RuntimeAssistantText,
     RuntimeError as RuntimeContractError,
@@ -1780,6 +1781,7 @@ class AgentService:
         argv = approval["argv"]
         timeout_sec = int(approval["timeout_sec"])
         policy_profile = self._agent_policy_profile(agent_id=agent_id)
+        session_workspace = self.session_workspace(session_id=session_id)
         self.append_session_assistant_message(
             session_id=session_id,
             content=f"tool.action.approved action_id={action_id} argv={' '.join(argv)}",
@@ -1812,7 +1814,7 @@ class AgentService:
                 action_id=action_id,
                 tool_name=tool_name,
                 tool_args=tool_args,
-                workspace_root=self.session_workspace(session_id=session_id),
+                workspace_root=session_workspace,
                 policy_profile=policy_profile,
                 extra_tools=dict(snapshot.tools),
                 allowed_tool_names=snapshot.names(),
@@ -1820,9 +1822,16 @@ class AgentService:
                 user_id=user_id,
                 session_id=session_id,
             )
+            raw_output = (result_obj.output or "").strip()
+            saved_to_file = _persist_tool_output_for_chat(
+                output=raw_output,
+                workspace_root=session_workspace,
+                action_id=action_id,
+                kind="tool",
+            )
             text = (
                 f"[tool:{action_id}] rc={0 if result_obj.ok else 1}\n"
-                f"output:\n{(result_obj.output or '').strip()[:1800]}"
+                f"{format_tool_result(ok=result_obj.ok, output=raw_output, saved_to_file=saved_to_file)}"
             ).strip()
             log_json(
                 logger,
@@ -1860,7 +1869,7 @@ class AgentService:
             stdin_text=approval.get("stdin_text", ""),
             timeout_sec=timeout_sec,
             policy_profile=policy_profile,
-            workspace_root=str(self.session_workspace(session_id=session_id)),
+            workspace_root=str(session_workspace),
         )
         log_json(
             logger,
@@ -1875,10 +1884,19 @@ class AgentService:
             exit_code=result.returncode,
         )
         self._run_store.set_tool_approval_status(approval_id, "executed")
+        raw_output = (
+            f"stdout:\n{(result.stdout or '').strip()}\n\n"
+            f"stderr:\n{(result.stderr or '').strip()}"
+        ).strip()
+        saved_to_file = _persist_tool_output_for_chat(
+            output=raw_output,
+            workspace_root=session_workspace,
+            action_id=action_id,
+            kind="exec",
+        )
         text = (
             f"[tool:{action_id}] rc={result.returncode}\n"
-            f"stdout:\n{(result.stdout or '').strip()[:1200]}\n"
-            f"stderr:\n{(result.stderr or '').strip()[:600]}"
+            f"{format_tool_result(ok=(result.returncode == 0), output=raw_output, saved_to_file=saved_to_file)}"
         ).strip()
         self.append_session_assistant_message(session_id=session_id, content=text, run_id=tool_run_id)
         return text
@@ -5594,26 +5612,55 @@ def _parse_tool_invocation_slash(text: str) -> Optional[tuple[str, Dict[str, Any
     return None
 
 
+def _persist_tool_output_for_chat(
+    *,
+    output: str,
+    workspace_root: Path,
+    action_id: str,
+    kind: str,
+    max_inline_chars: int = 900,
+) -> str:
+    raw = str(output or "")
+    if len(raw) <= max(200, int(max_inline_chars)):
+        return ""
+    try:
+        safe_kind = re.sub(r"[^a-z0-9_-]", "", str(kind or "tool").lower()) or "tool"
+        safe_action = re.sub(r"[^a-z0-9_-]", "", str(action_id or "action").lower()) or "action"
+        root = Path(workspace_root).expanduser().resolve()
+        out_dir = root / "logs" / "tool_outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{safe_kind}_{safe_action}.txt"
+        path.write_text(raw, encoding="utf-8")
+        return str(path.relative_to(root))
+    except Exception:
+        return ""
+
+
+def _tool_output_indicates_error(text: str) -> bool:
+    lowered = str(text or "").strip().lower()
+    if not lowered:
+        return False
+    if lowered.startswith("error:") or lowered.startswith("failed"):
+        return True
+    if " rc=1" in lowered or " rc=2" in lowered or " rc=127" in lowered:
+        return True
+    if "tool error" in lowered:
+        return True
+    return False
+
+
 def _compact_email_tool_output(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
-        return "Email sent."
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    if not lines:
-        return "Email sent."
-    if len(lines) >= 2 and lines[0].startswith("tool-"):
-        return lines[-1]
-    return raw
+        return "✅ Done: email sent."
+    return format_tool_result(ok=not _tool_output_indicates_error(raw), output=raw, max_chars=280)
 
 
 def _compact_tool_output(text: str) -> str:
     raw = (text or "").strip()
     if not raw:
-        return "Done."
-    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    if len(lines) >= 2 and lines[0].startswith("tool-"):
-        return lines[-1]
-    return raw
+        return "✅ Done."
+    return format_tool_result(ok=not _tool_output_indicates_error(raw), output=raw, max_chars=320)
 
 
 def _extract_memory_obligation_candidates(text: str) -> List[Dict[str, str]]:

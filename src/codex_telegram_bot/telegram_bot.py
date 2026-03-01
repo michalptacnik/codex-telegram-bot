@@ -79,7 +79,7 @@ except Exception:  # pragma: no cover - exercised only in minimal test environme
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
-from codex_telegram_bot.presentation.formatter import format_message
+from codex_telegram_bot.presentation.formatter import format_message, format_tool_result
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.execution_profile import UNSAFE_UNLOCK_PHRASE
 from codex_telegram_bot.services.message_updater import MessageUpdater
@@ -354,13 +354,13 @@ def _humanize_approval_execution_output(raw: str) -> str:
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     for line in lines:
         if line.lower().startswith("email sent to "):
-            return f"Done. {line}"
+            return format_tool_result(ok=True, output=line, max_chars=260)
     if lines and lines[0].startswith("[tool:"):
         rc_line = next((ln for ln in lines if ln.startswith("[tool:") and "rc=" in ln), "")
-        if rc_line and "rc=0" not in rc_line:
-            return "I ran the approved action, but it failed. Check /status for details."
-        return "Done. I ran the approved action."
-    return text
+        ok = bool(rc_line) and "rc=0" in rc_line
+        payload = "\n".join(lines[1:]).strip() or text
+        return format_tool_result(ok=ok, output=payload, max_chars=320)
+    return format_tool_result(ok=not text.lower().startswith("error:"), output=text, max_chars=320)
 
 
 def _humanize_action_preview(command: str) -> str:

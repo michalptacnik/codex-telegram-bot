@@ -1,7 +1,7 @@
 import re
 import unittest
 
-from codex_telegram_bot.presentation.formatter import format_message
+from codex_telegram_bot.presentation.formatter import format_message, format_tool_result
 
 
 def _canonical(text: str) -> str:
@@ -85,6 +85,18 @@ class TestPresentationFormatter(unittest.TestCase):
         self.assertLessEqual(len(with_probe.formatted_text), cap)
         self.assertTrue(with_probe.safety_report.get("probe_enabled"))
         self.assertIn("polish_probe", with_probe.safety_report.get("applied", []))
+
+    def test_tool_result_templates_and_truncation(self):
+        ok_msg = format_tool_result(ok=True, output="Created report file.")
+        self.assertTrue(ok_msg.startswith("✅ Done:"))
+
+        err_msg = format_tool_result(ok=False, output="Error: PERMISSION_DENIED while writing file.")
+        self.assertTrue(err_msg.startswith("⚠️ Tool error"))
+        self.assertIn("PERMISSION_DENIED", err_msg)
+
+        long_text = "x" * 1200
+        truncated = format_tool_result(ok=True, output=long_text, max_chars=120, saved_to_file="logs/tool.txt")
+        self.assertIn("saved to file: logs/tool.txt", truncated)
 
 
 if __name__ == "__main__":
