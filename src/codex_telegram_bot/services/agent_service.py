@@ -364,6 +364,27 @@ class AgentService:
         agent_id: str = "default",
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> str:
+        from codex_telegram_bot.agent.tool_loop import run_native_tool_loop as _run_native_tool_loop
+
+        return await _run_native_tool_loop(
+            service=self,
+            user_message=user_message,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+        )
+
+    async def _run_native_tool_loop_impl(
+        self,
+        user_message: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> str:
         """Run the typed runtime loop with a strict contract boundary."""
         provider = self._provider_for_agent(agent_id=agent_id)
         if not self._supports_native_tool_loop(provider):
@@ -1046,6 +1067,16 @@ class AgentService:
         return self._process_manager
 
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
+        from codex_telegram_bot.agent.prompt_builder import build_session_prompt as _build_session_prompt
+
+        return _build_session_prompt(
+            service=self,
+            session_id=session_id,
+            user_prompt=user_prompt,
+            max_turns=max_turns,
+        )
+
+    def _build_session_prompt_impl(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         capability_lines = self._build_capability_context(user_prompt=user_prompt)
@@ -1397,6 +1428,27 @@ class AgentService:
         agent_id: str = "default",
         progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     ) -> TurnResult:
+        from codex_telegram_bot.agent.session_handler import run_turn as _run_turn
+
+        return await _run_turn(
+            service=self,
+            prompt=prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+        )
+
+    async def _run_turn_impl(
+        self,
+        prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+    ) -> TurnResult:
         text_prompt = str(prompt or "").strip()
         if not text_prompt:
             text_prompt = "(empty)"
@@ -1471,6 +1523,29 @@ class AgentService:
         return TurnResult(kind=kind, text=output, session_id=session_id)
 
     async def run_prompt_with_tool_loop(
+        self,
+        prompt: str,
+        chat_id: int,
+        user_id: int,
+        session_id: str,
+        agent_id: str = "default",
+        progress_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        autonomy_depth: int = 0,
+    ) -> str:
+        from codex_telegram_bot.agent.tool_loop import run_prompt_with_tool_loop as _run_prompt_with_tool_loop
+
+        return await _run_prompt_with_tool_loop(
+            service=self,
+            prompt=prompt,
+            chat_id=chat_id,
+            user_id=user_id,
+            session_id=session_id,
+            agent_id=agent_id,
+            progress_callback=progress_callback,
+            autonomy_depth=autonomy_depth,
+        )
+
+    async def _run_prompt_with_tool_loop_impl(
         self,
         prompt: str,
         chat_id: int,
