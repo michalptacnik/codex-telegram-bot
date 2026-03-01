@@ -57,6 +57,7 @@ from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.thin_memory import ensure_memory_layout
 from codex_telegram_bot.services.thin_memory import ThinMemoryStore
+from codex_telegram_bot.services.heartbeat import HeartbeatStore
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
 from codex_telegram_bot.tools.email import email_tool_enabled
@@ -444,6 +445,13 @@ class AgentService:
         )
         self._last_process_cleanup_ts = 0.0
         self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
+        self._heartbeat_feature_enabled = (
+            (os.environ.get("ENABLE_HEARTBEAT") or "").strip().lower() in {"1", "true", "yes", "on"}
+        )
+        self._heartbeat_default_interval_min = max(
+            30,
+            min(int(os.environ.get("HEARTBEAT_INTERVAL_MIN_DEFAULT", "60") or 60), 1440),
+        )
 
         if self._run_store and self._event_bus:
             self._event_bus.subscribe(self._run_store.append_event)
@@ -853,8 +861,13 @@ class AgentService:
 
     async def run_cron_tick_once(self) -> Dict[str, int]:
         if self._cron_scheduler is None:
-            return {"due": 0, "ran": 0, "failed": 0}
-        return await self._cron_scheduler.tick_once()
+            cron_stats: Dict[str, int] = {"due": 0, "ran": 0, "failed": 0}
+        else:
+            cron_stats = await self._cron_scheduler.tick_once()
+        heartbeat_stats = await self._run_heartbeat_tick_once()
+        merged = dict(cron_stats)
+        merged.update(heartbeat_stats)
+        return merged
 
     async def handoff_prompt(
         self,
@@ -3843,6 +3856,142 @@ class AgentService:
 
     def provider_registry(self):
         return self._provider_registry
+
+    def heartbeat_status(self, session_id: str) -> Dict[str, Any]:
+        if not self._run_store:
+            return {
+                "session_id": session_id,
+                "heartbeat_enabled": False,
+                "heartbeat_interval_min": self._heartbeat_default_interval_min,
+                "next_heartbeat_at": "",
+                "last_heartbeat_at": "",
+                "timezone": "Europe/Amsterdam",
+            }
+        return self._run_store.get_heartbeat_state(session_id=session_id)
+
+    def set_heartbeat_enabled(
+        self,
+        session_id: str,
+        *,
+        enabled: bool,
+        interval_min: Optional[int] = None,
+        timezone_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        if not self._run_store:
+            raise ValueError("Heartbeat state store is not configured.")
+        now = datetime.now(timezone.utc)
+        resolved_interval = (
+            self._heartbeat_default_interval_min
+            if interval_min is None
+            else max(30, min(int(interval_min), 1440))
+        )
+        next_run = now + timedelta(minutes=resolved_interval)
+        return self._run_store.set_heartbeat_state(
+            session_id=session_id,
+            heartbeat_enabled=bool(enabled),
+            heartbeat_interval_min=resolved_interval,
+            timezone_name=timezone_name,
+            next_heartbeat_at=next_run.isoformat() if enabled else "",
+            last_heartbeat_at=None,
+        )
+
+    async def run_heartbeat_once(self, session_id: str, dry_run: bool = False) -> Dict[str, Any]:
+        if not self._run_store:
+            return {"session_id": session_id, "ok": False, "reason": "no_store"}
+        state = self._run_store.get_heartbeat_state(session_id=session_id)
+        if not state:
+            return {"session_id": session_id, "ok": False, "reason": "missing_state"}
+        enabled = bool(state.get("heartbeat_enabled"))
+        if not enabled:
+            return {"session_id": session_id, "ok": True, "action": "NO_ACTION", "reason": "disabled"}
+        session = self.get_session(session_id)
+        if session is None:
+            return {"session_id": session_id, "ok": False, "reason": "session_not_found"}
+        now = datetime.now(timezone.utc)
+        interval_min = max(30, min(int(state.get("heartbeat_interval_min") or self._heartbeat_default_interval_min), 1440))
+        timezone_name = str(state.get("timezone") or "Europe/Amsterdam")
+        workspace = self.session_workspace(session_id=session_id)
+        hb = HeartbeatStore(workspace)
+        decision = hb.evaluate(timezone_name=timezone_name, now_utc=now)
+        next_run = (now + timedelta(minutes=interval_min)).isoformat()
+        if decision.quiet_hours_blocked:
+            self._run_store.set_heartbeat_state(
+                session_id=session_id,
+                heartbeat_enabled=True,
+                heartbeat_interval_min=interval_min,
+                timezone_name=timezone_name,
+                next_heartbeat_at=next_run,
+            )
+            return {"session_id": session_id, "ok": True, "action": "NO_ACTION", "reason": "quiet_hours"}
+        if decision.action != "ACTION" or not decision.text.strip():
+            self._run_store.set_heartbeat_state(
+                session_id=session_id,
+                heartbeat_enabled=True,
+                heartbeat_interval_min=interval_min,
+                timezone_name=timezone_name,
+                last_heartbeat_at=now.isoformat(),
+                next_heartbeat_at=next_run,
+            )
+            return {"session_id": session_id, "ok": True, "action": "NO_ACTION"}
+        if dry_run:
+            return {
+                "session_id": session_id,
+                "ok": True,
+                "action": "ACTION",
+                "type": "message",
+                "dry_run": True,
+                "text": decision.text,
+            }
+        send_result = await self._execute_registered_tool_action(
+            action_id="heartbeat-" + uuid.uuid4().hex[:8],
+            tool_name="send_message",
+            tool_args={
+                "session_id": session_id,
+                "text": decision.text,
+                "silent": True,
+            },
+            workspace_root=workspace,
+            policy_profile="trusted",
+            extra_tools={"send_message": self._tool_registry.get("send_message")},
+            allowed_tool_names=["send_message"],
+            chat_id=int(session.chat_id),
+            user_id=int(session.user_id),
+            session_id=session_id,
+        )
+        self._run_store.set_heartbeat_state(
+            session_id=session_id,
+            heartbeat_enabled=True,
+            heartbeat_interval_min=interval_min,
+            timezone_name=timezone_name,
+            last_heartbeat_at=now.isoformat(),
+            next_heartbeat_at=next_run,
+        )
+        return {
+            "session_id": session_id,
+            "ok": bool(send_result.ok),
+            "action": "ACTION",
+            "type": "message",
+            "preview": decision.text[:200],
+            "delivery_ok": bool(send_result.ok),
+        }
+
+    async def _run_heartbeat_tick_once(self) -> Dict[str, int]:
+        if (not self._heartbeat_feature_enabled) or (self._run_store is None):
+            return {"heartbeat_due": 0, "heartbeat_ran": 0, "heartbeat_failed": 0}
+        now_iso = datetime.now(timezone.utc).isoformat()
+        due = self._run_store.list_due_heartbeat_sessions(now_iso=now_iso, limit=100)
+        ran = 0
+        failed = 0
+        for row in due:
+            ran += 1
+            try:
+                outcome = await self.run_heartbeat_once(session_id=str(row.get("session_id") or ""), dry_run=False)
+                if not bool(outcome.get("ok", False)):
+                    failed += 1
+            except Exception:
+                failed += 1
+                logger.exception("heartbeat tick failed session=%s", str(row.get("session_id") or ""))
+        return {"heartbeat_due": len(due), "heartbeat_ran": ran, "heartbeat_failed": failed}
 
     def list_skills(self) -> List[Dict[str, Any]]:
         if self._skill_manager is None:

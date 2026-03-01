@@ -37,7 +37,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 class SqliteRunStore:
@@ -188,6 +188,25 @@ class SqliteRunStore:
                     last_run TEXT,
                     failure_count INTEGER NOT NULL DEFAULT 0
                 )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS heartbeat_state (
+                    session_id TEXT PRIMARY KEY,
+                    heartbeat_enabled INTEGER NOT NULL DEFAULT 0,
+                    heartbeat_interval_min INTEGER NOT NULL DEFAULT 60,
+                    timezone TEXT NOT NULL DEFAULT 'Europe/Amsterdam',
+                    last_heartbeat_at TEXT,
+                    next_heartbeat_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_heartbeat_due
+                ON heartbeat_state (heartbeat_enabled, next_heartbeat_at)
                 """
             )
             conn.execute(
@@ -566,6 +585,19 @@ class SqliteRunStore:
                 """,
                 (_utc_now(), _utc_now()),
             )
+            # Ensure heartbeat rows exist for known sessions.
+            conn.execute(
+                """
+                INSERT INTO heartbeat_state
+                (session_id, heartbeat_enabled, heartbeat_interval_min, timezone, last_heartbeat_at, next_heartbeat_at, updated_at)
+                SELECT s.session_id, 0, 60, 'Europe/Amsterdam', NULL, ?, ?
+                FROM telegram_sessions s
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM heartbeat_state h WHERE h.session_id = s.session_id
+                )
+                """,
+                (_utc_now(), _utc_now()),
+            )
             profile_row = conn.execute(
                 "SELECT id FROM execution_profile_state WHERE id = 1"
             ).fetchone()
@@ -814,6 +846,14 @@ class SqliteRunStore:
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (session_id, chat_id, user_id, SESSION_STATUS_ACTIVE, current_agent_id, "", "", now, now),
+            )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO heartbeat_state
+                (session_id, heartbeat_enabled, heartbeat_interval_min, timezone, last_heartbeat_at, next_heartbeat_at, updated_at)
+                VALUES (?, 0, 60, 'Europe/Amsterdam', NULL, ?, ?)
+                """,
+                (session_id, now, now),
             )
         return self.get_session(session_id)  # type: ignore[return-value]
 
@@ -1541,7 +1581,112 @@ class SqliteRunStore:
                 """,
                 (str(owner_user_id),),
             ).fetchone()
-        return int(row["c"] or 0) if row else 0
+            return int(row["c"] or 0) if row else 0
+
+    def get_heartbeat_state(self, session_id: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM heartbeat_state WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                now = _utc_now()
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO heartbeat_state
+                    (session_id, heartbeat_enabled, heartbeat_interval_min, timezone, last_heartbeat_at, next_heartbeat_at, updated_at)
+                    VALUES (?, 0, 60, 'Europe/Amsterdam', NULL, ?, ?)
+                    """,
+                    (session_id, now, now),
+                )
+                row = conn.execute(
+                    "SELECT * FROM heartbeat_state WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+        return _row_to_heartbeat_state(row) if row else {}
+
+    def set_heartbeat_state(
+        self,
+        session_id: str,
+        *,
+        heartbeat_enabled: Optional[bool] = None,
+        heartbeat_interval_min: Optional[int] = None,
+        timezone_name: Optional[str] = None,
+        last_heartbeat_at: Optional[str] = None,
+        next_heartbeat_at: Optional[str] = None,
+    ) -> dict:
+        current = self.get_heartbeat_state(session_id=session_id)
+        now = _utc_now()
+        enabled_value = int(bool(heartbeat_enabled)) if heartbeat_enabled is not None else int(current.get("heartbeat_enabled") or 0)
+        interval_value = (
+            max(30, min(int(heartbeat_interval_min or 60), 1440))
+            if heartbeat_interval_min is not None
+            else int(current.get("heartbeat_interval_min") or 60)
+        )
+        tz_value = str(timezone_name or current.get("timezone") or "Europe/Amsterdam").strip() or "Europe/Amsterdam"
+        last_value = (
+            str(last_heartbeat_at).strip()
+            if last_heartbeat_at is not None
+            else str(current.get("last_heartbeat_at") or "")
+        )
+        next_value = (
+            str(next_heartbeat_at).strip()
+            if next_heartbeat_at is not None
+            else str(current.get("next_heartbeat_at") or "")
+        )
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO heartbeat_state
+                (session_id, heartbeat_enabled, heartbeat_interval_min, timezone, last_heartbeat_at, next_heartbeat_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    heartbeat_enabled = excluded.heartbeat_enabled,
+                    heartbeat_interval_min = excluded.heartbeat_interval_min,
+                    timezone = excluded.timezone,
+                    last_heartbeat_at = excluded.last_heartbeat_at,
+                    next_heartbeat_at = excluded.next_heartbeat_at,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    enabled_value,
+                    interval_value,
+                    tz_value,
+                    (last_value or None),
+                    (next_value or None),
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM heartbeat_state WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return _row_to_heartbeat_state(row) if row else {}
+
+    def list_due_heartbeat_sessions(self, now_iso: str, limit: int = 100) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT h.*, s.chat_id, s.user_id, s.status
+                FROM heartbeat_state h
+                JOIN telegram_sessions s ON s.session_id = h.session_id
+                WHERE h.heartbeat_enabled = 1
+                  AND s.status = ?
+                  AND (h.next_heartbeat_at IS NULL OR h.next_heartbeat_at = '' OR h.next_heartbeat_at <= ?)
+                ORDER BY COALESCE(h.next_heartbeat_at, '') ASC
+                LIMIT ?
+                """,
+                (SESSION_STATUS_ACTIVE, now_iso, max(1, limit)),
+            ).fetchall()
+        out: List[dict] = []
+        for row in rows:
+            payload = _row_to_heartbeat_state(row)
+            payload["chat_id"] = int(row["chat_id"] or 0)
+            payload["user_id"] = int(row["user_id"] or 0)
+            payload["session_status"] = str(row["status"] or "")
+            out.append(payload)
+        return out
 
     def create_cron_job(
         self,
@@ -2805,6 +2950,18 @@ def _row_to_cron_job(row: sqlite3.Row) -> dict:
         "last_error": row["last_error"] or "",
         "last_run": row["last_run"] or "",
         "failure_count": int(row["failure_count"] or 0),
+    }
+
+
+def _row_to_heartbeat_state(row: sqlite3.Row) -> dict:
+    return {
+        "session_id": row["session_id"],
+        "heartbeat_enabled": bool(row["heartbeat_enabled"]),
+        "heartbeat_interval_min": int(row["heartbeat_interval_min"] or 60),
+        "timezone": str(row["timezone"] or "Europe/Amsterdam"),
+        "last_heartbeat_at": str(row["last_heartbeat_at"] or ""),
+        "next_heartbeat_at": str(row["next_heartbeat_at"] or ""),
+        "updated_at": str(row["updated_at"] or ""),
     }
 
 
