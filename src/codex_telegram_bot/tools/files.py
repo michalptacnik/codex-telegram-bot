@@ -25,6 +25,10 @@ def _resolve_workspace_path(workspace_root: Path, raw_path: str, allow_full_mach
     return target
 
 
+def _is_soul_path(target: Path) -> bool:
+    return target.name == "SOUL.md" and target.parent.name == "memory"
+
+
 class ReadFileTool:
     name = "read_file"
 
@@ -66,6 +70,8 @@ class WriteFileTool:
             )
         except ValueError as exc:
             return ToolResult(ok=False, output=f"Error: {exc}")
+        if _is_soul_path(target):
+            return ToolResult(ok=False, output="Error: SOUL.md is immutable via write_file. Use soul_apply_patch.")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         if not target.exists() or not target.is_file():

@@ -282,6 +282,21 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"task_id": "string (required)"},
     },
+    "soul_get": {
+        "name": "soul_get",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "soul_propose_patch": {
+        "name": "soul_propose_patch",
+        "protocol": "!tool",
+        "args": {"patch": "object (required)"},
+    },
+    "soul_apply_patch": {
+        "name": "soul_apply_patch",
+        "protocol": "!tool",
+        "args": {"patch": "object (required)", "reason": "string (required)"},
+    },
     "web_search": {
         "name": "web_search",
         "protocol": "!tool",
@@ -398,7 +413,7 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "args": {"tool_id": "string (required)", "args": "object (optional)"},
     },
 }
-APPROVAL_REQUIRED_TOOLS = {"send_email_smtp", "send_email"}
+APPROVAL_REQUIRED_TOOLS = {"send_email_smtp", "send_email", "soul_apply_patch"}
 
 
 @dataclass(frozen=True)
@@ -1199,6 +1214,34 @@ class AgentService:
         if not self._run_store:
             return None
         return self._run_store.get_attachment(attachment_id)
+
+    def soul_status(self, session_id: str) -> Dict[str, Any]:
+        workspace = self.session_workspace(session_id=session_id)
+        store = SoulStore(workspace_root=workspace)
+        profile, report = store.load_profile_with_report()
+        return {
+            "session_id": session_id,
+            "ok": report.ok,
+            "warnings": list(report.warnings),
+            "text": store.read_text(),
+            "name": profile.name,
+            "voice": profile.voice,
+            "style": {
+                "emoji": profile.style.emoji,
+                "emphasis": profile.style.emphasis,
+                "brevity": profile.style.brevity,
+            },
+        }
+
+    def list_soul_versions(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        if not self._run_store:
+            return []
+        return self._run_store.list_soul_versions(session_id=session_id, limit=limit)
+
+    def get_soul_version(self, version_id: str) -> Optional[Dict[str, Any]]:
+        if not self._run_store:
+            return None
+        return self._run_store.get_soul_version(version_id)
 
     def get_last_user_prompt(self, session_id: str) -> str:
         history = self.list_session_messages(session_id=session_id, limit=40)

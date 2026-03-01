@@ -57,6 +57,15 @@
     <hr />
     <h3 class="mono">Heartbeat</h3>
     <div id="heartbeat-status" class="dim"></div>
+    <hr />
+    <h3 class="mono">SOUL</h3>
+    <div id="soul-meta" class="dim"></div>
+    <pre id="soul-text" class="output">(no SOUL loaded)</pre>
+    <div class="toolbar">
+      <label for="soul-admin-user-id">Admin user ID</label>
+      <input id="soul-admin-user-id" type="number" value="1" />
+    </div>
+    <div id="soul-history" class="dim"></div>
   </section>
 </div>
 
@@ -74,6 +83,10 @@
   const costUpdated = document.getElementById("cost-updated");
   const attachmentsList = document.getElementById("attachments-list");
   const heartbeatStatus = document.getElementById("heartbeat-status");
+  const soulMeta = document.getElementById("soul-meta");
+  const soulText = document.getElementById("soul-text");
+  const soulHistory = document.getElementById("soul-history");
+  const soulAdminUserId = document.getElementById("soul-admin-user-id");
 
   let activeSessionId = "{{ selected_session_id }}";
   let currentAssistant = null;
@@ -164,6 +177,9 @@
     currentAssistant = null;
     attachmentsList.innerHTML = "";
     heartbeatStatus.textContent = "";
+    soulMeta.textContent = "";
+    soulText.textContent = "(no SOUL loaded)";
+    soulHistory.innerHTML = "";
     if (!sessionId) return;
     const resp = await fetch(`/api/sessions/${sessionId}/detail`);
     if (!resp.ok) return;
@@ -197,6 +213,50 @@
       heartbeatStatus.textContent = "Disabled";
     } else {
       heartbeatStatus.textContent = `Enabled | interval=${hb.heartbeat_interval_min || "-"} min | tz=${hb.timezone || "-"} | next=${hb.next_heartbeat_at || "-"} | last=${hb.last_heartbeat_at || "-"}`;
+    }
+    const soul = data.soul || {};
+    soulMeta.textContent = `name=${soul.name || "-"} | voice=${soul.voice || "-"} | style=${JSON.stringify(soul.style || {})} | valid=${soul.ok ? "yes" : "fallback"}`;
+    soulText.textContent = soul.text || "(empty)";
+    const versions = data.soul_history || [];
+    if (!versions.length) {
+      soulHistory.textContent = "No SOUL history snapshots yet.";
+    } else {
+      const ul = document.createElement("ul");
+      for (const v of versions.slice(0, 10)) {
+        const li = document.createElement("li");
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "btn";
+        btn.textContent = `Restore ${String(v.id || "").slice(0, 8)}`;
+        btn.onclick = async () => {
+          const reason = window.prompt("Reason for restore", `restore ${String(v.id || "").slice(0, 8)}`) || "";
+          if (!reason.trim()) return;
+          const payload = {
+            version_id: v.id,
+            reason: reason,
+            admin_user_id: Number(soulAdminUserId.value || "0"),
+          };
+          const restoreResp = await fetch(`/api/sessions/${sessionId}/soul/restore-request`, {
+            method: "POST",
+            headers: {"content-type": "application/json"},
+            body: JSON.stringify(payload),
+          });
+          const body = await restoreResp.json();
+          if (!restoreResp.ok) {
+            window.alert(`Restore request failed: ${body.detail || JSON.stringify(body)}`);
+            return;
+          }
+          window.alert(`Restore approval requested: ${String(body.approval_id || "").slice(0, 8)}`);
+        };
+        li.appendChild(btn);
+        const meta = document.createElement("span");
+        meta.className = "dim";
+        meta.textContent = ` ${v.changed_at || "-"} by=${v.changed_by || "-"} reason=${v.reason || "-"}`;
+        li.appendChild(meta);
+        ul.appendChild(li);
+      }
+      soulHistory.innerHTML = "";
+      soulHistory.appendChild(ul);
     }
     await refreshCostSummary(sessionId);
   }

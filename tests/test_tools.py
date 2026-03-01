@@ -68,6 +68,17 @@ class TestFileTools(unittest.TestCase):
             self.assertTrue(external.exists())
             self.assertEqual(external.read_text(encoding="utf-8"), "hello")
 
+    def test_write_file_tool_blocks_direct_soul_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tool = WriteFileTool()
+            res = tool.run(
+                ToolRequest(name="write_file", args={"path": "memory/SOUL.md", "content": "x"}),
+                ToolContext(workspace_root=root),
+            )
+            self.assertFalse(res.ok)
+            self.assertIn("SOUL.md is immutable", res.output)
+
 
 class TestToolRegistry(unittest.TestCase):
     def test_default_registry_contains_expected_tools(self):
@@ -75,6 +86,9 @@ class TestToolRegistry(unittest.TestCase):
         names = registry.names()
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
+        self.assertIn("soul_get", names)
+        self.assertIn("soul_propose_patch", names)
+        self.assertIn("soul_apply_patch", names)
         self.assertIn("git_status", names)
         self.assertIn("web_search", names)
 

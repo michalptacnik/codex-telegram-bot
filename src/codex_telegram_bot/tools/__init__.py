@@ -33,6 +33,7 @@ from codex_telegram_bot.tools.memory import (
 from codex_telegram_bot.tools.message import SendMessageTool
 from codex_telegram_bot.tools.provider import ProviderStatusTool, ProviderSwitchTool
 from codex_telegram_bot.tools.schedule import ScheduleTaskTool, ListSchedulesTool, CancelScheduleTool
+from codex_telegram_bot.tools.soul import SoulApplyPatchTool, SoulGetTool, SoulProposePatchTool
 from codex_telegram_bot.tools.skill_market import (
     SkillsMarketDisableTool,
     SkillsMarketEnableTool,
@@ -134,6 +135,9 @@ def build_default_tool_registry(
     registry.register(TaskCreateTool())
     registry.register(TaskListTool())
     registry.register(TaskDoneTool())
+    registry.register(SoulGetTool())
+    registry.register(SoulProposePatchTool())
+    registry.register(SoulApplyPatchTool(run_store=run_store))
     if skill_marketplace is not None:
         registry.register(SkillsMarketSourcesListTool(skill_marketplace))
         registry.register(SkillsMarketSearchTool(skill_marketplace))
@@ -188,6 +192,9 @@ __all__ = [
     "TaskCreateTool",
     "TaskListTool",
     "TaskDoneTool",
+    "SoulGetTool",
+    "SoulProposePatchTool",
+    "SoulApplyPatchTool",
     "SkillsMarketSourcesListTool",
     "SkillsMarketSearchTool",
     "SkillsMarketInstallTool",

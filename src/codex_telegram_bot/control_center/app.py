@@ -13,10 +13,15 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from codex_telegram_bot.services.agent_service import AgentService, AUTONOMOUS_TOOL_LOOP_ENV
+from codex_telegram_bot.services.agent_service import (
+    AgentService,
+    AUTONOMOUS_TOOL_LOOP_ENV,
+    TOOL_APPROVAL_SENTINEL,
+)
 from codex_telegram_bot.services.error_codes import ERROR_CATALOG, detect_error_code, get_catalog_entry
 from codex_telegram_bot.services.onboarding import OnboardingStore
 from codex_telegram_bot.services.plugin_lifecycle import PluginLifecycleManager
+from codex_telegram_bot.services.soul import parse_soul
 from codex_telegram_bot.services.whatsapp_bridge import WhatsAppBridge
 from codex_telegram_bot.services.whatsapp_transport import build_twilio_whatsapp_sender_from_env
 from codex_telegram_bot.config import get_env_path, load_env_file, write_env_file
@@ -77,6 +82,12 @@ class WhatsAppLinkCodeRequest(BaseModel):
     chat_id: int
     user_id: int
     ttl_sec: int = 900
+
+
+class SoulRestoreRequest(BaseModel):
+    version_id: str
+    reason: str = "restore requested from control center"
+    admin_user_id: int = 0
 
 
 def _chunk_text(text: str, chunk_size: int = 220) -> List[str]:
@@ -2101,6 +2112,8 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         messages = agent_service.list_session_messages(session_id, limit=20)
         attachments = agent_service.list_session_attachments(session_id=session_id, limit=200)
         heartbeat = agent_service.heartbeat_status(session_id=session_id)
+        soul = agent_service.soul_status(session_id=session_id)
+        soul_history = agent_service.list_soul_versions(session_id=session_id, limit=30)
         return {
             "session": {
                 "session_id": session.session_id,
@@ -2143,7 +2156,121 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 "next_heartbeat_at": str(heartbeat.get("next_heartbeat_at") or ""),
                 "last_heartbeat_at": str(heartbeat.get("last_heartbeat_at") or ""),
             },
+            "soul": {
+                "ok": bool(soul.get("ok")),
+                "warnings": list(soul.get("warnings") or []),
+                "name": str(soul.get("name") or ""),
+                "voice": str(soul.get("voice") or ""),
+                "style": dict(soul.get("style") or {}),
+                "text": str(soul.get("text") or ""),
+            },
+            "soul_history": [
+                {
+                    "id": str(item.get("id") or ""),
+                    "sha256": str(item.get("sha256") or ""),
+                    "changed_by": str(item.get("changed_by") or ""),
+                    "changed_at": str(item.get("changed_at") or ""),
+                    "reason": str(item.get("reason") or ""),
+                    "snapshot_path": str(item.get("snapshot_path") or ""),
+                }
+                for item in soul_history
+            ],
             "cost_summary": agent_service.session_cost_summary(session_id=session_id),
+        }
+
+    @app.get("/api/sessions/{session_id}/soul")
+    async def api_session_soul(request: Request, session_id: str):
+        _opt_api_scope(request)
+        session = agent_service.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        soul = agent_service.soul_status(session_id=session_id)
+        return soul
+
+    @app.get("/api/sessions/{session_id}/soul/history")
+    async def api_session_soul_history(request: Request, session_id: str):
+        _opt_api_scope(request)
+        session = agent_service.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return {"items": agent_service.list_soul_versions(session_id=session_id, limit=50)}
+
+    @app.post("/api/sessions/{session_id}/soul/restore-request")
+    async def api_session_soul_restore_request(request: Request, session_id: str, req: SoulRestoreRequest):
+        _opt_api_scope(request, write_scope="admin:*")
+        session = agent_service.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if req.admin_user_id <= 0:
+            raise HTTPException(status_code=400, detail="admin_user_id is required")
+        if agent_service.access_controller is not None:
+            try:
+                agent_service.access_controller.check_action(req.admin_user_id, "manage_agents", int(session.chat_id))
+            except Exception as exc:
+                raise HTTPException(status_code=403, detail=f"admin check failed: {exc}")
+        if agent_service.run_store is None:
+            raise HTTPException(status_code=503, detail="Approval store unavailable")
+        version = agent_service.get_soul_version(req.version_id)
+        if version is None or str(version.get("session_id") or "") != session_id:
+            raise HTTPException(status_code=404, detail="SOUL version not found")
+
+        snapshot = Path(str(version.get("snapshot_path") or "")).expanduser().resolve()
+        ws = agent_service.session_workspace(session_id=session_id).resolve()
+        try:
+            snapshot.relative_to(ws)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Snapshot path outside workspace")
+        if not snapshot.exists() or not snapshot.is_file():
+            raise HTTPException(status_code=404, detail="SOUL snapshot missing")
+
+        text = snapshot.read_text(encoding="utf-8")
+        try:
+            profile = parse_soul(text)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid SOUL snapshot format: {exc}")
+
+        patch = {
+            "name": profile.name,
+            "voice": profile.voice,
+            "principles": {"set_all": list(profile.principles)},
+            "boundaries": {"set_all": list(profile.boundaries)},
+            "style": {
+                "emoji": profile.style.emoji,
+                "emphasis": profile.style.emphasis,
+                "brevity": profile.style.brevity,
+            },
+        }
+        payload = {
+            "patch": patch,
+            "reason": str(req.reason or "restore requested from control center").strip()[:240],
+        }
+        run_id = agent_service.run_store.create_run(f"Approval requested for tool: soul_apply_patch")
+        agent_service.run_store.mark_running(run_id)
+        approval_id = agent_service.run_store.create_tool_approval(
+            chat_id=int(session.chat_id),
+            user_id=int(req.admin_user_id),
+            session_id=session_id,
+            agent_id=str(session.current_agent_id or "default"),
+            run_id=run_id,
+            argv=[TOOL_APPROVAL_SENTINEL, "soul_apply_patch", json.dumps(payload, sort_keys=True, ensure_ascii=True)],
+            stdin_text="",
+            timeout_sec=60,
+            risk_tier="high",
+        )
+        agent_service.append_run_event(
+            run_id=run_id,
+            event_type="tool.approval.requested",
+            payload=f"approval_id={approval_id}, tool_use_id=soul_restore, risk=high",
+        )
+        agent_service.run_store.mark_completed(
+            run_id,
+            f"Approval requested approval_id={approval_id} tool_use_id=soul_restore",
+        )
+        return {
+            "status": "pending_approval",
+            "approval_id": approval_id,
+            "session_id": session_id,
+            "requested_version_id": req.version_id,
         }
 
     @app.get("/api/attachments/{attachment_id}/download")

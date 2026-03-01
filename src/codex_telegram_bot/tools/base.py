@@ -260,6 +260,38 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["task_id"],
         },
     },
+    "soul_get": {
+        "name": "soul_get",
+        "description": "Read SOUL.md identity kernel and validation status.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "soul_propose_patch": {
+        "name": "soul_propose_patch",
+        "description": "Preview structured SOUL patch as a unified diff.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patch": {"type": "object", "description": "Structured SOUL patch"},
+            },
+            "required": ["patch"],
+        },
+    },
+    "soul_apply_patch": {
+        "name": "soul_apply_patch",
+        "description": "Apply structured SOUL patch with audit reason.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "patch": {"type": "object", "description": "Structured SOUL patch"},
+                "reason": {"type": "string", "description": "Why this SOUL change is needed"},
+            },
+            "required": ["patch", "reason"],
+        },
+    },
     "web_search": {
         "name": "web_search",
         "description": "Search the public web and return source links with snippets.",

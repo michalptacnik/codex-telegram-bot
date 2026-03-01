@@ -37,7 +37,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class SqliteRunStore:
@@ -270,8 +270,27 @@ class SqliteRunStore:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS soul_versions (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    changed_by TEXT NOT NULL DEFAULT '',
+                    changed_at TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    snapshot_path TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_heartbeat_due
                 ON heartbeat_state (heartbeat_enabled, next_heartbeat_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_soul_versions_session_changed
+                ON soul_versions (session_id, changed_at DESC)
                 """
             )
             conn.execute(
@@ -1112,6 +1131,58 @@ class SqliteRunStore:
                 (session_id, str(day_iso or "").strip()),
             ).fetchone()
         return int(row["c"] or 0) if row else 0
+
+    def create_soul_version(
+        self,
+        *,
+        session_id: str,
+        sha256: str,
+        changed_by: str,
+        reason: str,
+        snapshot_path: str,
+    ) -> str:
+        version_id = str(uuid.uuid4())
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO soul_versions
+                (id, session_id, sha256, changed_by, changed_at, reason, snapshot_path)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version_id,
+                    str(session_id or "").strip(),
+                    str(sha256 or "").strip(),
+                    str(changed_by or "").strip(),
+                    _utc_now(),
+                    str(reason or "").strip(),
+                    str(snapshot_path or "").strip(),
+                ),
+            )
+        return version_id
+
+    def list_soul_versions(self, session_id: str, limit: int = 50) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM soul_versions
+                WHERE session_id = ?
+                ORDER BY changed_at DESC
+                LIMIT ?
+                """,
+                (str(session_id or "").strip(), max(1, int(limit))),
+            ).fetchall()
+        return [_row_to_soul_version(row) for row in rows]
+
+    def get_soul_version(self, version_id: str) -> Optional[dict]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM soul_versions WHERE id = ?",
+                (str(version_id or "").strip(),),
+            ).fetchone()
+        if not row:
+            return None
+        return _row_to_soul_version(row)
 
     def list_session_messages(self, session_id: str, limit: int = 20) -> List[TelegramSessionMessageRecord]:
         with self._connect() as conn:
@@ -3250,6 +3321,18 @@ def _row_to_attachment(row: sqlite3.Row) -> dict:
         "local_path": str(row["local_path"] or ""),
         "remote_file_id": str(row["remote_file_id"] or ""),
         "created_at": str(row["created_at"] or ""),
+    }
+
+
+def _row_to_soul_version(row: sqlite3.Row) -> dict:
+    return {
+        "id": str(row["id"] or ""),
+        "session_id": str(row["session_id"] or ""),
+        "sha256": str(row["sha256"] or ""),
+        "changed_by": str(row["changed_by"] or ""),
+        "changed_at": str(row["changed_at"] or ""),
+        "reason": str(row["reason"] or ""),
+        "snapshot_path": str(row["snapshot_path"] or ""),
     }
 
 

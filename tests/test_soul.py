@@ -1,7 +1,9 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
+from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.services.soul import (
     SOUL_MAX_CHARS,
     SoulStore,
@@ -10,6 +12,8 @@ from codex_telegram_bot.services.soul import (
     parse_soul,
     render_soul,
 )
+from codex_telegram_bot.tools.base import ToolContext, ToolRequest
+from codex_telegram_bot.tools.soul import SoulApplyPatchTool, SoulGetTool, SoulProposePatchTool
 
 
 class TestSoulFormat(unittest.TestCase):
@@ -76,6 +80,41 @@ class TestSoulStore(unittest.TestCase):
             self.assertTrue(applied["ok"])
             profile = store.load_profile()
             self.assertEqual(profile.style.emoji, "off")
+
+
+class TestSoulTools(unittest.TestCase):
+    def test_soul_get_and_patch_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteRunStore(db_path=root / "state.db")
+            get_tool = SoulGetTool()
+            propose_tool = SoulProposePatchTool()
+            apply_tool = SoulApplyPatchTool(run_store=store)
+            ctx = ToolContext(workspace_root=root, user_id=7, session_id="sess-1")
+
+            get_res = get_tool.run(ToolRequest(name="soul_get", args={}), ctx)
+            self.assertTrue(get_res.ok)
+            self.assertIn("\"text\":", get_res.output)
+
+            patch = {"style": {"emoji": "off"}}
+            preview = propose_tool.run(ToolRequest(name="soul_propose_patch", args={"patch": patch}), ctx)
+            self.assertTrue(preview.ok)
+            self.assertIn("\"changed\": true", preview.output)
+
+            applied = apply_tool.run(
+                ToolRequest(name="soul_apply_patch", args={"patch": patch, "reason": "test"}),
+                ctx,
+            )
+            self.assertTrue(applied.ok)
+            payload = json.loads(applied.output)
+            self.assertTrue(payload.get("changed"))
+            self.assertTrue(str(payload.get("history_path") or "").endswith(".md"))
+            self.assertTrue(str(payload.get("version_id") or ""))
+            status = SoulStore(root).load_profile()
+            self.assertEqual(status.style.emoji, "off")
+            versions = store.list_soul_versions(session_id="sess-1", limit=10)
+            self.assertEqual(len(versions), 1)
+            self.assertEqual(str(versions[0].get("changed_by") or ""), "7")
 
 
 if __name__ == "__main__":
