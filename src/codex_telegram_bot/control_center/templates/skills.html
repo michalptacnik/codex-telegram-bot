@@ -26,6 +26,19 @@
 </section>
 
 <section class="card table-card">
+  <div class="k">Marketplace Catalog</div>
+  <form class="toolbar" method="post" action="/skills/market/install">
+    <input type="text" name="skill_ref" placeholder="source:skill_id" required />
+    <select name="target">
+      <option value="workspace">workspace</option>
+      <option value="global">global</option>
+    </select>
+    <button class="btn" type="submit">Install Marketplace Skill</button>
+  </form>
+  <div class="dim">Configured sources: {% for src in market_sources %}<span class="mono">{{ src.name }}</span>{% if not loop.last %}, {% endif %}{% endfor %}</div>
+</section>
+
+<section class="card table-card">
   <div class="k">Installed Skills</div>
   <table>
     <caption class="sr-only">Installed skills</caption>
@@ -36,6 +49,7 @@
         <th scope="col">Tools</th>
         <th scope="col">Req Env</th>
         <th scope="col">Source</th>
+        <th scope="col">Verified</th>
         <th scope="col">Enabled</th>
         <th scope="col">Actions</th>
       </tr>
@@ -49,6 +63,7 @@
         <td class="mono">{{ ", ".join(s.tools) }}</td>
         <td class="mono">{{ ", ".join(s.requires_env) }}</td>
         <td class="mono">{{ s.source }}</td>
+        <td>{{ "yes" if s.verified else "no" }}</td>
         <td>{{ "yes" if s.enabled else "no" }}</td>
         <td>
           {% if s.enabled %}
@@ -64,7 +79,41 @@
       </tr>
       {% endfor %}
       {% else %}
-      <tr><td colspan="7" class="dim">No skills installed.</td></tr>
+      <tr><td colspan="8" class="dim">No skills installed.</td></tr>
+      {% endif %}
+    </tbody>
+  </table>
+</section>
+
+<section class="card table-card">
+  <div class="k">Marketplace Entries (cached)</div>
+  <table>
+    <thead>
+      <tr>
+        <th scope="col">Entry</th>
+        <th scope="col">Description</th>
+        <th scope="col">Tags</th>
+        <th scope="col">Action</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% if market_items %}
+      {% for item in market_items %}
+      <tr>
+        <td class="mono">{{ item.id }}</td>
+        <td>{{ item.description }}</td>
+        <td class="mono">{{ ", ".join(item.tags or []) }}</td>
+        <td>
+          <form method="post" action="/skills/market/install">
+            <input type="hidden" name="skill_ref" value="{{ item.id }}" />
+            <input type="hidden" name="target" value="workspace" />
+            <button class="btn" type="submit">Install</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      {% else %}
+      <tr><td colspan="4" class="dim">No cached marketplace entries. Use API with refresh=true first.</td></tr>
       {% endif %}
     </tbody>
   </table>

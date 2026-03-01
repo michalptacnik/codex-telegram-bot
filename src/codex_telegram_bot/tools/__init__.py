@@ -32,6 +32,14 @@ from codex_telegram_bot.tools.memory import (
 from codex_telegram_bot.tools.message import SendMessageTool
 from codex_telegram_bot.tools.provider import ProviderStatusTool, ProviderSwitchTool
 from codex_telegram_bot.tools.schedule import ScheduleTaskTool, ListSchedulesTool, CancelScheduleTool
+from codex_telegram_bot.tools.skill_market import (
+    SkillsMarketDisableTool,
+    SkillsMarketEnableTool,
+    SkillsMarketInstallTool,
+    SkillsMarketRemoveTool,
+    SkillsMarketSearchTool,
+    SkillsMarketSourcesListTool,
+)
 from codex_telegram_bot.tools.sessions import (
     SessionsListTool,
     SessionsHistoryTool,
@@ -52,6 +60,7 @@ def build_default_tool_registry(
     process_manager=None,
     access_controller=None,
     proactive_messenger=None,
+    skill_marketplace=None,
 ) -> ToolRegistry:
     """Build the default tool registry.
 
@@ -117,6 +126,13 @@ def build_default_tool_registry(
     registry.register(TaskCreateTool())
     registry.register(TaskListTool())
     registry.register(TaskDoneTool())
+    if skill_marketplace is not None:
+        registry.register(SkillsMarketSourcesListTool(skill_marketplace))
+        registry.register(SkillsMarketSearchTool(skill_marketplace))
+        registry.register(SkillsMarketInstallTool(skill_marketplace))
+        registry.register(SkillsMarketEnableTool(skill_marketplace))
+        registry.register(SkillsMarketDisableTool(skill_marketplace))
+        registry.register(SkillsMarketRemoveTool(skill_marketplace))
     # MCP tools (Issue #103)
     if mcp_bridge is not None:
         from codex_telegram_bot.services.mcp_bridge import McpSearchTool, McpCallTool
@@ -164,6 +180,12 @@ __all__ = [
     "TaskCreateTool",
     "TaskListTool",
     "TaskDoneTool",
+    "SkillsMarketSourcesListTool",
+    "SkillsMarketSearchTool",
+    "SkillsMarketInstallTool",
+    "SkillsMarketEnableTool",
+    "SkillsMarketDisableTool",
+    "SkillsMarketRemoveTool",
     "SendMessageTool",
     "SessionsListTool",
     "SessionsHistoryTool",

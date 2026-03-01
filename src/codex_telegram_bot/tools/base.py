@@ -370,6 +370,70 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": [],
         },
     },
+    "skills_market_sources_list": {
+        "name": "skills_market_sources_list",
+        "description": "List configured skill marketplace sources.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    "skills_market_search": {
+        "name": "skills_market_search",
+        "description": "Search remote skill marketplace catalogs.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query"},
+                "source": {"type": "string", "description": "Optional source name"},
+                "refresh": {"type": "boolean", "description": "Force catalog refresh"},
+            },
+            "required": ["query"],
+        },
+    },
+    "skills_market_install": {
+        "name": "skills_market_install",
+        "description": "Install marketplace skill by id or install_ref JSON.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "Catalog entry id"},
+                "install_ref": {"type": "string", "description": "Raw install ref JSON"},
+                "target": {"type": "string", "description": "workspace or global"},
+            },
+            "required": [],
+        },
+    },
+    "skills_market_enable": {
+        "name": "skills_market_enable",
+        "description": "Enable installed marketplace skill after verification.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Skill name/id"},
+            },
+            "required": ["name"],
+        },
+    },
+    "skills_market_disable": {
+        "name": "skills_market_disable",
+        "description": "Disable installed marketplace skill.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Skill name/id"},
+            },
+            "required": ["name"],
+        },
+    },
+    "skills_market_remove": {
+        "name": "skills_market_remove",
+        "description": "Remove installed marketplace skill files.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Skill name/id"},
+            },
+            "required": ["name"],
+        },
+    },
     "send_email_smtp": {
         "name": "send_email_smtp",
         "description": "Send an email via SMTP.",

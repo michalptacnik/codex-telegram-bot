@@ -57,6 +57,11 @@ class SkillInstallRequest(BaseModel):
     source_url: str
 
 
+class SkillMarketInstallRequest(BaseModel):
+    skill_ref: str
+    target: str = "workspace"
+
+
 class ExecutionProfileRequest(BaseModel):
     profile: str
     user_id: int = 0
@@ -1147,6 +1152,48 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         _opt_api_scope(request)
         return agent_service.list_skills()
 
+    @app.get("/api/skills/market/sources")
+    async def api_skills_market_sources(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        return {"items": agent_service.skills_market_sources_list()}
+
+    @app.get("/api/skills/market/search")
+    async def api_skills_market_search(request: Request, query: str = "", source: str = "", refresh: bool = False) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        return {"items": agent_service.skills_market_search(query=query, source=source, refresh=refresh)}
+
+    @app.post("/api/skills/market/install")
+    async def api_skills_market_install(request: Request, req: SkillMarketInstallRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.skills_market_install(skill_ref=req.skill_ref, target=req.target)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/skills/market/{name}/enable")
+    async def api_skills_market_enable(request: Request, name: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.skills_market_enable(name=name)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/skills/market/{name}/disable")
+    async def api_skills_market_disable(request: Request, name: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.skills_market_disable(name=name)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @app.post("/api/skills/market/{name}/remove")
+    async def api_skills_market_remove(request: Request, name: str) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        try:
+            return agent_service.skills_market_remove(name=name)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     @app.post("/api/skills/install")
     async def api_skills_install(request: Request, req: SkillInstallRequest) -> Dict[str, Any]:
         _opt_api_scope(request, write_scope="admin:*")
@@ -1503,15 +1550,56 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     @app.get("/skills", response_class=HTMLResponse)
     async def skills_page(request: Request, error: str = ""):
         skills = agent_service.list_skills()
+        market_sources = agent_service.skills_market_sources_list()
+        market_items = agent_service.skills_market_search(query="", source="", refresh=False)
         return templates.TemplateResponse(
             "skills.html",
-            {"request": request, "nav": "skills", "skills": skills, "error": error},
+            {
+                "request": request,
+                "nav": "skills",
+                "skills": skills,
+                "error": error,
+                "market_sources": market_sources,
+                "market_items": market_items,
+            },
         )
 
     @app.post("/skills/install")
     async def skills_install_form(source_url: str = Form(...)):
         try:
             agent_service.install_skill_from_url(source_url)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
+
+    @app.post("/skills/market/install")
+    async def skills_market_install_form(skill_ref: str = Form(...), target: str = Form("workspace")):
+        try:
+            agent_service.skills_market_install(skill_ref=skill_ref, target=target)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
+
+    @app.post("/skills/market/{name}/enable")
+    async def skills_market_enable_form(name: str):
+        try:
+            agent_service.skills_market_enable(name=name)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
+
+    @app.post("/skills/market/{name}/disable")
+    async def skills_market_disable_form(name: str):
+        try:
+            agent_service.skills_market_disable(name=name)
+        except Exception as exc:
+            return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/skills", status_code=303)
+
+    @app.post("/skills/market/{name}/remove")
+    async def skills_market_remove_form(name: str):
+        try:
+            agent_service.skills_market_remove(name=name)
         except Exception as exc:
             return RedirectResponse(url=f"/skills?error={str(exc)}", status_code=303)
         return RedirectResponse(url="/skills", status_code=303)

@@ -333,6 +333,40 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"session_id": "string (optional)", "dry_run": "bool (optional)"},
     },
+    "skills_market_sources_list": {
+        "name": "skills_market_sources_list",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "skills_market_search": {
+        "name": "skills_market_search",
+        "protocol": "!tool",
+        "args": {"query": "string (required)", "source": "string (optional)", "refresh": "bool (optional)"},
+    },
+    "skills_market_install": {
+        "name": "skills_market_install",
+        "protocol": "!tool",
+        "args": {
+            "skill_id": "string (optional)",
+            "install_ref": "string (optional)",
+            "target": "string (optional; workspace|global)",
+        },
+    },
+    "skills_market_enable": {
+        "name": "skills_market_enable",
+        "protocol": "!tool",
+        "args": {"name": "string (required)"},
+    },
+    "skills_market_disable": {
+        "name": "skills_market_disable",
+        "protocol": "!tool",
+        "args": {"name": "string (required)"},
+    },
+    "skills_market_remove": {
+        "name": "skills_market_remove",
+        "protocol": "!tool",
+        "args": {"name": "string (required)"},
+    },
     # MCP tools (Issue #103)
     "mcp_search": {
         "name": "mcp_search",
@@ -421,6 +455,7 @@ class AgentService:
         tool_policy_engine: Optional[Any] = None,
         process_manager: Optional[ProcessManager] = None,
         proactive_messenger: Optional[ProactiveMessenger] = None,
+        skill_marketplace: Optional[Any] = None,
         config_dir: Optional[Path] = None,
         execution_profile_manager: Optional[ExecutionProfileManager] = None,
     ):
@@ -458,6 +493,7 @@ class AgentService:
         self._tool_policy_engine = tool_policy_engine
         self._process_manager = process_manager or ProcessManager(run_store=run_store)
         self._proactive_messenger = proactive_messenger
+        self._skill_marketplace = skill_marketplace
         self._config_dir = config_dir.expanduser().resolve() if config_dir is not None else None
         self._execution_profile_manager = execution_profile_manager or ExecutionProfileManager(
             store=run_store,
@@ -2634,6 +2670,7 @@ class AgentService:
             "probe_loop_enabled": bool(self._probe_loop is not None),
             "mcp_bridge_enabled": bool(self._mcp_bridge is not None),
             "skill_packs_enabled": bool(self._skill_pack_loader is not None),
+            "skill_marketplace_enabled": bool(self._skill_marketplace is not None),
             "tool_policy_enabled": bool(self._tool_policy_engine is not None),
             "execution_profile": profile_state.get("profile", PROFILE_SAFE),
             "unsafe_active": bool(profile_state.get("unsafe_active", False)),
@@ -4030,6 +4067,11 @@ class AgentService:
                     "enabled": bool(row.enabled),
                     "source": row.source,
                     "trusted": bool(row.trusted),
+                    "version": str(getattr(row, "version", "") or ""),
+                    "tags": list(getattr(row, "tags", []) or []),
+                    "verified": bool(getattr(row, "verified", False)),
+                    "publisher": str(getattr(row, "publisher", "") or ""),
+                    "public_key_id": str(getattr(row, "public_key_id", "") or ""),
                 }
             )
         return out
@@ -4048,6 +4090,11 @@ class AgentService:
             "enabled": bool(row.enabled),
             "source": row.source,
             "trusted": bool(row.trusted),
+            "version": str(getattr(row, "version", "") or ""),
+            "tags": list(getattr(row, "tags", []) or []),
+            "verified": bool(getattr(row, "verified", False)),
+            "publisher": str(getattr(row, "publisher", "") or ""),
+            "public_key_id": str(getattr(row, "public_key_id", "") or ""),
         }
 
     def set_skill_enabled(self, skill_id: str, enabled: bool) -> Dict[str, Any]:
@@ -4066,7 +4113,42 @@ class AgentService:
             "enabled": bool(row.enabled),
             "source": row.source,
             "trusted": bool(row.trusted),
+            "version": str(getattr(row, "version", "") or ""),
+            "tags": list(getattr(row, "tags", []) or []),
+            "verified": bool(getattr(row, "verified", False)),
+            "publisher": str(getattr(row, "publisher", "") or ""),
+            "public_key_id": str(getattr(row, "public_key_id", "") or ""),
         }
+
+    def skills_market_sources_list(self) -> List[Dict[str, Any]]:
+        if self._skill_marketplace is None:
+            return []
+        return list(self._skill_marketplace.sources_list())
+
+    def skills_market_search(self, query: str, source: str = "", refresh: bool = False) -> List[Dict[str, Any]]:
+        if self._skill_marketplace is None:
+            return []
+        return list(self._skill_marketplace.search(query=query, source=source, refresh=refresh, limit=50))
+
+    def skills_market_install(self, skill_ref: str, target: str = "workspace") -> Dict[str, Any]:
+        if self._skill_marketplace is None:
+            raise ValueError("Skill marketplace is not configured.")
+        return dict(self._skill_marketplace.install(skill_ref=skill_ref, target=target))
+
+    def skills_market_enable(self, name: str) -> Dict[str, Any]:
+        if self._skill_marketplace is None:
+            raise ValueError("Skill marketplace is not configured.")
+        return dict(self._skill_marketplace.enable(skill_id=name))
+
+    def skills_market_disable(self, name: str) -> Dict[str, Any]:
+        if self._skill_marketplace is None:
+            raise ValueError("Skill marketplace is not configured.")
+        return dict(self._skill_marketplace.disable(skill_id=name))
+
+    def skills_market_remove(self, name: str) -> Dict[str, Any]:
+        if self._skill_marketplace is None:
+            raise ValueError("Skill marketplace is not configured.")
+        return dict(self._skill_marketplace.remove(skill_id=name))
 
     def available_provider_names(self) -> List[str]:
         registry = self._provider_registry

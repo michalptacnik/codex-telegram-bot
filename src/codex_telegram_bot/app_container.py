@@ -33,6 +33,7 @@ from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.mcp_bridge import McpBridge, _mcp_enabled
 from codex_telegram_bot.services.execution_profile import ExecutionProfileManager
 from codex_telegram_bot.services.skill_manager import SkillManager
+from codex_telegram_bot.services.skill_marketplace import SkillMarketplace
 from codex_telegram_bot.services.skill_pack import SkillPackLoader
 from codex_telegram_bot.services.tool_policy import ToolPolicyEngine
 from codex_telegram_bot.services.toolchain import agent_toolchain_status
@@ -110,6 +111,12 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         logger.info("state_db_path=%s", str(state_db_path.expanduser().resolve()))
     run_store = SqliteRunStore(db_path=state_db_path) if state_db_path is not None else None
     process_manager = ProcessManager(run_store=run_store)
+    skill_marketplace = SkillMarketplace(
+        store=run_store,
+        skill_manager=skill_manager,
+        workspace_root=workspace_root,
+        config_dir=resolved_config_dir,
+    )
 
     proactive_messenger = ProactiveMessenger()
 
@@ -121,6 +128,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         process_manager=process_manager,
         access_controller=access_controller,
         proactive_messenger=proactive_messenger,
+        skill_marketplace=skill_marketplace,
     )
     probe_loop: Optional[ProbeLoop] = None
     if (os.environ.get("ENABLE_PROBE_LOOP") or "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -150,6 +158,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         tool_policy_engine=tool_policy_engine,
         process_manager=process_manager,
         proactive_messenger=proactive_messenger,
+        skill_marketplace=skill_marketplace,
         config_dir=resolved_config_dir,
     )
 
