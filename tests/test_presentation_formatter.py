@@ -66,6 +66,26 @@ class TestPresentationFormatter(unittest.TestCase):
         for fragment in ("First sentence.", "Second sentence!", "Third sentence?", "Plan:", "1) ship patch"):
             self.assertIn(_canonical(fragment), canon_formatted)
 
+    def test_optional_probe_caps_growth(self):
+        source = "Plan:\n1) a"
+        no_probe = format_message(
+            source,
+            channel="web",
+            style={"emoji": "off", "emphasis": "light", "brevity": "short"},
+            enable_polish_probe=False,
+        )
+        with_probe = format_message(
+            source,
+            channel="web",
+            style={"emoji": "off", "emphasis": "light", "brevity": "short"},
+            enable_polish_probe=True,
+        )
+        self.assertGreater(len(no_probe.formatted_text), len(source))
+        cap = max(len(source), int(len(source) * 1.05))
+        self.assertLessEqual(len(with_probe.formatted_text), cap)
+        self.assertTrue(with_probe.safety_report.get("probe_enabled"))
+        self.assertIn("polish_probe", with_probe.safety_report.get("applied", []))
+
 
 if __name__ == "__main__":
     unittest.main()

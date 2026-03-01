@@ -54,6 +54,7 @@ def format_message(
     *,
     channel: str,
     style: Optional[Dict[str, Any]] = None,
+    enable_polish_probe: Optional[bool] = None,
 ) -> FormattedMessage:
     source = str(raw_text or "").strip()
     if not source:
@@ -81,9 +82,9 @@ def format_message(
     if with_emoji != polished:
         applied.append("emoji")
 
-    if ENABLE_POLISH_PROBE:
-        # Reserved for optional low-cost formatting-only probe. Default stays heuristic-only.
-        applied.append("polish_probe_skipped")
+    probe_enabled = ENABLE_POLISH_PROBE if enable_polish_probe is None else bool(enable_polish_probe)
+    if probe_enabled:
+        with_emoji = _apply_probe_cap(with_emoji, source, applied)
 
     channel_key = str(channel or "web").strip().lower()
     if channel_key == "telegram":
@@ -99,7 +100,7 @@ def format_message(
         "output_chars": len(rendered),
         "emoji_count": int(emoji_count),
         "applied": applied,
-        "probe_enabled": bool(ENABLE_POLISH_PROBE),
+        "probe_enabled": bool(probe_enabled),
     }
     return FormattedMessage(formatted_text=rendered, parse_mode=parse_mode, safety_report=report)
 
@@ -278,3 +279,12 @@ def _extract_error_code(raw: str) -> str:
         return "ERROR"
     return "E_TOOL"
 
+
+def _apply_probe_cap(text: str, source: str, applied: List[str]) -> str:
+    applied.append("polish_probe")
+    base_len = max(1, len(source))
+    cap = max(base_len, int(base_len * 1.05))
+    if len(text) <= cap:
+        return text
+    applied.append("polish_probe_length_cap")
+    return text[:cap].rstrip()
