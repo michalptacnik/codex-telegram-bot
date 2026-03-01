@@ -22,6 +22,7 @@ from codex_telegram_bot.tools.base import (
     ToolRequest,
     ToolResult,
 )
+from codex_telegram_bot.services.continuation_guard import PRELIMINARY_TERMINAL_FALLBACK
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
 from codex_telegram_bot.tools.git import GitStatusTool
 from codex_telegram_bot.providers.openai_compatible import _convert_openai_response_to_anthropic
@@ -269,6 +270,27 @@ class TestNativeToolLoop(unittest.IsolatedAsyncioTestCase):
         second_messages = provider.calls[1]["messages"]
         self.assertEqual(second_messages[-1]["role"], "user")
         self.assertIn("preliminary progress update", str(second_messages[-1]["content"]).lower())
+
+    async def test_preliminary_text_is_sanitized_when_retry_budget_exhausted(self):
+        preliminary = (
+            "I'll continue executing the task to set up the DeepSeek bot. "
+            "Let me check what's been done so far and continue with the setup."
+        )
+        provider = _FakeProvider([
+            {"content": [{"type": "text", "text": preliminary}], "stop_reason": "end_turn", "usage": {}},
+            {"content": [{"type": "text", "text": preliminary}], "stop_reason": "end_turn", "usage": {}},
+            {"content": [{"type": "text", "text": preliminary}], "stop_reason": "end_turn", "usage": {}},
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._make_service(provider, Path(tmp))
+            result = await service.run_native_tool_loop(
+                user_message="continue setup",
+                chat_id=1,
+                user_id=1,
+                session_id="test-sess",
+            )
+        self.assertEqual(result, PRELIMINARY_TERMINAL_FALLBACK)
+        self.assertEqual(len(provider.calls), 3)
 
     async def test_tool_call_then_final_reply(self):
         """Model calls a tool, gets result, then gives final reply."""

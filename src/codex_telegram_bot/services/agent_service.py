@@ -45,6 +45,7 @@ from codex_telegram_bot.services.continuation_guard import (
     auto_continue_preliminary_max_passes,
     continuation_status_line,
     looks_like_preliminary_report,
+    sanitize_terminal_output,
 )
 from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
@@ -791,6 +792,7 @@ class AgentService:
                     )
                     messages.append({"role": "user", "content": PRELIMINARY_CONTINUE_PROMPT})
                     continue
+                final_reply = sanitize_terminal_output(final_reply)
                 await self._notify_progress(progress_callback, {"event": "native_loop.finished", "turns": turn + 1})
                 return self.enforce_transport_text_contract(session_id=session_id, raw_output=final_reply)
 
@@ -2039,6 +2041,7 @@ class AgentService:
                 progress_callback=progress_callback,
                 autonomy_depth=1,
             )
+        output = sanitize_terminal_output(output)
         output = self.enforce_transport_text_contract(
             session_id=session_id,
             raw_output=(output or "").strip() or "(no output)",

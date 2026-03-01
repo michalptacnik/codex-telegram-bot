@@ -12,6 +12,11 @@ PRELIMINARY_CONTINUE_PROMPT = (
     "Return only when either (a) the task is done with concrete results, or (b) you are blocked and ask one short question."
 )
 
+PRELIMINARY_TERMINAL_FALLBACK = (
+    "I have not finished this task yet. I paused to avoid sending another preliminary progress report. "
+    "Reply with 'continue' and I will resume immediately from the current state."
+)
+
 _PRELIM_MARKERS = (
     "still working",
     "i'm working",
@@ -95,6 +100,15 @@ def continuation_status_line(previous_text: str) -> str:
     return "I am continuing the task now."
 
 
+def sanitize_terminal_output(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return raw
+    if looks_like_preliminary_report(raw):
+        return PRELIMINARY_TERMINAL_FALLBACK
+    return raw
+
+
 def _looks_like_blocking_question(text: str) -> bool:
     raw = str(text or "").strip()
     if not raw:
@@ -104,4 +118,3 @@ def _looks_like_blocking_question(text: str) -> bool:
     first = raw.splitlines()[0].strip().lower()
     starters = ("can you", "should i", "do you want", "which ", "what ", "where ")
     return any(first.startswith(marker) for marker in starters)
-

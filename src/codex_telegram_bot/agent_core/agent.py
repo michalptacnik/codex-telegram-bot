@@ -11,6 +11,7 @@ from codex_telegram_bot.services.continuation_guard import (
     auto_continue_preliminary_max_passes,
     continuation_status_line,
     looks_like_preliminary_report,
+    sanitize_terminal_output,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +75,7 @@ class Agent:
                 agent_id=agent_id,
                 progress_callback=progress_callback,
             )
+        output = sanitize_terminal_output(output)
         safe_output = self._agent_service.enforce_transport_text_contract(
             session_id=session.session_id,
             raw_output=output,

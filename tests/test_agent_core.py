@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.agent_core.memory import resolve_memory_config
+from codex_telegram_bot.services.continuation_guard import PRELIMINARY_TERMINAL_FALLBACK
 
 
 class _Session:
@@ -66,6 +67,24 @@ class TestAgentCore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.output, "Final: completed with concrete result.")
         self.assertEqual(router.route_prompt.await_count, 2)
         self.assertEqual(service.appended_assistant, [("sess-123", "Final: completed with concrete result.")])
+
+    async def test_agent_sanitizes_terminal_preliminary_after_retry_budget(self):
+        service = _StubService()
+        router = type("MockRouter", (), {})()
+        router.route_prompt = AsyncMock(
+            side_effect=[
+                "I'll continue executing this task. Let me check one more thing.",
+                "I'll continue executing this task. Let me check one more thing.",
+                "I'll continue executing this task. Let me check one more thing.",
+            ]
+        )
+        agent = Agent(agent_service=service, router=router)
+
+        result = await agent.handle_message(chat_id=1, user_id=2, text="do work")
+
+        self.assertEqual(router.route_prompt.await_count, 3)
+        self.assertEqual(result.output, PRELIMINARY_TERMINAL_FALLBACK)
+        self.assertEqual(service.appended_assistant, [("sess-123", PRELIMINARY_TERMINAL_FALLBACK)])
 
     async def test_agent_reset_delegates_to_service(self):
         service = _StubService()
