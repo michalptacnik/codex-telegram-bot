@@ -218,6 +218,48 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["patch"],
         },
     },
+    "task_create": {
+        "name": "task_create",
+        "description": "Create a task and add an obligation pointer in memory index.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Task title"},
+                "due": {"type": "string", "description": "Optional due date YYYY-MM-DD"},
+                "details": {"type": "string", "description": "Optional details"},
+                "tags": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "Optional tags",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    "task_list": {
+        "name": "task_list",
+        "description": "List tasks from memory/pages/tasks.md.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filter": {"type": "string", "description": "Optional filter query"},
+            },
+            "required": [],
+        },
+    },
+    "task_done": {
+        "name": "task_done",
+        "description": "Mark a task as completed.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task id like T20260301-0001"},
+            },
+            "required": ["task_id"],
+        },
+    },
     "web_search": {
         "name": "web_search",
         "description": "Search the public web and return source links with snippets.",

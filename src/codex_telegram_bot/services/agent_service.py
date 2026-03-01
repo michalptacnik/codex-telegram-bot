@@ -253,6 +253,26 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"patch": "object (required)"},
     },
+    "task_create": {
+        "name": "task_create",
+        "protocol": "!tool",
+        "args": {
+            "title": "string (required)",
+            "due": "string (optional; YYYY-MM-DD)",
+            "details": "string (optional)",
+            "tags": "string or list[string] (optional)",
+        },
+    },
+    "task_list": {
+        "name": "task_list",
+        "protocol": "!tool",
+        "args": {"filter": "string (optional)"},
+    },
+    "task_done": {
+        "name": "task_done",
+        "protocol": "!tool",
+        "args": {"task_id": "string (required)"},
+    },
     "web_search": {
         "name": "web_search",
         "protocol": "!tool",

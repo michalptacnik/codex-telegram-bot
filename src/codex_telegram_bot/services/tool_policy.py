@@ -7,7 +7,7 @@ Group aliases:
   filesystem  — read_file, write_file
   runtime     — shell_exec, exec
   sessions    — sessions_list, sessions_history, sessions_send, sessions_spawn, session_status
-  memory      — memory_get, memory_search, memory_index_get, memory_pointer_open, memory_page_list, memory_append_daily, memory_index_update
+  memory      — memory_get, memory_search, memory_index_get, memory_pointer_open, memory_page_list, memory_append_daily, memory_index_update, task_create, task_list, task_done
   web         — web_search, mcp_search, mcp_call
   git         — git_status, git_diff, git_log, git_add, git_commit
 
@@ -47,6 +47,9 @@ TOOL_GROUPS: Dict[str, List[str]] = {
         "memory_page_list",
         "memory_append_daily",
         "memory_index_update",
+        "task_create",
+        "task_list",
+        "task_done",
     ],
     "web": ["web_search", "web_fetch", "mcp_search", "mcp_call"],
     "git": ["git_status", "git_diff", "git_log", "git_add", "git_commit"],

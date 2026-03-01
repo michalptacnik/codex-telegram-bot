@@ -50,6 +50,18 @@ class ThinMemoryIndex:
 
 
 @dataclass(frozen=True)
+class TaskItem:
+    task_id: str
+    done: bool
+    title: str
+    due: str = ""
+    tags: List[str] = field(default_factory=list)
+    details: str = ""
+    created_at: str = ""
+    done_at: str = ""
+
+
+@dataclass(frozen=True)
 class MemoryLayout:
     root: Path
     memory_dir: Path
@@ -330,6 +342,130 @@ class ThinMemoryStore:
             )
         return out
 
+    def tasks_page_path(self) -> Path:
+        path = self._layout.pages_dir / "tasks.md"
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# Tasks\n\n", encoding="utf-8")
+        return path
+
+    def list_tasks(self, filter_text: str = "") -> List[TaskItem]:
+        text = self.tasks_page_path().read_text(encoding="utf-8", errors="replace")
+        tasks = _parse_tasks_md(text)
+        query = (filter_text or "").strip().lower()
+        if not query:
+            return tasks
+        out: List[TaskItem] = []
+        for task in tasks:
+            blob = " ".join(
+                [
+                    task.task_id,
+                    task.title,
+                    task.due,
+                    ",".join(task.tags),
+                    task.details,
+                    ("done" if task.done else "open"),
+                ]
+            ).lower()
+            if query in blob:
+                out.append(task)
+        return out
+
+    def create_task(
+        self,
+        *,
+        title: str,
+        due: str = "",
+        details: str = "",
+        tags: Optional[List[str]] = None,
+    ) -> TaskItem:
+        normalized_title = (title or "").strip()
+        if not normalized_title:
+            raise ValueError("title is required")
+        clean_tags = [str(x).strip().lower() for x in list(tags or []) if str(x).strip()]
+        task_id = _next_task_id(self.list_tasks(), on_date=date.today())
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        line = _render_task_line(
+            TaskItem(
+                task_id=task_id,
+                done=False,
+                title=normalized_title,
+                due=(due or "").strip(),
+                tags=clean_tags,
+                details=(details or "").strip(),
+                created_at=created_at,
+                done_at="",
+            )
+        )
+        path = self.tasks_page_path()
+        existing = path.read_text(encoding="utf-8", errors="replace")
+        path.write_text(existing.rstrip() + "\n" + line + "\n", encoding="utf-8")
+
+        pointer_target = "memory/pages/tasks.md#" + task_id.lower()
+        patch = {
+            "obligations": {
+                "upsert": [
+                    {
+                        "obligation_id": task_id,
+                        "text": normalized_title,
+                        "due": (due or "").strip(),
+                        "ref": pointer_target,
+                    }
+                ]
+            },
+            "pointers": {"set": {task_id: pointer_target}},
+        }
+        self.update_index_patch(patch)
+        return TaskItem(
+            task_id=task_id,
+            done=False,
+            title=normalized_title,
+            due=(due or "").strip(),
+            tags=clean_tags,
+            details=(details or "").strip(),
+            created_at=created_at,
+            done_at="",
+        )
+
+    def mark_task_done(self, task_id: str) -> TaskItem:
+        normalized = (task_id or "").strip()
+        if not normalized:
+            raise ValueError("task_id is required")
+        path = self.tasks_page_path()
+        tasks = self.list_tasks()
+        target = next((t for t in tasks if t.task_id == normalized), None)
+        if target is None:
+            raise ValueError("task not found")
+        if target.done:
+            return target
+        done_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        updated = TaskItem(
+            task_id=target.task_id,
+            done=True,
+            title=target.title,
+            due=target.due,
+            tags=list(target.tags),
+            details=target.details,
+            created_at=target.created_at,
+            done_at=done_at,
+        )
+        refreshed: List[TaskItem] = []
+        for task in tasks:
+            if task.task_id == normalized:
+                refreshed.append(updated)
+            else:
+                refreshed.append(task)
+        lines = ["# Tasks", ""]
+        for task in refreshed:
+            lines.append(_render_task_line(task))
+        path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        self.update_index_patch(
+            {
+                "obligations": {"remove": [normalized]},
+            }
+        )
+        return updated
+
     def open_pointer(self, pointer_id: str, max_chars: int = 12_000) -> Dict[str, str]:
         normalized_pointer = (pointer_id or "").strip()
         if not normalized_pointer:
@@ -583,3 +719,76 @@ def _upsert_pointer(index: ThinMemoryIndex, pointer_id: str, target: str) -> Non
         else:
             raise ValueError("pointer section is full")
     index.pointers[pid] = tgt
+
+
+def _parse_tasks_md(content: str) -> List[TaskItem]:
+    out: List[TaskItem] = []
+    for raw_line in (content or "").splitlines():
+        line = raw_line.strip()
+        m = re.match(r"^- \[( |x)\]\s+([A-Za-z0-9_-]+)\s+\|\s+(.+)$", line)
+        if not m:
+            continue
+        done = m.group(1) == "x"
+        task_id = m.group(2).strip()
+        tail = m.group(3).strip()
+        parts = [p.strip() for p in tail.split("|")]
+        title = parts[0] if parts else ""
+        due = ""
+        tags: List[str] = []
+        details = ""
+        created_at = ""
+        done_at = ""
+        for part in parts[1:]:
+            lowered = part.lower()
+            if lowered.startswith("due:"):
+                due = part[4:].strip()
+            elif lowered.startswith("tags:"):
+                tags = [x.strip().lower() for x in part[5:].split(",") if x.strip()]
+            elif lowered.startswith("details:"):
+                details = part[8:].strip()
+            elif lowered.startswith("created:"):
+                created_at = part[8:].strip()
+            elif lowered.startswith("done:"):
+                done_at = part[5:].strip()
+        out.append(
+            TaskItem(
+                task_id=task_id,
+                done=done,
+                title=title,
+                due=due,
+                tags=tags,
+                details=details,
+                created_at=created_at,
+                done_at=done_at,
+            )
+        )
+    return out
+
+
+def _next_task_id(tasks: List[TaskItem], on_date: date) -> str:
+    prefix = "T" + on_date.strftime("%Y%m%d") + "-"
+    max_num = 0
+    for task in tasks:
+        if not task.task_id.startswith(prefix):
+            continue
+        tail = task.task_id[len(prefix):]
+        if not tail.isdigit():
+            continue
+        max_num = max(max_num, int(tail))
+    return prefix + f"{max_num + 1:04d}"
+
+
+def _render_task_line(task: TaskItem) -> str:
+    check = "x" if task.done else " "
+    parts = [task.title]
+    if task.due:
+        parts.append(f"due: {task.due}")
+    if task.tags:
+        parts.append(f"tags: {','.join(task.tags)}")
+    if task.details:
+        parts.append(f"details: {task.details}")
+    if task.created_at:
+        parts.append(f"created: {task.created_at}")
+    if task.done and task.done_at:
+        parts.append(f"done: {task.done_at}")
+    return f"- [{check}] {task.task_id} | " + " | ".join(parts)

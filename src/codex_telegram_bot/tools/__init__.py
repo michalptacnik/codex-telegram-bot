@@ -41,6 +41,7 @@ from codex_telegram_bot.tools.sessions import (
 )
 from codex_telegram_bot.tools.shell import ShellExecTool
 from codex_telegram_bot.tools.ssh import SshDetectionTool
+from codex_telegram_bot.tools.tasks import TaskCreateTool, TaskDoneTool, TaskListTool
 from codex_telegram_bot.tools.web import WebSearchTool, WebFetchTool, web_search_tool_enabled
 
 
@@ -113,6 +114,9 @@ def build_default_tool_registry(
     registry.register(MemoryPointerOpenTool())
     registry.register(MemoryAppendDailyTool())
     registry.register(MemoryIndexUpdateTool())
+    registry.register(TaskCreateTool())
+    registry.register(TaskListTool())
+    registry.register(TaskDoneTool())
     # MCP tools (Issue #103)
     if mcp_bridge is not None:
         from codex_telegram_bot.services.mcp_bridge import McpSearchTool, McpCallTool
@@ -157,6 +161,9 @@ __all__ = [
     "MemoryPointerOpenTool",
     "MemoryAppendDailyTool",
     "MemoryIndexUpdateTool",
+    "TaskCreateTool",
+    "TaskListTool",
+    "TaskDoneTool",
     "SendMessageTool",
     "SessionsListTool",
     "SessionsHistoryTool",

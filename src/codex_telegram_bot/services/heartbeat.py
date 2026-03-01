@@ -189,6 +189,17 @@ class HeartbeatStore:
             for row in due_obligations[:5]:
                 lines.append(f"- {row}")
             return HeartbeatDecision(action="ACTION", text="\n".join(lines))
+        open_due_tasks = []
+        for task in memory.list_tasks(filter_text=""):
+            if task.done:
+                continue
+            if task.due and task.due <= today:
+                open_due_tasks.append(f"{task.task_id}: {task.title} (due {task.due})")
+        if open_due_tasks:
+            lines = ["Heartbeat check: tasks due or overdue:"]
+            for row in open_due_tasks[:5]:
+                lines.append(f"- {row}")
+            return HeartbeatDecision(action="ACTION", text="\n".join(lines))
         if cfg.daily:
             lines = ["Heartbeat check: daily checklist"]
             for row in cfg.daily[:4]:
