@@ -6,7 +6,7 @@ from pathlib import Path
 from codex_telegram_bot.tools import build_default_tool_registry
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
-from codex_telegram_bot.tools.web import WebSearchTool
+from codex_telegram_bot.tools.web import WebSearchTool, WebFetchTool
 
 
 class TestFileTools(unittest.TestCase):
@@ -138,3 +138,77 @@ class TestWebSearchTool(unittest.TestCase):
         )
         self.assertFalse(res.ok)
         self.assertIn("query is required", res.output)
+
+
+class _FakeHeaders(dict):
+    def get_content_charset(self):
+        return "utf-8"
+
+
+class _FakeResponse:
+    def __init__(self, body: bytes, content_type: str, final_url: str):
+        self._body = body
+        self.headers = _FakeHeaders({"Content-Type": content_type})
+        self._final_url = final_url
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, _n: int = -1):
+        return self._body
+
+    def geturl(self):
+        return self._final_url
+
+
+class _FakeOpener:
+    def __init__(self, response):
+        self._response = response
+
+    def open(self, _req, timeout=10):
+        return self._response
+
+
+class TestWebFetchTool(unittest.TestCase):
+    def test_web_fetch_blocks_localhost_targets(self):
+        tool = WebFetchTool()
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 0))]):
+            res = tool.run(
+                ToolRequest(name="web_fetch", args={"url": "http://127.0.0.1/"}),
+                ToolContext(workspace_root=Path.cwd()),
+            )
+        self.assertFalse(res.ok)
+        self.assertIn("blocked", res.output.lower())
+
+    def test_web_fetch_rejects_non_text_content_type(self):
+        tool = WebFetchTool()
+        fake_response = _FakeResponse(body=b"\x89PNG", content_type="image/png", final_url="https://example.com/img.png")
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
+            with patch("urllib.request.build_opener", return_value=_FakeOpener(fake_response)):
+                res = tool.run(
+                    ToolRequest(name="web_fetch", args={"url": "https://example.com/img.png"}),
+                    ToolContext(workspace_root=Path.cwd()),
+                )
+        self.assertFalse(res.ok)
+        self.assertIn("unsupported content type", res.output.lower())
+
+    def test_web_fetch_extracts_readable_text(self):
+        html = b"""\
+<!doctype html><html><head><title>Article Title</title></head>
+<body><nav>ignore me</nav><main><h1>Article Title</h1><p>Hello world from article body.</p></main></body></html>
+"""
+        tool = WebFetchTool()
+        fake_response = _FakeResponse(body=html, content_type="text/html", final_url="https://example.com/article")
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("93.184.216.34", 0))]):
+            with patch("urllib.request.build_opener", return_value=_FakeOpener(fake_response)):
+                res = tool.run(
+                    ToolRequest(name="web_fetch", args={"url": "https://example.com/article", "max_chars": 200}),
+                    ToolContext(workspace_root=Path.cwd()),
+                )
+        self.assertTrue(res.ok, msg=res.output)
+        payload = __import__("json").loads(res.output)
+        self.assertEqual(payload["title"], "Article Title")
+        self.assertIn("Hello world", payload["text"])

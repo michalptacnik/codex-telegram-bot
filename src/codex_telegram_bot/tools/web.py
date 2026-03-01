@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import ipaddress
+import socket
+from html.parser import HTMLParser
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
 
@@ -144,3 +147,178 @@ class WebSearchTool:
             if snippet:
                 lines.append(f"   {snippet}")
         return ToolResult(ok=True, output="\n".join(lines))
+
+
+class _ReadableHtmlParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._skip_stack: List[str] = []
+        self._title_capture = False
+        self.title = ""
+        self.text_parts: List[str] = []
+        self._skip_tags = {"script", "style", "noscript", "nav", "svg", "footer", "header"}
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        t = (tag or "").lower()
+        if t == "title":
+            self._title_capture = True
+            return
+        if t in self._skip_tags:
+            self._skip_stack.append(t)
+            return
+        attrs_map = {str(k or "").lower(): str(v or "").lower() for k, v in attrs}
+        role = attrs_map.get("role", "")
+        klass = attrs_map.get("class", "")
+        if role in {"navigation", "banner", "contentinfo"} or "nav" in klass:
+            self._skip_stack.append(t or "div")
+
+    def handle_endtag(self, tag: str) -> None:
+        t = (tag or "").lower()
+        if t == "title":
+            self._title_capture = False
+            return
+        if self._skip_stack and self._skip_stack[-1] == t:
+            self._skip_stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        text = str(data or "").strip()
+        if not text:
+            return
+        if self._title_capture:
+            if self.title:
+                self.title += " "
+            self.title += text
+            return
+        if self._skip_stack:
+            return
+        self.text_parts.append(text)
+
+
+class _GuardedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, validator) -> None:
+        super().__init__()
+        self._validator = validator
+        self._redirects = 0
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        self._redirects += 1
+        if self._redirects > 5:
+            raise ValueError("Too many redirects (max 5).")
+        self._validator(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _is_forbidden_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return True
+    return (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _resolve_ips(hostname: str) -> List[str]:
+    infos = socket.getaddrinfo(hostname, None)
+    ips = []
+    for info in infos:
+        sockaddr = info[4]
+        if isinstance(sockaddr, tuple) and sockaddr:
+            ips.append(str(sockaddr[0]))
+    out = sorted(set(ips))
+    return out
+
+
+def _assert_public_url(raw_url: str) -> urllib.parse.ParseResult:
+    parsed = urllib.parse.urlparse(str(raw_url or "").strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Only http(s) URLs are allowed.")
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise ValueError("URL hostname is required.")
+    if host in {"localhost"} or host.endswith(".localhost"):
+        raise ValueError("Blocked URL host.")
+    ips = _resolve_ips(host)
+    if not ips:
+        raise ValueError("Could not resolve URL host.")
+    for ip in ips:
+        if _is_forbidden_ip(ip):
+            raise ValueError("Blocked private or local network target.")
+    return parsed
+
+
+def _extract_readable_text(html: str) -> Tuple[str, str]:
+    parser = _ReadableHtmlParser()
+    parser.feed(html or "")
+    parser.close()
+    text = " ".join(parser.text_parts)
+    text = " ".join(text.split())
+    return parser.title.strip(), text.strip()
+
+
+class WebFetchTool:
+    name = "web_fetch"
+    description = "Fetch a public URL and return readable text extraction."
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        url = str(request.args.get("url") or "").strip()
+        if not url:
+            return ToolResult(ok=False, output="Error: url is required.")
+        try:
+            max_chars = int(request.args.get("max_chars") or 10000)
+        except Exception:
+            max_chars = 10000
+        max_chars = max(500, min(max_chars, 50000))
+        try:
+            timeout_s = int(request.args.get("timeout_s") or 15)
+        except Exception:
+            timeout_s = 15
+        timeout_s = max(1, min(timeout_s, 60))
+        user_agent = str(request.args.get("user_agent") or "codex-telegram-bot-web-fetch/1.0")
+
+        try:
+            _assert_public_url(url)
+            opener = urllib.request.build_opener(_GuardedRedirectHandler(_assert_public_url))
+            req = urllib.request.Request(
+                url=url,
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.1",
+                },
+            )
+            with opener.open(req, timeout=timeout_s) as resp:
+                final_url = str(resp.geturl() or url)
+                _assert_public_url(final_url)
+                content_type = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                if content_type and content_type not in {
+                    "text/html",
+                    "application/xhtml+xml",
+                    "text/plain",
+                }:
+                    return ToolResult(ok=False, output=f"Error: unsupported content type '{content_type}'.")
+                blob = resp.read(max_chars * 6 + 1)
+                charset = (resp.headers.get_content_charset() or "utf-8").strip() if hasattr(resp.headers, "get_content_charset") else "utf-8"
+            raw = blob.decode(charset, errors="replace")
+        except Exception as exc:
+            return ToolResult(ok=False, output=f"Error: web_fetch failed: {exc}")
+
+        if (content_type or "").startswith("text/plain"):
+            title = ""
+            text = raw
+        else:
+            title, text = _extract_readable_text(raw)
+        truncated = len(text) > max_chars
+        if truncated:
+            text = text[:max_chars].rstrip()
+        payload = {
+            "url": final_url,
+            "title": title,
+            "text": text,
+            "truncated": bool(truncated),
+        }
+        return ToolResult(ok=True, output=json.dumps(payload, ensure_ascii=False))

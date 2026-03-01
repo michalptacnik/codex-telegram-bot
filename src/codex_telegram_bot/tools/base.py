@@ -176,6 +176,20 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["query"],
         },
     },
+    "web_fetch": {
+        "name": "web_fetch",
+        "description": "Fetch a public URL and extract readable text.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Public HTTP(S) URL"},
+                "max_chars": {"type": "integer", "description": "Maximum extracted text chars (default 10000)"},
+                "timeout_s": {"type": "integer", "description": "Timeout in seconds (default 15)"},
+                "user_agent": {"type": "string", "description": "Optional custom user-agent"},
+            },
+            "required": ["url"],
+        },
+    },
     "send_message": {
         "name": "send_message",
         "description": "Send a proactive message to a target session owner.",

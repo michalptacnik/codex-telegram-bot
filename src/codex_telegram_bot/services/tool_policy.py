@@ -33,7 +33,7 @@ TOOL_GROUPS: Dict[str, List[str]] = {
     "scheduling": ["schedule_task", "list_schedules", "cancel_schedule"],
     "messaging": ["send_message"],
     "memory": ["memory_get", "memory_search"],
-    "web": ["web_search", "mcp_search", "mcp_call"],
+    "web": ["web_search", "web_fetch", "mcp_search", "mcp_call"],
     "git": ["git_status", "git_diff", "git_log", "git_add", "git_commit"],
 }
 

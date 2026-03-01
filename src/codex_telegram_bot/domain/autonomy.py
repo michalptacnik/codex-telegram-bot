@@ -36,7 +36,7 @@ AUTONOMY_MODES: FrozenSet[str] = frozenset(
 # ---------------------------------------------------------------------------
 
 _READ_ONLY_TOOLS: FrozenSet[str] = frozenset(
-    ["read_file", "git_status", "git_diff", "git_log", "ssh_detection", "web_search", "mcp_search"]
+    ["read_file", "git_status", "git_diff", "git_log", "ssh_detection", "web_search", "web_fetch", "mcp_search"]
 )
 
 _LIMITED_WRITE_TOOLS: FrozenSet[str] = frozenset(

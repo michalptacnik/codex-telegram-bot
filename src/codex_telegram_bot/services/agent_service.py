@@ -216,6 +216,16 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"query": "string (required)", "k": "int (optional)", "timeout_sec": "int (optional)"},
     },
+    "web_fetch": {
+        "name": "web_fetch",
+        "protocol": "!tool",
+        "args": {
+            "url": "string (required)",
+            "max_chars": "int (optional)",
+            "timeout_s": "int (optional)",
+            "user_agent": "string (optional)",
+        },
+    },
     "send_message": {
         "name": "send_message",
         "protocol": "!tool",
