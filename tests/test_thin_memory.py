@@ -133,6 +133,24 @@ class TestThinMemoryLayout(unittest.TestCase):
                     }
                 )
 
+    def test_prompt_includes_thin_index_not_daily_logs_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            service = AgentService(
+                provider=EchoFallbackProvider(),
+                session_workspaces_root=root / "workspaces",
+            )
+            session_id = "sess-prompt-memory"
+            service.initialize_session_workspace(session_id=session_id)
+            ws = service.session_workspace(session_id=session_id)
+            daily = ws / "memory" / "daily" / "2026-03-01.md"
+            daily.parent.mkdir(parents=True, exist_ok=True)
+            daily.write_text("# Daily\nsecret-daily-detail", encoding="utf-8")
+            prompt = service.build_session_prompt(session_id=session_id, user_prompt="hello")
+            self.assertIn("Thin memory index:", prompt)
+            self.assertIn("Memory usage contract:", prompt)
+            self.assertNotIn("secret-daily-detail", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

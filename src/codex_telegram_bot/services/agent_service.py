@@ -56,6 +56,7 @@ from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.thin_memory import ensure_memory_layout
+from codex_telegram_bot.services.thin_memory import ThinMemoryStore
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
 from codex_telegram_bot.tools.email import email_tool_enabled
@@ -83,6 +84,11 @@ MICRO_STYLE_GUIDE = (
     "If user wants action, do it via tools; don't narrate internals. "
     "After actions: 1-3 sentences on what changed, result, and one useful next option. "
     "Ask only when blocked. Never say 'as an AI'."
+)
+MEMORY_USAGE_CONTRACT = (
+    "Memory usage contract: A thin MEMORY_INDEX is always available. "
+    "Use memory_pointer_open only when detailed context is required. "
+    "Do not assume full memory pages or daily logs are preloaded."
 )
 TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
     "exec": {
@@ -1216,9 +1222,10 @@ class AgentService:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         capability_lines = self._build_capability_context(user_prompt=user_prompt)
-        style_lines = [f"Style guide: {MICRO_STYLE_GUIDE}"]
+        style_lines = [f"Style guide: {MICRO_STYLE_GUIDE}", MEMORY_USAGE_CONTRACT]
+        memory_lines = self._build_thin_memory_context(session_id=session_id)
         if not self._run_store:
-            prefix = style_lines + capability_lines + planning_lines + retrieval_lines
+            prefix = style_lines + memory_lines + capability_lines + planning_lines + retrieval_lines
             if prefix:
                 return "\n".join(prefix + [user_prompt])
             return user_prompt
@@ -1226,12 +1233,13 @@ class AgentService:
         summary = (session.summary or "").strip() if session else ""
         history = self._run_store.list_session_messages(session_id=session_id, limit=max_turns * 2)
         if not history:
-            prefix = style_lines + capability_lines + planning_lines + retrieval_lines
+            prefix = style_lines + memory_lines + capability_lines + planning_lines + retrieval_lines
             if summary:
                 prefix = [f"Session memory summary:\n{summary[:CONTEXT_SUMMARY_BUDGET_CHARS]}"] + prefix
             if prefix:
                 self._session_context_diagnostics[session_id] = {
                     "summary_chars": min(len(summary), CONTEXT_SUMMARY_BUDGET_CHARS) if summary else 0,
+                    "memory_index_chars": sum(len(x) for x in memory_lines),
                     "history_chars": 0,
                     "retrieval_chars": sum(len(x) for x in retrieval_lines),
                     "retrieval_confidence": retrieval_meta.get("confidence", "none"),
@@ -1249,6 +1257,8 @@ class AgentService:
             used_summary = summary[:CONTEXT_SUMMARY_BUDGET_CHARS]
             lines.append("Session memory summary:")
             lines.append(used_summary)
+        if memory_lines:
+            lines.extend(memory_lines)
         if capability_lines:
             lines.extend(capability_lines)
         if planning_lines:
@@ -1271,6 +1281,7 @@ class AgentService:
             prompt = "\n".join(lines)
         self._session_context_diagnostics[session_id] = {
             "summary_chars": len(used_summary),
+            "memory_index_chars": sum(len(x) for x in memory_lines),
             "history_chars": sum(len(x) for x in history_lines),
             "retrieval_chars": sum(len(x) for x in retrieval_lines),
             "retrieval_confidence": retrieval_meta.get("confidence", "none"),
@@ -1279,6 +1290,20 @@ class AgentService:
             "prompt_chars": len(prompt),
         }
         return prompt
+
+    def _build_thin_memory_context(self, session_id: str) -> List[str]:
+        try:
+            workspace = self.session_workspace(session_id=session_id)
+            store = ThinMemoryStore(workspace_root=workspace)
+            index_text = store.read_index_text().strip()
+        except Exception:
+            return []
+        if not index_text:
+            return []
+        return [
+            "Thin memory index:",
+            index_text,
+        ]
 
     def build_retrieval_context(self, user_prompt: str, limit: int = 4) -> List[str]:
         lines, _ = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=limit)
