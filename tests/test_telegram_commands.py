@@ -5,6 +5,7 @@ from codex_telegram_bot.telegram_bot import (
     _build_command_registry,
     _is_valid_command_name,
     _looks_like_tool_leak,
+    _initial_status_text,
     _sanitize_command_name,
     _validate_command_registry,
     _parse_contact_spec,
@@ -13,6 +14,7 @@ from codex_telegram_bot.telegram_bot import (
     _parse_email_template_spec,
     _parse_gh_command_spec,
     _parse_template_spec,
+    _humanize_action_preview,
 )
 
 
@@ -118,3 +120,21 @@ class TestOutputFirewallDetection(unittest.TestCase):
     def test_does_not_flag_regular_assistant_text(self):
         text = "Here are 10 companies and why each is a fit."
         self.assertFalse(_looks_like_tool_leak(text))
+
+
+class TestProgressNarrationHelpers(unittest.TestCase):
+    def test_humanize_action_preview_for_tool_sentinel(self):
+        text = "__tool__ send_email_smtp {\"to\":\"user@example.com\"}"
+        self.assertIn("send_email_smtp", _humanize_action_preview(text))
+
+    def test_humanize_action_preview_for_loop_tool_format(self):
+        text = "tool:send_email_smtp:{\"to\":\"user@example.com\"}"
+        self.assertIn("send_email_smtp", _humanize_action_preview(text))
+
+    def test_initial_status_text_is_conversational_for_normal_prompt(self):
+        status = _initial_status_text("Can you explain why this happened?")
+        self.assertIn("let me think", status.lower())
+
+    def test_initial_status_text_uses_execution_wording_for_tool_prompt(self):
+        status = _initial_status_text("!tool {\"name\":\"read_file\",\"args\":{\"path\":\"README.md\"}}")
+        self.assertIn("preparing execution", status.lower())

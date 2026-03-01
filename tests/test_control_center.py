@@ -75,6 +75,7 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health.json()["status"], "ok")
         self.assertIn("provider_version", health.json())
         self.assertIn("provider_health", health.json())
+        self.assertIn("runtime", health.json())
         self.assertIn("metrics", health.json())
 
         metrics = client.get("/api/metrics")
@@ -83,6 +84,9 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         reliability = client.get("/api/reliability")
         self.assertEqual(reliability.status_code, 200)
         self.assertIn("failure_rate", reliability.json())
+        runtime_caps = client.get("/api/runtime/capabilities")
+        self.assertEqual(runtime_caps.status_code, 200)
+        self.assertIn("execution_backend", runtime_caps.json())
 
         runs = client.get("/api/runs")
         self.assertEqual(runs.status_code, 200)

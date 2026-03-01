@@ -8,7 +8,7 @@ Group aliases:
   runtime     — shell_exec, exec
   sessions    — sessions_list, sessions_history, sessions_send, sessions_spawn, session_status
   memory      — memory_get, memory_search
-  web         — mcp_search, mcp_call
+  web         — web_search, mcp_search, mcp_call
   git         — git_status, git_diff, git_log, git_add, git_commit
 
 Wildcard patterns:
@@ -31,7 +31,7 @@ TOOL_GROUPS: Dict[str, List[str]] = {
     "runtime": ["shell_exec"],
     "sessions": ["sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status"],
     "memory": ["memory_get", "memory_search"],
-    "web": ["mcp_search", "mcp_call"],
+    "web": ["web_search", "mcp_search", "mcp_call"],
     "git": ["git_status", "git_diff", "git_log", "git_add", "git_commit"],
 }
 

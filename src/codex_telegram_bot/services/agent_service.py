@@ -6,6 +6,7 @@ import shlex
 import uuid
 import json
 import hashlib
+import difflib
 import os
 import time
 from dataclasses import dataclass
@@ -207,6 +208,11 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "name": "memory_search",
         "protocol": "!tool",
         "args": {"query": "string (required)", "k": "int (optional)"},
+    },
+    "web_search": {
+        "name": "web_search",
+        "protocol": "!tool",
+        "args": {"query": "string (required)", "k": "int (optional)", "timeout_sec": "int (optional)"},
     },
     # MCP tools (Issue #103)
     "mcp_search": {
@@ -545,13 +551,67 @@ class AgentService:
 
                 # Check if approval is required
                 if self._tool_action_requires_approval(tool_name):
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use_id,
-                        "content": f"Error: tool '{tool_name}' requires approval. Use /approve to grant permission.",
-                        "is_error": True,
-                    })
-                    continue
+                    if not self._run_store:
+                        return "Error: approval registry unavailable."
+                    if self._run_store.count_pending_tool_approvals(chat_id=chat_id, user_id=user_id) >= self._max_pending_approvals_per_user:
+                        return (
+                            "Error: too many pending approvals for this user. "
+                            "Resolve existing approvals with /pending, /approve, or /deny."
+                        )
+                    tool_argv = [
+                        TOOL_APPROVAL_SENTINEL,
+                        tool_name,
+                        json.dumps(tool_input or {}, sort_keys=True, ensure_ascii=True),
+                    ]
+                    existing = self._run_store.find_pending_tool_approval(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                        argv=tool_argv,
+                    )
+                    if existing:
+                        approval_id = existing["approval_id"]
+                    else:
+                        run_id = self._run_store.create_run(f"Approval requested for tool: {tool_name}")
+                        self._run_store.mark_running(run_id)
+                        approval_id = self._run_store.create_tool_approval(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            session_id=session_id,
+                            agent_id=agent_id,
+                            run_id=run_id,
+                            argv=tool_argv,
+                            stdin_text="",
+                            timeout_sec=60,
+                            risk_tier="high",
+                        )
+                        self._emit_tool_event(
+                            run_id=run_id,
+                            event_type="tool.approval.requested",
+                            payload=f"approval_id={approval_id}, tool_use_id={tool_use_id}, risk=high",
+                        )
+                        self._run_store.mark_completed(
+                            run_id,
+                            f"Approval requested approval_id={approval_id} tool_use_id={tool_use_id}",
+                        )
+                    await self._notify_progress(
+                        progress_callback,
+                        {
+                            "event": "loop.step.awaiting_approval",
+                            "step": turn + 1,
+                            "action_id": tool_use_id,
+                            "approval_id": approval_id,
+                        },
+                    )
+                    action_preview = _format_tool_action_preview(tool_name, tool_input)
+                    msg = (
+                        "Approval required for high-risk tool action before I can continue.\n"
+                        f"Action: {action_preview}\n"
+                        f"Approve once: /approve {approval_id[:8]}\n"
+                        f"Deny: /deny {approval_id[:8]}"
+                    )
+                    self.append_session_assistant_message(session_id=session_id, content=msg)
+                    return msg
 
                 action_id = "tool-" + uuid.uuid4().hex[:8]
                 result = await self._execute_registered_tool_action(
@@ -2207,6 +2267,18 @@ class AgentService:
             "pending_runs": len([r for r in runs if r.status == "pending"]),
         }
 
+    def runtime_capabilities(self) -> Dict[str, Any]:
+        runner_name = self._execution_runner.__class__.__name__
+        backend = "docker" if "docker" in runner_name.lower() else "local"
+        return {
+            "execution_backend": backend,
+            "execution_runner": runner_name,
+            "probe_loop_enabled": bool(self._probe_loop is not None),
+            "mcp_bridge_enabled": bool(self._mcp_bridge is not None),
+            "skill_packs_enabled": bool(self._skill_pack_loader is not None),
+            "tool_policy_enabled": bool(self._tool_policy_engine is not None),
+        }
+
     def reliability_snapshot(self, limit: int = 500) -> Dict[str, Any]:
         runs = self.list_recent_runs(limit=max(10, min(limit, 5000)))
         total = len(runs)
@@ -2523,7 +2595,9 @@ class AgentService:
         if name not in APPROVAL_REQUIRED_TOOLS:
             return False
         if name in {"send_email_smtp", "send_email"}:
-            return email_tool_enabled(os.environ)
+            raw = str(os.environ.get("EMAIL_SEND_REQUIRE_APPROVAL", "1") or "1").strip().lower()
+            require_email_approval = raw not in {"0", "false", "no", "off"}
+            return require_email_approval and email_tool_enabled(os.environ)
         return True
 
     async def _attempt_autonomous_email_send_recovery(
@@ -2874,7 +2948,12 @@ class AgentService:
             and (not has_executed_tool)
             and executed_slash is None
             and _prompt_expects_action(base_prompt)
-            and (_output_sounds_like_action_promise(text) or _contains_tool_call_signatures(text))
+            and (
+                _output_sounds_like_action_promise(text)
+                or _contains_tool_call_signatures(text)
+                or _looks_like_prompt_echo(base_prompt, text)
+                or _looks_like_prompt_handoff(text)
+            )
             and autonomy_depth < self._autonomous_protocol_max_depth()
         ):
             corrected = await self._request_tool_call_correction(
@@ -2901,6 +2980,11 @@ class AgentService:
                     selected_tools=selected_tools,
                     goal=goal,
                     allow_correction=False,
+                )
+            if _looks_like_prompt_echo(base_prompt, text) or _looks_like_prompt_handoff(text):
+                return (
+                    "Error: model returned non-executable prompt text instead of an action step. "
+                    "I requested a protocol correction but did not receive an executable tool call."
                 )
         return text
 
@@ -3400,6 +3484,9 @@ def _prompt_expects_action(prompt: str) -> bool:
         "run ",
         "execute ",
         "find ",
+        "search ",
+        "look up",
+        "lookup ",
         "implement",
         "do ",
     ]
@@ -3430,6 +3517,11 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
             picks.append("send_email")
     if "provider" in low and "provider_status" in available and "provider_status" not in picks:
         picks.append("provider_status")
+    web_markers = ("search", "internet", "web", "latest", "recent", "news", "lookup", "look up")
+    if any(marker in low for marker in web_markers):
+        for name in ("web_search", "mcp_search"):
+            if name in available and name not in picks:
+                picks.append(name)
     return picks[:6]
 
 
@@ -3721,7 +3813,7 @@ def _infer_tool_name_from_args(args: Dict[str, Any], preferred_tools: Sequence[s
     if "cmd" in keys and "shell_exec" in allowed:
         return "shell_exec"
     if "query" in keys:
-        for name in ("mcp_search", "memory_search"):
+        for name in ("web_search", "mcp_search", "memory_search"):
             if name in allowed:
                 return name
     if "path" in keys:
@@ -4272,6 +4364,34 @@ def _output_sounds_like_action_promise(text: str) -> bool:
     if "about to do" in low or "going to do" in low:
         return True
     return False
+
+
+def _looks_like_prompt_echo(prompt: str, output: str) -> bool:
+    a = re.sub(r"\s+", " ", str(prompt or "").strip().lower())
+    b = re.sub(r"\s+", " ", str(output or "").strip().lower())
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if len(b) >= 24 and b in a:
+        return True
+    ratio = difflib.SequenceMatcher(a=a, b=b).ratio()
+    return ratio >= 0.78
+
+
+def _looks_like_prompt_handoff(text: str) -> bool:
+    low = str(text or "").strip().lower()
+    if not low:
+        return False
+    markers = (
+        "here is a prompt",
+        "use this prompt",
+        "you can use the following prompt",
+        "paste this prompt",
+        "prompt:",
+        "copy this prompt",
+    )
+    return any(marker in low for marker in markers)
 
 
 def _is_internal_assistant_trace(content: str) -> bool:

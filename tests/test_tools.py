@@ -6,6 +6,7 @@ from pathlib import Path
 from codex_telegram_bot.tools import build_default_tool_registry
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
 from codex_telegram_bot.tools.files import ReadFileTool, WriteFileTool
+from codex_telegram_bot.tools.web import WebSearchTool
 
 
 class TestFileTools(unittest.TestCase):
@@ -75,6 +76,7 @@ class TestToolRegistry(unittest.TestCase):
         self.assertIn("read_file", names)
         self.assertIn("write_file", names)
         self.assertIn("git_status", names)
+        self.assertIn("web_search", names)
 
     def test_email_tool_disabled_by_default(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -98,3 +100,41 @@ class TestToolRegistry(unittest.TestCase):
         ):
             registry = build_default_tool_registry()
             self.assertIsNotNone(registry.get("send_email_smtp"))
+
+    def test_web_search_tool_can_be_disabled_by_env(self):
+        with patch.dict("os.environ", {"ENABLE_WEB_SEARCH_TOOL": "0"}, clear=True):
+            registry = build_default_tool_registry()
+            self.assertIsNone(registry.get("web_search"))
+
+
+class TestWebSearchTool(unittest.TestCase):
+    def test_web_search_formats_sources(self):
+        def _fake_fetch(_query: str, _timeout: int):
+            return {
+                "Heading": "Test Topic",
+                "AbstractText": "Abstract snippet.",
+                "AbstractURL": "https://example.com/abstract",
+                "RelatedTopics": [
+                    {"Text": "Result One - snippet one", "FirstURL": "https://example.com/one"},
+                    {"Text": "Result Two - snippet two", "FirstURL": "https://example.com/two"},
+                ],
+            }
+
+        tool = WebSearchTool(fetch_fn=_fake_fetch)
+        res = tool.run(
+            ToolRequest(name="web_search", args={"query": "test query", "k": 3}),
+            ToolContext(workspace_root=Path.cwd()),
+        )
+        self.assertTrue(res.ok)
+        self.assertIn("Web results for", res.output)
+        self.assertIn("https://example.com/one", res.output)
+        self.assertIn("source: DuckDuckGo", res.output)
+
+    def test_web_search_requires_query(self):
+        tool = WebSearchTool(fetch_fn=lambda _q, _t: {})
+        res = tool.run(
+            ToolRequest(name="web_search", args={}),
+            ToolContext(workspace_root=Path.cwd()),
+        )
+        self.assertFalse(res.ok)
+        self.assertIn("query is required", res.output)
