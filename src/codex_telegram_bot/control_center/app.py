@@ -9,7 +9,7 @@ from xml.sax.saxutils import escape as xml_escape
 from pydantic import BaseModel
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
-from fastapi.responses import HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -2099,6 +2099,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             from fastapi import HTTPException as _HTTPException
             raise _HTTPException(status_code=404, detail="Session not found")
         messages = agent_service.list_session_messages(session_id, limit=20)
+        attachments = agent_service.list_session_attachments(session_id=session_id, limit=200)
         return {
             "session": {
                 "session_id": session.session_id,
@@ -2120,7 +2121,42 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 }
                 for m in messages
             ],
+            "attachments": [
+                {
+                    "id": a.get("id", ""),
+                    "message_id": a.get("message_id", ""),
+                    "kind": a.get("kind", ""),
+                    "filename": a.get("filename", ""),
+                    "mime": a.get("mime", ""),
+                    "size_bytes": int(a.get("size_bytes", 0) or 0),
+                    "sha256": a.get("sha256", ""),
+                    "created_at": a.get("created_at", ""),
+                    "download_url": f"/api/attachments/{a.get('id', '')}/download",
+                }
+                for a in attachments
+            ],
             "cost_summary": agent_service.session_cost_summary(session_id=session_id),
         }
+
+    @app.get("/api/attachments/{attachment_id}/download")
+    async def api_attachment_download(request: Request, attachment_id: str):
+        _opt_api_scope(request)
+        att = agent_service.get_attachment(attachment_id)
+        if att is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        path = Path(str(att.get("local_path") or "")).expanduser().resolve()
+        if not path.exists() or not path.is_file():
+            raise HTTPException(status_code=404, detail="Attachment file missing")
+        session_id = str(att.get("session_id") or "")
+        ws = agent_service.session_workspace(session_id=session_id).resolve()
+        try:
+            path.relative_to(ws)
+        except ValueError:
+            raise HTTPException(status_code=403, detail="Attachment path outside session workspace")
+        return FileResponse(
+            str(path),
+            media_type=str(att.get("mime") or "application/octet-stream"),
+            filename=str(att.get("filename") or path.name),
+        )
 
     return app

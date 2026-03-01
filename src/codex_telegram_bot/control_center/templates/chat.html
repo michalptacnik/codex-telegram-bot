@@ -51,6 +51,9 @@
     <div class="dim">
       Use the session selector to continue an existing Telegram session, or start a new web-only session with chat/user IDs.
     </div>
+    <hr />
+    <h3 class="mono">Attachments</h3>
+    <div id="attachments-list" class="dim"></div>
   </section>
 </div>
 
@@ -66,6 +69,7 @@
   const costTokens = document.getElementById("cost-tokens");
   const costUsd = document.getElementById("cost-usd");
   const costUpdated = document.getElementById("cost-updated");
+  const attachmentsList = document.getElementById("attachments-list");
 
   let activeSessionId = "{{ selected_session_id }}";
   let currentAssistant = null;
@@ -154,12 +158,34 @@
   async function loadSessionHistory(sessionId) {
     chatLog.innerHTML = "";
     currentAssistant = null;
+    attachmentsList.innerHTML = "";
     if (!sessionId) return;
     const resp = await fetch(`/api/sessions/${sessionId}/detail`);
     if (!resp.ok) return;
     const data = await resp.json();
     for (const msg of (data.recent_messages || [])) {
       appendMessage(msg.role === "assistant" ? "assistant" : "user", msg.content || "");
+    }
+    const items = data.attachments || [];
+    if (!items.length) {
+      attachmentsList.textContent = "No attachments in this session.";
+    } else {
+      const ul = document.createElement("ul");
+      for (const att of items.slice(0, 25)) {
+        const li = document.createElement("li");
+        const a = document.createElement("a");
+        a.href = att.download_url;
+        a.textContent = `${att.filename} (${att.size_bytes} B, ${att.kind})`;
+        a.target = "_blank";
+        li.appendChild(a);
+        const meta = document.createElement("div");
+        meta.className = "dim";
+        meta.textContent = `sha256=${(att.sha256 || "").slice(0, 16)}... uploaded=${att.created_at || "-"}`;
+        li.appendChild(meta);
+        ul.appendChild(li);
+      }
+      attachmentsList.innerHTML = "";
+      attachmentsList.appendChild(ul);
     }
     await refreshCostSummary(sessionId);
   }

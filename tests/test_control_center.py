@@ -281,6 +281,47 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         finally:
             tmp.cleanup()
 
+    async def test_session_detail_includes_attachments_and_download(self):
+        session = self.service.get_or_create_session(chat_id=901, user_id=902)
+        ws = self.service.session_workspace(session.session_id)
+        path = ws / "attachments" / "m1" / "sample.txt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("sample-data", encoding="utf-8")
+
+        message_id = self.service.record_channel_message(
+            session_id=session.session_id,
+            user_id=902,
+            channel="telegram",
+            channel_message_id="m1",
+            sender="user",
+            text="uploaded",
+        )
+        attachment_id = self.service.record_attachment(
+            message_id=message_id,
+            session_id=session.session_id,
+            user_id=902,
+            channel="telegram",
+            kind="document",
+            filename="sample.txt",
+            mime="text/plain",
+            size_bytes=11,
+            sha256="deadbeef",
+            local_path=str(path),
+            remote_file_id="tg-1",
+        )
+
+        app = create_app(self.service)
+        client = TestClient(app)
+
+        detail = client.get(f"/api/sessions/{session.session_id}/detail")
+        self.assertEqual(detail.status_code, 200)
+        attachments = detail.json().get("attachments", [])
+        self.assertTrue(any(a.get("id") == attachment_id for a in attachments))
+
+        download = client.get(f"/api/attachments/{attachment_id}/download")
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.content, b"sample-data")
+
     async def test_local_api_v1_scoped_auth(self):
         app = None
         old_keys = os.environ.get("LOCAL_API_KEYS")
