@@ -43,6 +43,7 @@ from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
+from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
@@ -214,6 +215,16 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"query": "string (required)", "k": "int (optional)", "timeout_sec": "int (optional)"},
     },
+    "send_message": {
+        "name": "send_message",
+        "protocol": "!tool",
+        "args": {
+            "session_id": "string (optional; defaults to current session)",
+            "text": "string (required)",
+            "markdown": "bool (optional)",
+            "silent": "bool (optional)",
+        },
+    },
     # MCP tools (Issue #103)
     "mcp_search": {
         "name": "mcp_search",
@@ -301,6 +312,7 @@ class AgentService:
         skill_pack_loader: Optional[Any] = None,
         tool_policy_engine: Optional[Any] = None,
         process_manager: Optional[ProcessManager] = None,
+        proactive_messenger: Optional[ProactiveMessenger] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -335,6 +347,7 @@ class AgentService:
         self._skill_pack_loader = skill_pack_loader
         self._tool_policy_engine = tool_policy_engine
         self._process_manager = process_manager or ProcessManager(run_store=run_store)
+        self._proactive_messenger = proactive_messenger
         self._last_process_cleanup_ts = 0.0
         self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
 
@@ -1065,6 +1078,16 @@ class AgentService:
     @property
     def process_manager(self) -> Optional[ProcessManager]:
         return self._process_manager
+
+    def register_proactive_transport(
+        self,
+        name: str,
+        handler: Callable[[Dict[str, Any]], Awaitable[None]],
+    ) -> bool:
+        if self._proactive_messenger is None:
+            return False
+        self._proactive_messenger.register(name=name, handler=handler)
+        return True
 
     def build_session_prompt(self, session_id: str, user_prompt: str, max_turns: int = 8) -> str:
         from codex_telegram_bot.agent.prompt_builder import build_session_prompt as _build_session_prompt

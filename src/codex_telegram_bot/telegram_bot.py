@@ -1470,4 +1470,19 @@ def build_application(
     app.add_handler(CallbackQueryHandler(handle_approval_callback, pattern=r"^approval:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(handle_error)
+
+    async def _telegram_proactive_sender(payload: dict) -> None:
+        chat_id = int(payload.get("chat_id") or 0)
+        text = str(payload.get("text") or "")
+        if not chat_id or not text:
+            return
+        kwargs = {"chat_id": chat_id, "text": text}
+        if bool(payload.get("silent", False)):
+            kwargs["disable_notification"] = True
+        if bool(payload.get("markdown", False)):
+            kwargs["parse_mode"] = "Markdown"
+        await app.bot.send_message(**kwargs)
+
+    agent_service.register_proactive_transport("telegram", _telegram_proactive_sender)
+
     return app

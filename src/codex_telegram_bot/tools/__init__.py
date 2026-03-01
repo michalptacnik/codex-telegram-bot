@@ -16,6 +16,7 @@ from codex_telegram_bot.tools.git import (
     GitStatusTool,
 )
 from codex_telegram_bot.tools.memory import MemoryGetTool, MemorySearchTool
+from codex_telegram_bot.tools.message import SendMessageTool
 from codex_telegram_bot.tools.provider import ProviderStatusTool, ProviderSwitchTool
 from codex_telegram_bot.tools.sessions import (
     SessionsListTool,
@@ -34,6 +35,8 @@ def build_default_tool_registry(
     run_store=None,
     mcp_bridge=None,
     process_manager=None,
+    access_controller=None,
+    proactive_messenger=None,
 ) -> ToolRegistry:
     """Build the default tool registry.
 
@@ -68,6 +71,13 @@ def build_default_tool_registry(
         registry.register(SessionsSendTool(run_store))
         registry.register(SessionsSpawnTool(run_store))
         registry.register(SessionStatusTool(run_store))
+        registry.register(
+            SendMessageTool(
+                run_store=run_store,
+                access_controller=access_controller,
+                messenger=proactive_messenger,
+            )
+        )
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
@@ -103,6 +113,7 @@ __all__ = [
     "ProviderSwitchTool",
     "MemoryGetTool",
     "MemorySearchTool",
+    "SendMessageTool",
     "SessionsListTool",
     "SessionsHistoryTool",
     "SessionsSendTool",

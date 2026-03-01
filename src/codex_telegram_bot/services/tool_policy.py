@@ -30,6 +30,7 @@ TOOL_GROUPS: Dict[str, List[str]] = {
     "filesystem": ["read_file", "write_file"],
     "runtime": ["shell_exec"],
     "sessions": ["sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status"],
+    "messaging": ["send_message"],
     "memory": ["memory_get", "memory_search"],
     "web": ["web_search", "mcp_search", "mcp_call"],
     "git": ["git_status", "git_diff", "git_log", "git_add", "git_commit"],

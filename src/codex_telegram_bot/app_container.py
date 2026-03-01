@@ -26,6 +26,7 @@ from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
+from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.mcp_bridge import McpBridge, _mcp_enabled
@@ -103,12 +104,16 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     run_store = SqliteRunStore(db_path=state_db_path) if state_db_path is not None else None
     process_manager = ProcessManager(run_store=run_store)
 
+    proactive_messenger = ProactiveMessenger()
+
     # Build tool registry with optional run_store/process manager (db-backed path).
     tool_registry = build_default_tool_registry(
         provider_registry=provider_registry,
         run_store=run_store,
         mcp_bridge=mcp_bridge,
         process_manager=process_manager,
+        access_controller=access_controller,
+        proactive_messenger=proactive_messenger,
     )
     probe_loop: Optional[ProbeLoop] = None
     if (os.environ.get("ENABLE_PROBE_LOOP") or "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -137,6 +142,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         skill_pack_loader=skill_pack_loader,
         tool_policy_engine=tool_policy_engine,
         process_manager=process_manager,
+        proactive_messenger=proactive_messenger,
     )
 
     if run_store is None:

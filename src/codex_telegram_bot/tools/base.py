@@ -176,6 +176,20 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["query"],
         },
     },
+    "send_message": {
+        "name": "send_message",
+        "description": "Send a proactive message to a target session owner.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Target session ID. Defaults to current session"},
+                "text": {"type": "string", "description": "Message text to deliver"},
+                "markdown": {"type": "boolean", "description": "Render as markdown where supported"},
+                "silent": {"type": "boolean", "description": "Suppress notifications where supported"},
+            },
+            "required": ["text"],
+        },
+    },
     "send_email_smtp": {
         "name": "send_email_smtp",
         "description": "Send an email via SMTP.",

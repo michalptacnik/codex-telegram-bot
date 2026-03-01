@@ -47,6 +47,7 @@ _FULL_TOOLS: FrozenSet[str] = frozenset(
     _LIMITED_WRITE_TOOLS
     | {
         "shell_exec",
+        "send_message",
         "github_comment",
         "github_close_issue",
         "github_create_issue",
