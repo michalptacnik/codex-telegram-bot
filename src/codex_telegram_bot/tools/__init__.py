@@ -18,6 +18,7 @@ from codex_telegram_bot.tools.git import (
 from codex_telegram_bot.tools.memory import MemoryGetTool, MemorySearchTool
 from codex_telegram_bot.tools.message import SendMessageTool
 from codex_telegram_bot.tools.provider import ProviderStatusTool, ProviderSwitchTool
+from codex_telegram_bot.tools.schedule import ScheduleTaskTool, ListSchedulesTool, CancelScheduleTool
 from codex_telegram_bot.tools.sessions import (
     SessionsListTool,
     SessionsHistoryTool,
@@ -78,6 +79,9 @@ def build_default_tool_registry(
                 messenger=proactive_messenger,
             )
         )
+        registry.register(ScheduleTaskTool(run_store=run_store, access_controller=access_controller))
+        registry.register(ListSchedulesTool(run_store=run_store, access_controller=access_controller))
+        registry.register(CancelScheduleTool(run_store=run_store, access_controller=access_controller))
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
@@ -111,6 +115,9 @@ __all__ = [
     "web_search_tool_enabled",
     "ProviderStatusTool",
     "ProviderSwitchTool",
+    "ScheduleTaskTool",
+    "ListSchedulesTool",
+    "CancelScheduleTool",
     "MemoryGetTool",
     "MemorySearchTool",
     "SendMessageTool",

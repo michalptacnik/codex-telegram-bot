@@ -1484,5 +1484,13 @@ def build_application(
         await app.bot.send_message(**kwargs)
 
     agent_service.register_proactive_transport("telegram", _telegram_proactive_sender)
+    if getattr(app, "job_queue", None) is not None:
+        async def _cron_tick_callback(_context):
+            try:
+                await agent_service.run_cron_tick_once()
+            except Exception:
+                logger.exception("cron tick job failed")
+
+        app.job_queue.run_repeating(_cron_tick_callback, interval=60, first=10, name="cron_tick")
 
     return app

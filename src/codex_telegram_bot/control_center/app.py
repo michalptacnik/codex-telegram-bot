@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import asdict
 import os
 from pathlib import Path
@@ -345,6 +346,29 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         if names:
             return names
         return [agent_service.default_provider_name()]
+
+    @app.on_event("startup")
+    async def _startup_background_scheduler() -> None:
+        async def _cron_loop() -> None:
+            while True:
+                try:
+                    await agent_service.run_cron_tick_once()
+                except Exception:
+                    pass
+                await asyncio.sleep(60)
+
+        app.state.cron_task = asyncio.create_task(_cron_loop(), name="control-center-cron-tick")
+
+    @app.on_event("shutdown")
+    async def _shutdown_background_scheduler() -> None:
+        task = getattr(app.state, "cron_task", None)
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
     @app.get("/health")
     async def health() -> Dict[str, Any]:

@@ -42,6 +42,7 @@ from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
+from codex_telegram_bot.services.cron_scheduler import CronScheduler
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
@@ -225,6 +226,26 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "silent": "bool (optional)",
         },
     },
+    "schedule_task": {
+        "name": "schedule_task",
+        "protocol": "!tool",
+        "args": {
+            "when": "string (optional; required for one-shot)",
+            "message": "string (required)",
+            "repeat": "string (optional; none|hourly|daily|weekly|cron:<expr>)",
+            "session_id": "string (optional; defaults to current session)",
+        },
+    },
+    "list_schedules": {
+        "name": "list_schedules",
+        "protocol": "!tool",
+        "args": {"session_id": "string (optional)"},
+    },
+    "cancel_schedule": {
+        "name": "cancel_schedule",
+        "protocol": "!tool",
+        "args": {"id": "string (required)"},
+    },
     # MCP tools (Issue #103)
     "mcp_search": {
         "name": "mcp_search",
@@ -356,6 +377,16 @@ class AgentService:
         self._scheduler = AgentScheduler(
             executor=self._execute_prompt,
             get_agent_concurrency=self._agent_max_concurrency,
+        )
+        self._cron_scheduler = (
+            CronScheduler(
+                store=self._run_store,
+                execute_fn=self._execute_cron_job,
+                tick_interval_sec=max(10, int(os.environ.get("CRON_TICK_INTERVAL_SEC", "60") or 60)),
+                max_failures=max(1, int(os.environ.get("CRON_MAX_FAILURES", "3") or 3)),
+            )
+            if self._run_store is not None
+            else None
         )
 
     # ------------------------------------------------------------------
@@ -720,12 +751,29 @@ class AgentService:
         return self._scheduler.job_status(job_id)
 
     async def shutdown(self) -> None:
+        await self.stop_cron_scheduler()
         await self._scheduler.shutdown()
         if self._process_manager is not None:
             try:
                 self._process_manager.cleanup_sessions()
             except Exception:
                 logger.exception("process manager shutdown cleanup failed")
+
+    async def start_cron_scheduler(self) -> bool:
+        if self._cron_scheduler is None:
+            return False
+        await self._cron_scheduler.start()
+        return True
+
+    async def stop_cron_scheduler(self) -> None:
+        if self._cron_scheduler is None:
+            return
+        await self._cron_scheduler.stop()
+
+    async def run_cron_tick_once(self) -> Dict[str, int]:
+        if self._cron_scheduler is None:
+            return {"due": 0, "ran": 0, "failed": 0}
+        return await self._cron_scheduler.tick_once()
 
     async def handoff_prompt(
         self,
@@ -2687,6 +2735,50 @@ class AgentService:
             ok=result.ok,
             output=f"{action_id} tool={tool_name} status={status}\n{result.output}",
         )
+
+    async def _execute_cron_job(self, job: Dict[str, Any]) -> bool:
+        if self._run_store is None:
+            return False
+        session_id = str(job.get("session_id") or "").strip()
+        if not session_id:
+            return False
+        session = self.get_session(session_id)
+        if session is None:
+            return False
+        try:
+            payload = json.loads(job.get("payload_json") or "{}")
+        except Exception:
+            payload = {}
+        message = str(payload.get("message") or "").strip()
+        if not message:
+            return False
+        self.initialize_session_workspace(session_id=session_id)
+        result = await self._execute_registered_tool_action(
+            action_id="cron-" + uuid.uuid4().hex[:8],
+            tool_name="send_message",
+            tool_args={
+                "session_id": session_id,
+                "text": message,
+                "markdown": bool(payload.get("markdown", False)),
+                "silent": bool(payload.get("silent", True)),
+            },
+            workspace_root=self.session_workspace(session_id=session_id),
+            policy_profile="trusted",
+            extra_tools={"send_message": self._tool_registry.get("send_message")},
+            allowed_tool_names=["send_message"],
+            chat_id=int(session.chat_id),
+            user_id=int(job.get("owner_user_id") or session.user_id),
+            session_id=session_id,
+        )
+        log_json(
+            logger,
+            "cron.job.executed",
+            job_id=str(job.get("id") or ""),
+            session_id=session_id,
+            ok=bool(result.ok),
+            preview=(result.output or "")[:200],
+        )
+        return bool(result.ok)
 
     def _tool_action_requires_approval(self, tool_name: str) -> bool:
         name = (tool_name or "").strip().lower()
