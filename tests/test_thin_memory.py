@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 from codex_telegram_bot.providers.fallback import EchoFallbackProvider
+from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.thin_memory import (
     MEMORY_INDEX_MAX_CHARS,
@@ -150,6 +151,29 @@ class TestThinMemoryLayout(unittest.TestCase):
             self.assertIn("Thin memory index:", prompt)
             self.assertIn("Memory usage contract:", prompt)
             self.assertNotIn("secret-daily-detail", prompt)
+
+    def test_message_compaction_updates_obligations_and_keeps_index_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteRunStore(db_path=root / "state.db")
+            service = AgentService(
+                provider=EchoFallbackProvider(),
+                run_store=store,
+                session_workspaces_root=root / "workspaces",
+            )
+            session = service.get_or_create_session(chat_id=5, user_id=6)
+            service.append_session_user_message(
+                session.session_id,
+                "TODO: Send invoice to client due 2026-03-05",
+            )
+            service.append_session_assistant_message(
+                session.session_id,
+                "I added that to obligations.",
+            )
+            tm = ThinMemoryStore(workspace_root=service.session_workspace(session.session_id))
+            index = tm.load_index()
+            self.assertTrue(any("Send invoice to client" in o.text for o in index.obligations))
+            self.assertLessEqual(len(tm.read_index_text()), MEMORY_INDEX_MAX_CHARS)
 
 
 if __name__ == "__main__":

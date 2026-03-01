@@ -1375,6 +1375,7 @@ class AgentService:
             max_messages=self._session_max_messages,
             keep_recent=self._session_compact_keep,
         )
+        self._compact_thin_memory_index(session_id=session_id)
 
     def append_session_assistant_message(self, session_id: str, content: str, run_id: str = "") -> None:
         if not self._run_store:
@@ -1392,6 +1393,78 @@ class AgentService:
         )
         if run_id:
             self._run_store.set_session_last_run(session_id=session_id, run_id=run_id)
+        self._compact_thin_memory_index(session_id=session_id)
+
+    def _compact_thin_memory_index(self, session_id: str) -> None:
+        """Keep MEMORY_INDEX obligations concise from recent turns and daily log hints."""
+        try:
+            workspace = self.session_workspace(session_id=session_id)
+            store = ThinMemoryStore(workspace_root=workspace)
+            index = store.load_index()
+            history = self.list_session_messages(session_id=session_id, limit=20) if self._run_store else []
+            today = datetime.now(timezone.utc).date().isoformat()
+            daily_path = workspace / "memory" / "daily" / f"{today}.md"
+            daily_excerpt = ""
+            if daily_path.exists():
+                daily_excerpt = daily_path.read_text(encoding="utf-8", errors="replace")[:2000]
+
+            candidates: List[Dict[str, str]] = []
+            for msg in history[-12:]:
+                if msg.role not in {"user", "assistant"}:
+                    continue
+                candidates.extend(_extract_memory_obligation_candidates(msg.content))
+            if daily_excerpt:
+                candidates.extend(_extract_memory_obligation_candidates(daily_excerpt))
+            if not candidates:
+                return
+
+            by_text: Dict[str, Dict[str, str]] = {}
+            for row in candidates:
+                text = str(row.get("text") or "").strip()
+                if not text:
+                    continue
+                key = text.lower()
+                existing = by_text.get(key)
+                if existing is None:
+                    by_text[key] = {"text": text, "due": str(row.get("due") or "").strip()}
+                elif (not existing.get("due")) and row.get("due"):
+                    existing["due"] = str(row.get("due") or "").strip()
+
+            existing_by_text = {o.text.lower(): o for o in index.obligations}
+            next_number = _next_memory_obligation_number([o.obligation_id for o in index.obligations])
+            merged_rows: List[Dict[str, str]] = []
+            for text_key in sorted(by_text.keys()):
+                row = by_text[text_key]
+                existing = existing_by_text.get(text_key)
+                if existing:
+                    merged_rows.append(
+                        {
+                            "obligation_id": existing.obligation_id,
+                            "text": existing.text,
+                            "due": row.get("due") or existing.due,
+                            "ref": existing.ref,
+                        }
+                    )
+                    continue
+                merged_rows.append(
+                    {
+                        "obligation_id": f"O{next_number:03d}",
+                        "text": row.get("text") or "",
+                        "due": row.get("due") or "",
+                        "ref": "memory/pages/tasks.md",
+                    }
+                )
+                next_number += 1
+
+            # Keep obligations lean: dedupe + bounded replacement.
+            merged_rows = merged_rows[:20]
+            patch: Dict[str, Any] = {
+                "obligations": {"set_all": merged_rows},
+                "pointers": {"set": {f"D{today}": f"memory/daily/{today}.md"}},
+            }
+            store.update_index_patch(patch)
+        except Exception:
+            logger.exception("thin memory compaction failed for session %s", session_id)
 
     def activate_session(self, chat_id: int, user_id: int, session_id: str) -> Optional[TelegramSessionRecord]:
         if not self._run_store:
@@ -5129,6 +5202,53 @@ def _compact_tool_output(text: str) -> str:
     if len(lines) >= 2 and lines[0].startswith("tool-"):
         return lines[-1]
     return raw
+
+
+def _extract_memory_obligation_candidates(text: str) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    raw = str(text or "")
+    if not raw.strip():
+        return out
+    for line in raw.splitlines():
+        clean = line.strip().lstrip("-").strip()
+        if not clean:
+            continue
+        task_text = ""
+        lowered = clean.lower()
+        if re.match(r"^\[\s\]\s+", clean):
+            task_text = re.sub(r"^\[\s\]\s+", "", clean).strip()
+        elif lowered.startswith("todo:"):
+            task_text = clean[5:].strip()
+        elif lowered.startswith("task:"):
+            task_text = clean[5:].strip()
+        elif "remember to " in lowered:
+            idx = lowered.find("remember to ")
+            task_text = clean[idx + len("remember to "):].strip()
+        if not task_text:
+            continue
+        due = ""
+        match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", clean)
+        if match:
+            due = match.group(1)
+        out.append({"text": task_text[:180], "due": due})
+    return out
+
+
+def _next_memory_obligation_number(ids: Sequence[str]) -> int:
+    maximum = 0
+    for raw in ids:
+        item = str(raw or "").strip().upper()
+        if not item.startswith("O"):
+            continue
+        digits = "".join(ch for ch in item[1:] if ch.isdigit())
+        if not digits:
+            continue
+        try:
+            value = int(digits)
+        except ValueError:
+            continue
+        maximum = max(maximum, value)
+    return max(1, maximum + 1)
 
 
 def _p95(values: List[float]) -> float:
