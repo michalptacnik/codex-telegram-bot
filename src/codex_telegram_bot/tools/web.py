@@ -89,12 +89,109 @@ def _normalize_results(payload: Dict[str, Any], k: int) -> List[Dict[str, str]]:
     return dedup
 
 
+class _DuckHtmlSearchParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._capture_title = False
+        self._capture_snippet = False
+        self._title_parts: List[str] = []
+        self._snippet_parts: List[str] = []
+        self._current_url = ""
+        self.rows: List[Dict[str, str]] = []
+
+    def handle_starttag(self, tag: str, attrs: Sequence[Tuple[str, Optional[str]]]) -> None:
+        t = (tag or "").lower()
+        if t != "a":
+            return
+        attrs_map = {str(k or "").lower(): str(v or "") for k, v in attrs}
+        cls = attrs_map.get("class", "")
+        href = attrs_map.get("href", "").strip()
+        if "result__a" in cls and href:
+            self._capture_title = True
+            self._title_parts = []
+            self._snippet_parts = []
+            self._current_url = href
+            return
+        if self._current_url and "result__snippet" in cls:
+            self._capture_snippet = True
+            self._snippet_parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        t = (tag or "").lower()
+        if t != "a":
+            return
+        if self._capture_snippet:
+            self._capture_snippet = False
+            return
+        if not self._capture_title:
+            return
+        self._capture_title = False
+        title = " ".join("".join(self._title_parts).split()).strip()
+        snippet = " ".join("".join(self._snippet_parts).split()).strip()
+        if self._current_url and title:
+            self.rows.append({"title": title, "url": self._current_url, "snippet": snippet})
+        self._current_url = ""
+        self._title_parts = []
+        self._snippet_parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture_title:
+            self._title_parts.append(str(data or ""))
+        elif self._capture_snippet:
+            self._snippet_parts.append(str(data or ""))
+
+
+def _duckduckgo_html_search(query: str, timeout_sec: int, k: int) -> List[Dict[str, str]]:
+    params = {"q": query, "kl": "us-en"}
+    url = "https://duckduckgo.com/html/?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "codex-telegram-bot-web-search/1.0",
+            "Accept": "text/html",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=max(1, timeout_sec)) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+    parser = _DuckHtmlSearchParser()
+    parser.feed(html)
+    parser.close()
+
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for row in parser.rows:
+        href = str(row.get("url") or "").strip()
+        if not href:
+            continue
+        parsed = urllib.parse.urlparse(href)
+        if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+            qs = urllib.parse.parse_qs(parsed.query)
+            uddg = (qs.get("uddg") or [""])[0]
+            if uddg:
+                href = urllib.parse.unquote(uddg)
+        key = href.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "title": str(row.get("title") or "").strip(),
+                "url": href,
+                "snippet": str(row.get("snippet") or "").strip(),
+            }
+        )
+        if len(out) >= k:
+            break
+    return out
+
+
 class WebSearchTool:
     name = "web_search"
     description = "Search the public web and return source URLs with snippets."
 
-    def __init__(self, fetch_fn=_duckduckgo_search) -> None:
+    def __init__(self, fetch_fn=_duckduckgo_search, fallback_fn=_duckduckgo_html_search) -> None:
         self._fetch_fn = fetch_fn
+        self._fallback_fn = fallback_fn
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
         if not web_search_tool_enabled():
@@ -131,10 +228,18 @@ class WebSearchTool:
             )
 
         rows = _normalize_results(payload, k=k)
+        source_label = "DuckDuckGo"
+        if not rows:
+            try:
+                rows = self._fallback_fn(query, timeout_sec, k)
+                if rows:
+                    source_label = "DuckDuckGo HTML fallback"
+            except Exception:
+                rows = []
         if not rows:
             return ToolResult(ok=True, output=f"No web results found for: {query}")
 
-        lines = [f'Web results for "{query}" (source: DuckDuckGo):']
+        lines = [f'Web results for "{query}" (source: {source_label}):']
         for idx, row in enumerate(rows, start=1):
             title = (row.get("title") or "").strip() or row.get("url") or "(untitled)"
             url = (row.get("url") or "").strip()

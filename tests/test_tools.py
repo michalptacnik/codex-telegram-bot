@@ -144,6 +144,25 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertIn("https://example.com/one", res.output)
         self.assertIn("source: DuckDuckGo", res.output)
 
+    def test_web_search_uses_html_fallback_when_instant_answer_empty(self):
+        tool = WebSearchTool(
+            fetch_fn=lambda _q, _t: {},
+            fallback_fn=lambda _q, _t, _k: [
+                {
+                    "title": "DeepSeek",
+                    "url": "https://www.deepseek.com/",
+                    "snippet": "Official DeepSeek website.",
+                }
+            ],
+        )
+        res = tool.run(
+            ToolRequest(name="web_search", args={"query": "DeepSeek company", "k": 3}),
+            ToolContext(workspace_root=Path.cwd()),
+        )
+        self.assertTrue(res.ok)
+        self.assertIn("source: DuckDuckGo HTML fallback", res.output)
+        self.assertIn("https://www.deepseek.com/", res.output)
+
     def test_web_search_requires_query(self):
         tool = WebSearchTool(fetch_fn=lambda _q, _t: {})
         res = tool.run(

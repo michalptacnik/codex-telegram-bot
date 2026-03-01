@@ -4029,12 +4029,12 @@ class AgentService:
     def _autonomous_action_max_batches(self) -> int:
         raw = (os.environ.get(AUTONOMOUS_ACTION_MAX_BATCHES_ENV) or "").strip()
         if not raw:
-            return 5
+            return 15
         try:
             value = int(raw)
         except Exception:
-            return 5
-        return max(1, min(value, 10))
+            return 15
+        return max(1, min(value, 30))
 
     async def _run_probe_decision(
         self,
