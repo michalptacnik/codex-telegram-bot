@@ -2100,6 +2100,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             raise _HTTPException(status_code=404, detail="Session not found")
         messages = agent_service.list_session_messages(session_id, limit=20)
         attachments = agent_service.list_session_attachments(session_id=session_id, limit=200)
+        heartbeat = agent_service.heartbeat_status(session_id=session_id)
         return {
             "session": {
                 "session_id": session.session_id,
@@ -2135,6 +2136,13 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 }
                 for a in attachments
             ],
+            "heartbeat": {
+                "heartbeat_enabled": bool(heartbeat.get("heartbeat_enabled")),
+                "heartbeat_interval_min": int(heartbeat.get("heartbeat_interval_min", 0) or 0),
+                "timezone": str(heartbeat.get("timezone") or ""),
+                "next_heartbeat_at": str(heartbeat.get("next_heartbeat_at") or ""),
+                "last_heartbeat_at": str(heartbeat.get("last_heartbeat_at") or ""),
+            },
             "cost_summary": agent_service.session_cost_summary(session_id=session_id),
         }
 

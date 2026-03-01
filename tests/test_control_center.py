@@ -315,8 +315,10 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
 
         detail = client.get(f"/api/sessions/{session.session_id}/detail")
         self.assertEqual(detail.status_code, 200)
-        attachments = detail.json().get("attachments", [])
+        payload = detail.json()
+        attachments = payload.get("attachments", [])
         self.assertTrue(any(a.get("id") == attachment_id for a in attachments))
+        self.assertIn("heartbeat", payload)
 
         download = client.get(f"/api/attachments/{attachment_id}/download")
         self.assertEqual(download.status_code, 200)

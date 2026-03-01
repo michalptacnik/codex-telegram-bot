@@ -54,6 +54,9 @@
     <hr />
     <h3 class="mono">Attachments</h3>
     <div id="attachments-list" class="dim"></div>
+    <hr />
+    <h3 class="mono">Heartbeat</h3>
+    <div id="heartbeat-status" class="dim"></div>
   </section>
 </div>
 
@@ -70,6 +73,7 @@
   const costUsd = document.getElementById("cost-usd");
   const costUpdated = document.getElementById("cost-updated");
   const attachmentsList = document.getElementById("attachments-list");
+  const heartbeatStatus = document.getElementById("heartbeat-status");
 
   let activeSessionId = "{{ selected_session_id }}";
   let currentAssistant = null;
@@ -159,6 +163,7 @@
     chatLog.innerHTML = "";
     currentAssistant = null;
     attachmentsList.innerHTML = "";
+    heartbeatStatus.textContent = "";
     if (!sessionId) return;
     const resp = await fetch(`/api/sessions/${sessionId}/detail`);
     if (!resp.ok) return;
@@ -186,6 +191,12 @@
       }
       attachmentsList.innerHTML = "";
       attachmentsList.appendChild(ul);
+    }
+    const hb = data.heartbeat || {};
+    if (!hb.heartbeat_enabled) {
+      heartbeatStatus.textContent = "Disabled";
+    } else {
+      heartbeatStatus.textContent = `Enabled | interval=${hb.heartbeat_interval_min || "-"} min | tz=${hb.timezone || "-"} | next=${hb.next_heartbeat_at || "-"} | last=${hb.last_heartbeat_at || "-"}`;
     }
     await refreshCostSummary(sessionId);
   }
