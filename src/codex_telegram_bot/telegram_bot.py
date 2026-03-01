@@ -1723,30 +1723,38 @@ async def _process_prompt(
         elif event == "skills.deactivated":
             skills = ", ".join([str(x) for x in list(update_payload.get("skills") or [])][:4])
             await set_status(f"Finished with skill(s): {skills or 'n/a'}")
+        elif event == "loop.action.started":
+            action_index = int(update_payload.get("action_index", 0) or 0)
+            action_max = int(update_payload.get("action_max", 0) or 0)
+            goal = str(update_payload.get("goal", "") or "").strip()
+            tools = [str(x).strip() for x in list(update_payload.get("tools") or []) if str(x).strip()]
+            steps_total = int(update_payload.get("steps_total", 0) or 0)
+            tools_text = ", ".join(tools[:8]) if tools else "none"
+            prefix = f"Action {action_index}/{action_max}" if action_index and action_max else "Action"
+            await set_status(f"{prefix}: {goal[:120]} | tools: {tools_text}")
+            await narrate(
+                f"I am attempting this action: {goal or 'continue task execution'}. "
+                f"Planned steps: {steps_total or '?'} using tools: {tools_text}.",
+                f"voice:loop.action.started:{action_index}:{tools_text[:80]}",
+            )
         elif event == "loop.step.started":
             run_state[update.effective_chat.id]["active_step"] = int(update_payload.get("step", 0) or 0)
             step = int(update_payload.get("step", 0) or 0)
             command = str(update_payload.get("command", "") or "").strip()
             await set_status(f"Step {step}: {command[:120]}")
-            steps_total = int(run_state[update.effective_chat.id].get("steps_total", 0) or 0)
-            await narrate(
-                f"I’m running step {step}/{steps_total or '?'}: {_humanize_action_preview(command)}",
-                f"voice:loop.step.started:{step}:{command[:80]}",
-            )
         elif event == "native_loop.tool_call":
-            tool_name = str(update_payload.get("tool_name", "") or "tool")
-            await set_status(f"Running tool: {tool_name}")
-            await narrate(
-                f"I’m calling tool `{tool_name}` now.",
-                f"voice:native_loop.tool_call:{tool_name}:{str(update_payload.get('tool_use_id', ''))[:20]}",
-            )
+            return
         elif event == "loop.step.completed":
             step = int(update_payload.get("step", 0) or 0)
             rc = int(update_payload.get("returncode", 0) or 0)
-            if rc == 0:
-                await narrate(f"Step {step} finished successfully.", f"voice:loop.step.completed:{step}:ok")
-            else:
+            if rc != 0:
                 await narrate(f"Step {step} failed (rc={rc}). I’m handling it.", f"voice:loop.step.completed:{step}:{rc}")
+        elif event == "loop.action.paused":
+            await set_status("Paused after bounded action batch. Awaiting your continue confirmation.")
+            await narrate(
+                "I completed the current action batch and paused. Reply with 'continue' if you want me to proceed.",
+                "voice:loop.action.paused",
+            )
         elif event == "loop.step.awaiting_approval":
             approval_id = str(update_payload.get("approval_id", ""))
             await set_status(f"Paused: waiting for approval `{approval_id[:8]}`.")

@@ -486,17 +486,23 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         event = str(update_payload.get("event") or "").strip()
         if not event:
             return None
-        if event == "native_loop.tool_call":
-            tool_name = str(update_payload.get("tool_name") or "tool")
+        if event == "loop.action.started":
+            tools = [str(x) for x in list(update_payload.get("tools") or []) if str(x).strip()]
             return {
                 "type": "tool_event",
-                "name": tool_name,
+                "name": "action",
                 "status": "called",
                 "detail": {
-                    "tool_use_id": str(update_payload.get("tool_use_id") or ""),
-                    "turn": int(update_payload.get("turn") or 0),
+                    "mode": str(update_payload.get("mode") or ""),
+                    "action_index": int(update_payload.get("action_index") or 0),
+                    "action_max": int(update_payload.get("action_max") or 0),
+                    "goal": str(update_payload.get("goal") or ""),
+                    "tools": tools,
+                    "steps_total": int(update_payload.get("steps_total") or 0),
                 },
             }
+        if event == "native_loop.tool_call":
+            return None
         if event == "loop.step.started":
             return {
                 "type": "tool_event",
@@ -552,6 +558,17 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 "detail": {
                     "message": str(update_payload.get("message") or "I am continuing the task now."),
                     "reason": str(update_payload.get("reason") or "preliminary_report"),
+                },
+            }
+        if event == "loop.action.paused":
+            return {
+                "type": "tool_event",
+                "name": "action",
+                "status": "result",
+                "detail": {
+                    "reason": str(update_payload.get("reason") or ""),
+                    "action_count": int(update_payload.get("action_count") or 0),
+                    "action_max": int(update_payload.get("action_max") or 0),
                 },
             }
         return None

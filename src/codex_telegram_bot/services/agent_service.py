@@ -43,6 +43,7 @@ from codex_telegram_bot.services.continuation_guard import (
     PRELIMINARY_CONTINUE_PROMPT,
     auto_continue_preliminary_enabled,
     auto_continue_preliminary_max_passes,
+    build_preliminary_action_report,
     continuation_status_line,
     looks_like_preliminary_report,
     sanitize_terminal_output,
@@ -83,6 +84,7 @@ CONTEXT_SUMMARY_BUDGET_CHARS = 1200
 MODEL_JOB_HEARTBEAT_SEC = 15
 AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
 AUTONOMOUS_PROTOCOL_MAX_DEPTH_ENV = "AUTONOMOUS_PROTOCOL_MAX_DEPTH"
+AUTONOMOUS_ACTION_MAX_BATCHES_ENV = "AUTONOMOUS_ACTION_MAX_BATCHES"
 TOOL_APPROVAL_SENTINEL = "__tool__"
 SAFE_RUNTIME_ERROR_TEXT = (
     "I could not safely decode the model output for this turn. "
@@ -683,6 +685,9 @@ class AgentService:
         )
         decode_retry_budget = 1
         preliminary_retry_budget = auto_continue_preliminary_max_passes()
+        action_batch_budget = self._autonomous_action_max_batches()
+        action_batches_executed = 0
+        action_summaries: List[Dict[str, Any]] = []
         text_accumulator: List[str] = []
 
         for turn in range(max_turns):
@@ -770,6 +775,47 @@ class AgentService:
             if assistant_chunks:
                 text_accumulator.extend(assistant_chunks)
             tool_calls = [e for e in events if isinstance(e, RuntimeToolCall)]
+
+            if tool_calls:
+                action_goal = _summarize_action_goal(assistant_chunks=assistant_chunks, fallback=user_message)
+                action_tools = _runtime_tool_names(tool_calls)
+                if action_batches_executed >= action_batch_budget:
+                    report = build_preliminary_action_report(
+                        action_summaries=action_summaries,
+                        max_actions=action_batch_budget,
+                    )
+                    await self._notify_progress(
+                        progress_callback,
+                        {
+                            "event": "loop.action.paused",
+                            "reason": "action_budget",
+                            "action_max": action_batch_budget,
+                            "action_count": action_batches_executed,
+                        },
+                    )
+                    return self.enforce_transport_text_contract(
+                        session_id=session_id,
+                        raw_output=report,
+                    )
+                action_batches_executed += 1
+                action_summaries.append(
+                    {
+                        "goal": action_goal,
+                        "tools": list(action_tools),
+                    }
+                )
+                await self._notify_progress(
+                    progress_callback,
+                    {
+                        "event": "loop.action.started",
+                        "mode": "native",
+                        "action_index": action_batches_executed,
+                        "action_max": action_batch_budget,
+                        "goal": action_goal,
+                        "tools": list(action_tools),
+                        "steps_total": len(tool_calls),
+                    },
+                )
 
             if not tool_calls and str(response.get("stop_reason") or "end_turn") != "tool_use":
                 final_reply = ("\n".join(assistant_chunks) or "\n".join(text_accumulator)).strip()
@@ -2385,19 +2431,46 @@ class AgentService:
 
         policy_profile = self._agent_policy_profile(agent_id=agent_id)
         prompt_fingerprint = _tool_loop_fingerprint(actions=actions, cleaned_prompt=cleaned_prompt, final_prompt=final_prompt)
+        action_batch_budget = self._autonomous_action_max_batches()
+        actions_truncated = len(actions) > action_batch_budget
+        actions_to_run = list(actions[:action_batch_budget])
         checkpoints: Dict[int, Dict[str, Any]] = {}
         if self._run_store:
             for cp in self._run_store.list_tool_loop_checkpoints(session_id=session_id, prompt_fingerprint=prompt_fingerprint):
                 checkpoints[int(cp["step_index"])] = cp
         await self._notify_progress(
             progress_callback,
-            {"event": "loop.started", "steps_total": len(actions), "agent_id": agent_id},
+            {"event": "loop.started", "steps_total": len(actions_to_run), "agent_id": agent_id},
+        )
+        await self._notify_progress(
+            progress_callback,
+            {
+                "event": "loop.action.started",
+                "mode": "legacy",
+                "action_index": 1,
+                "action_max": action_batch_budget,
+                "goal": _summarize_action_goal(assistant_chunks=[], fallback=(cleaned_prompt or prompt)),
+                "tools": _loop_action_tool_names(actions_to_run),
+                "steps_total": len(actions_to_run),
+                "truncated": bool(actions_truncated),
+            },
         )
         observations: List[str] = []
+        executed_action_summaries: List[Dict[str, Any]] = []
         session_workspace = workspace_root
-        for index, action in enumerate(actions, start=1):
+        for index, action in enumerate(actions_to_run, start=1):
             action_id = "tool-" + uuid.uuid4().hex[:8]
             command = action.checkpoint_command()
+            action_tools = [action.tool_name] if action.kind == "tool" and action.tool_name else ["shell_exec"]
+            executed_action_summaries.append(
+                {
+                    "goal": _summarize_action_goal(
+                        assistant_chunks=[],
+                        fallback=f"{(cleaned_prompt or prompt).strip()} (step {index}/{len(actions_to_run)})",
+                    ),
+                    "tools": action_tools,
+                }
+            )
             checkpoint = checkpoints.get(index)
             if checkpoint and checkpoint.get("command") == command and checkpoint.get("status") == "completed":
                 observations.append(f"{action_id} skipped via checkpoint: step {index} already completed")
@@ -2416,7 +2489,7 @@ class AgentService:
                 {
                     "event": "loop.step.started",
                     "step": index,
-                    "steps_total": len(actions),
+                    "steps_total": len(actions_to_run),
                     "action_id": action_id,
                     "command": command,
                 },
@@ -2817,6 +2890,30 @@ class AgentService:
                     run_id=tool_run_id,
                 )
 
+        if actions_truncated:
+            report = build_preliminary_action_report(
+                action_summaries=executed_action_summaries,
+                max_actions=action_batch_budget,
+            )
+            await self._notify_progress(
+                progress_callback,
+                {
+                    "event": "loop.action.paused",
+                    "reason": "action_budget",
+                    "action_max": action_batch_budget,
+                    "action_count": len(actions_to_run),
+                },
+            )
+            if active_skills:
+                await self._notify_progress(
+                    progress_callback,
+                    {
+                        "event": "skills.deactivated",
+                        "skills": [s.skill_id for s in active_skills],
+                    },
+                )
+            return self.enforce_transport_text_contract(session_id=session_id, raw_output=report)
+
         enriched = (final_prompt or cleaned_prompt).strip()
         if observations:
             enriched = (
@@ -2829,8 +2926,8 @@ class AgentService:
         await self._notify_progress(progress_callback, {"event": "model.job.queued", "job_id": job_id})
         output = await self._wait_job_with_progress(job_id=job_id, progress_callback=progress_callback)
         await self._notify_progress(progress_callback, {"event": "model.job.finished", "job_id": job_id})
-        selected_tools = [a.tool_name for a in actions if a.kind == "tool" and a.tool_name]
-        if any(a.kind == "exec" for a in actions):
+        selected_tools = [a.tool_name for a in actions_to_run if a.kind == "tool" and a.tool_name]
+        if any(a.kind == "exec" for a in actions_to_run):
             selected_tools.append("exec")
         output = await self._resolve_autonomous_output(
             output=output,
@@ -2849,7 +2946,7 @@ class AgentService:
         )
         await self._notify_progress(
             progress_callback,
-            {"event": "loop.finished", "steps_total": len(actions)},
+            {"event": "loop.finished", "steps_total": len(actions_to_run)},
         )
         if active_skills:
             await self._notify_progress(
@@ -3929,6 +4026,16 @@ class AgentService:
             return 6
         return max(1, min(value, 12))
 
+    def _autonomous_action_max_batches(self) -> int:
+        raw = (os.environ.get(AUTONOMOUS_ACTION_MAX_BATCHES_ENV) or "").strip()
+        if not raw:
+            return 5
+        try:
+            value = int(raw)
+        except Exception:
+            return 5
+        return max(1, min(value, 10))
+
     async def _run_probe_decision(
         self,
         prompt: str,
@@ -4595,6 +4702,41 @@ def _format_tool_action_preview(tool_name: str, tool_args: Dict[str, Any]) -> st
         return name
     compact = ", ".join([f"{k}={v}" for k, v in list(args.items())[:3]])
     return f"{name}({compact})"
+
+
+def _summarize_action_goal(*, assistant_chunks: Sequence[str], fallback: str) -> str:
+    for chunk in assistant_chunks:
+        text = str(chunk or "").strip()
+        if not text:
+            continue
+        line = text.splitlines()[0].strip()
+        if line:
+            return line[:180]
+    return str(fallback or "continue task execution").strip()[:180]
+
+
+def _runtime_tool_names(tool_calls: Sequence[RuntimeToolCall]) -> List[str]:
+    names: List[str] = []
+    seen: set[str] = set()
+    for call in tool_calls:
+        name = str(getattr(call, "name", "") or "").strip()
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def _loop_action_tool_names(actions: Sequence[LoopAction]) -> List[str]:
+    names: List[str] = []
+    seen: set[str] = set()
+    for action in actions:
+        name = action.tool_name if action.kind == "tool" and action.tool_name else "shell_exec"
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def _resolve_workspace_bound_path(raw_path: Any, workspace_root: Path) -> Optional[str]:

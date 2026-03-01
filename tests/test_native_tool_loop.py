@@ -9,6 +9,7 @@ Validates that:
 6. Tools are actually executed (not printed as text) in the native loop
 """
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -292,6 +293,71 @@ class TestNativeToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertIn(preliminary, result)
         self.assertIn(PRELIMINARY_CONTINUE_HANDOFF, result)
         self.assertEqual(len(provider.calls), 3)
+
+    async def test_native_loop_emits_action_started_with_all_tools(self):
+        provider = _FakeProvider([
+            {
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {"path": "missing.txt"}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "git_status", "input": {}},
+                ],
+                "stop_reason": "tool_use",
+                "usage": {},
+            },
+            {
+                "content": [{"type": "text", "text": "Completed."}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            },
+        ])
+        progress_events = []
+
+        async def _progress(payload):
+            progress_events.append(dict(payload))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._make_service(provider, Path(tmp))
+            await service.run_native_tool_loop(
+                user_message="inspect and report",
+                chat_id=1,
+                user_id=1,
+                session_id="test-sess",
+                progress_callback=_progress,
+            )
+
+        action_events = [e for e in progress_events if e.get("event") == "loop.action.started"]
+        self.assertEqual(len(action_events), 1)
+        self.assertEqual(action_events[0].get("tools"), ["read_file", "git_status"])
+        self.assertEqual(int(action_events[0].get("steps_total") or 0), 2)
+
+    async def test_native_loop_pauses_when_action_budget_reached(self):
+        from codex_telegram_bot.services.agent_service import AUTONOMOUS_ACTION_MAX_BATCHES_ENV
+
+        provider = _FakeProvider([
+            {
+                "content": [{"type": "tool_use", "id": "toolu_1", "name": "git_status", "input": {}}],
+                "stop_reason": "tool_use",
+                "usage": {},
+            },
+            {
+                "content": [{"type": "tool_use", "id": "toolu_2", "name": "git_diff", "input": {}}],
+                "stop_reason": "tool_use",
+                "usage": {},
+            },
+        ])
+        with patch.dict(os.environ, {AUTONOMOUS_ACTION_MAX_BATCHES_ENV: "1"}, clear=False):
+            with tempfile.TemporaryDirectory() as tmp:
+                service = self._make_service(provider, Path(tmp))
+                result = await service.run_native_tool_loop(
+                    user_message="keep iterating",
+                    chat_id=1,
+                    user_id=1,
+                    session_id="test-sess",
+                )
+        self.assertIn("Preliminary report", result)
+        self.assertIn("Do you want me to continue?", result)
+        self.assertIn("git_status", result)
+        self.assertIn(PRELIMINARY_CONTINUE_HANDOFF, result)
 
     async def test_tool_call_then_final_reply(self):
         """Model calls a tool, gets result, then gives final reply."""

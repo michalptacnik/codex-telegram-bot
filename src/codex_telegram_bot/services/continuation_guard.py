@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any, Sequence
 
 AUTO_CONTINUE_PRELIMINARY_ENV = "AUTO_CONTINUE_PRELIMINARY"
 AUTO_CONTINUE_PRELIMINARY_MAX_PASSES_ENV = "AUTO_CONTINUE_PRELIMINARY_MAX_PASSES"
@@ -115,6 +116,27 @@ def sanitize_terminal_output(text: str) -> str:
             return raw
         return f"{raw}\n\n{PRELIMINARY_CONTINUE_HANDOFF}"
     return raw
+
+
+def build_preliminary_action_report(
+    *,
+    action_summaries: Sequence[dict[str, Any]],
+    max_actions: int,
+) -> str:
+    lines = [
+        f"Preliminary report: I completed {max(1, int(max_actions))} action batch(es) and paused for confirmation."
+    ]
+    if action_summaries:
+        lines.append("Actions attempted:")
+        for idx, summary in enumerate(action_summaries, start=1):
+            goal = str(summary.get("goal") or "").strip() or "continue task execution"
+            tools = [str(t).strip() for t in list(summary.get("tools") or []) if str(t).strip()]
+            tools_text = ", ".join(tools[:8]) if tools else "none"
+            lines.append(f"{idx}. Goal: {goal}")
+            lines.append(f"   Tools: {tools_text}")
+    lines.append("Do you want me to continue?")
+    lines.append(PRELIMINARY_CONTINUE_HANDOFF)
+    return "\n".join(lines)
 
 
 def _looks_like_blocking_question(text: str) -> bool:
