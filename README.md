@@ -23,12 +23,17 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
   - Per-session isolated workspace directories with disk-byte and file-count quotas
 - Agentic execution:
   - Probe → expand prompt path keeps base context small
+  - Thin persistent memory index (`memory/MEMORY_INDEX.md`) is always loaded with strict size cap; heavy memory pages are pointer-opened on demand
   - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
   - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
   - Native `web_search` tool for internet retrieval with source URLs/snippets
   - Native `web_fetch` tool for SSRF-safe URL-to-readable-text extraction
   - Persistent scheduler tools (`schedule_task`, `list_schedules`, `cancel_schedule`) with SQLite-backed jobs and automatic tick loop
+  - Proactive heartbeat loop (`heartbeat_*` + opt-in scheduler) can push reminders/messages without user prompt, with quiet-hours and spend gating
+  - Task tools (`task_create`, `task_list`, `task_done`) persist Markdown tasks and sync concise obligations into MEMORY_INDEX
+  - Skill marketplace tools (`skills_market_*`) support search/install/enable/disable/remove with cache, hash verification, and progressive disclosure
   - Proactive `send_message` tool for agent-initiated delivery to session owners
+  - Proactive `send_file` tool sends workspace files as Telegram attachments with path and access controls
   - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
   - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
 - Gateway/control plane:
@@ -252,6 +257,11 @@ Environment variables override `.env`:
 - `MAX_SESSIONS_PER_USER` (default: `3`; concurrent process sessions per chat/user)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
 - `MESSAGE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_message`)
+- `FILE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_file`)
+- `ENABLE_HEARTBEAT` (default: `0`; heartbeat proactivity is opt-in)
+- `MEMORY_INDEX_MAX_CHARS` (default: `8000`; hard cap for always-loaded thin memory index)
+- `TELEGRAM_MAX_ATTACHMENT_BYTES` (default: `26214400` = 25 MB per attachment)
+- `TELEGRAM_MAX_ATTACHMENTS_PER_DAY` (default: `50` per session/day)
 - `WHATSAPP_ENABLED` (default: `1`; set `0` to disable WhatsApp bridge endpoints)
 - `WHATSAPP_WEBHOOK_TOKEN` (optional; if set, required as `X-Codex-Webhook-Token` header or `?token=` query on `/whatsapp/webhook`)
 - `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` (optional; when set, enables proactive outbound WhatsApp delivery)
@@ -274,6 +284,8 @@ Environment variables override `.env`:
 - `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default: `30`; idle sessions archived after this many days)
 - `SESSION_DELETE_AFTER_DAYS` (default: `90`; archived sessions hard-deleted after this many days)
 - `SKILL_TRUSTED_HOSTS` (optional comma-separated allowlist for remote skill manifests; default: `raw.githubusercontent.com,github.com`)
+- `SKILL_SOURCES_JSON` (optional JSON array for marketplace catalogs; defaults to `openai/skills`)
+- `SKILL_TRUSTED_PUBLISHER_KEYS` (optional comma-separated trusted publisher key IDs for marketplace “Verified” status)
 - `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_APP_PASSWORD`, `SMTP_FROM` (used by `smtp_email` skill and `send_email_smtp`)
 
 Print active config summary (never prints token):
@@ -436,6 +448,7 @@ export EXECUTION_BACKEND=docker
 - `GET /api/runs?limit=20`
 - `GET /api/sessions?limit=50`
 - `GET /api/sessions/{session_id}/detail`
+- `GET /api/attachments/{attachment_id}/download`
 - `GET /api/costs/session/{session_id}`
 - `GET /api/costs/user/{user_id}/daily`
 - `GET /api/costs/daily`
@@ -629,8 +642,70 @@ At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic
 - `/resume [session_prefix]` resumes active session or switches to a matching past session.
 - `/branch` creates a new session branched from current recent history.
 - Session metadata is visible in Control Center (`/sessions` and `/api/sessions`).
+- Telegram document/photo/audio/video uploads are stored under session workspace `attachments/<telegram_message_id>/...` and surfaced in Control Center session detail.
 - Retention policy compacts old session history when message count exceeds configured limits.
 - Tool execution uses isolated per-session workspace directories managed by `WorkspaceManager`.
+
+## Persistent Memory (Thin Index)
+
+- Session workspace bootstraps a memory tree:
+  - `memory/MEMORY_INDEX.md` (always-loaded thin index)
+  - `memory/HEARTBEAT.md`
+  - `memory/daily/YYYY-MM-DD.md`
+  - `memory/pages/*.md` (curated heavy pages, including `memory/pages/tasks.md`)
+- Keep `MEMORY_INDEX.md` machine-parseable and lean:
+  - max size controlled by `MEMORY_INDEX_MAX_CHARS` (default 8000 chars)
+  - section limits enforced (projects/obligations/preferences/pointers)
+- Memory tools:
+  - `memory_index_get`, `memory_page_list`, `memory_pointer_open`
+  - `memory_append_daily`, `memory_index_update`
+- Prompt contract:
+  - thin index is injected by default
+  - detailed pages/daily logs are opened only on-demand via pointers
+
+## Heartbeat Proactivity
+
+- Heartbeat is opt-in by default:
+  - set `ENABLE_HEARTBEAT=1`
+  - enable per-session/user in heartbeat state (stored in SQLite)
+- Template file: `memory/HEARTBEAT.md`
+  - includes daily/weekly/monitor/waiting-on checklists and quiet hours (`start`/`end`)
+- Tools:
+  - `heartbeat_get`, `heartbeat_update`, `heartbeat_run_once` (`dry_run=true` supported)
+- Runtime behavior:
+  - cron tick evaluates due heartbeat sessions
+  - respects quiet hours using session timezone
+  - respects access-control spend ceilings before sending proactive messages
+
+## Skill Marketplace
+
+- Default catalog source: `openai/skills` (`.agents/skills` path)
+- Optional custom sources via `SKILL_SOURCES_JSON`
+- Marketplace tools:
+  - `skills_market_sources_list`
+  - `skills_market_search`
+  - `skills_market_install` (`workspace` or `global`)
+  - `skills_market_enable`, `skills_market_disable`, `skills_market_remove`
+- Safety model:
+  - instruction-only packs in this phase (no marketplace code execution)
+  - install-time SHA256 manifest stored in `.marketplace.json`
+  - enable-time hash re-verification
+  - optional trusted publisher badges via `SKILL_TRUSTED_PUBLISHER_KEYS`
+- Progressive disclosure:
+  - base prompt keeps skill loading lean
+  - full skill content is loaded only when selected/activated
+
+## Telegram Attachments + send_file
+
+- Inbound files:
+  - accepted: document/photo/audio/video
+  - saved into session workspace under `attachments/<message_id>/...`
+  - audited in SQLite (`messages` + `attachments` tables) with SHA256 and metadata
+  - limits: `TELEGRAM_MAX_ATTACHMENT_BYTES`, `TELEGRAM_MAX_ATTACHMENTS_PER_DAY`
+- Outbound files:
+  - use `send_file(path, caption?, kind?, session_id?)`
+  - path must resolve inside workspace root (absolute paths require trusted profile and still must be inside workspace)
+  - delivery is audited and linked to an assistant message row
 
 ## Tool Loop (Probe -> Expand)
 
