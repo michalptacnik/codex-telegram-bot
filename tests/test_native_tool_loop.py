@@ -243,6 +243,33 @@ class TestNativeToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "The answer is 4.")
         self.assertEqual(len(provider.calls), 1)
 
+    async def test_preliminary_text_triggers_auto_continue_pass(self):
+        provider = _FakeProvider([
+            {
+                "content": [{"type": "text", "text": "I'm still working on it. Let me check one more thing."}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            },
+            {
+                "content": [{"type": "text", "text": "Completed: voice checks finished."}],
+                "stop_reason": "end_turn",
+                "usage": {},
+            },
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            service = self._make_service(provider, Path(tmp))
+            result = await service.run_native_tool_loop(
+                user_message="run voice checks",
+                chat_id=1,
+                user_id=1,
+                session_id="test-sess",
+            )
+        self.assertEqual(result, "Completed: voice checks finished.")
+        self.assertEqual(len(provider.calls), 2)
+        second_messages = provider.calls[1]["messages"]
+        self.assertEqual(second_messages[-1]["role"], "user")
+        self.assertIn("preliminary progress update", str(second_messages[-1]["content"]).lower())
+
     async def test_tool_call_then_final_reply(self):
         """Model calls a tool, gets result, then gives final reply."""
         provider = _FakeProvider([

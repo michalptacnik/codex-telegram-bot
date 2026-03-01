@@ -39,6 +39,13 @@ from codex_telegram_bot.services.capabilities_manifest import (
     build_system_capabilities_chunk,
     write_capabilities_manifest,
 )
+from codex_telegram_bot.services.continuation_guard import (
+    PRELIMINARY_CONTINUE_PROMPT,
+    auto_continue_preliminary_enabled,
+    auto_continue_preliminary_max_passes,
+    continuation_status_line,
+    looks_like_preliminary_report,
+)
 from codex_telegram_bot.services.probe_loop import ProbeLoop
 from codex_telegram_bot.services.repo_context import RepositoryContextRetriever
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
@@ -674,6 +681,7 @@ class AgentService:
             max(3, self._tool_loop_max_steps * 3),
         )
         decode_retry_budget = 1
+        preliminary_retry_budget = auto_continue_preliminary_max_passes()
         text_accumulator: List[str] = []
 
         for turn in range(max_turns):
@@ -766,6 +774,23 @@ class AgentService:
                 final_reply = ("\n".join(assistant_chunks) or "\n".join(text_accumulator)).strip()
                 if not final_reply:
                     final_reply = "(No response from model.)"
+                if (
+                    auto_continue_preliminary_enabled()
+                    and preliminary_retry_budget > 0
+                    and looks_like_preliminary_report(final_reply)
+                ):
+                    preliminary_retry_budget -= 1
+                    await self._notify_progress(
+                        progress_callback,
+                        {
+                            "event": "loop.auto_continue",
+                            "reason": "preliminary_report",
+                            "message": continuation_status_line(final_reply),
+                            "turn": turn + 1,
+                        },
+                    )
+                    messages.append({"role": "user", "content": PRELIMINARY_CONTINUE_PROMPT})
+                    continue
                 await self._notify_progress(progress_callback, {"event": "native_loop.finished", "turns": turn + 1})
                 return self.enforce_transport_text_contract(session_id=session_id, raw_output=final_reply)
 
@@ -1989,6 +2014,30 @@ class AgentService:
             output = (
                 "I hit a tool-call formatting loop while executing your request. "
                 "Reply with 'retry' and I will continue automatically."
+            )
+        preliminary_passes = auto_continue_preliminary_max_passes()
+        while (
+            auto_continue_preliminary_enabled()
+            and preliminary_passes > 0
+            and looks_like_preliminary_report(output)
+        ):
+            preliminary_passes -= 1
+            await self._notify_progress(
+                progress_callback,
+                {
+                    "event": "loop.auto_continue",
+                    "reason": "preliminary_report",
+                    "message": continuation_status_line(output),
+                },
+            )
+            output = await self.run_prompt_with_tool_loop(
+                prompt=PRELIMINARY_CONTINUE_PROMPT,
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                progress_callback=progress_callback,
+                autonomy_depth=1,
             )
         output = self.enforce_transport_text_contract(
             session_id=session_id,

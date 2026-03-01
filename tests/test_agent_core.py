@@ -28,6 +28,9 @@ class _StubService:
     def append_session_assistant_message(self, session_id: str, content: str):
         self.appended_assistant.append((session_id, content))
 
+    def enforce_transport_text_contract(self, session_id: str, raw_output: str):
+        return str(raw_output or "")
+
     def reset_session(self, chat_id: int, user_id: int):
         self.reset_calls.append((chat_id, user_id))
         return _Session("sess-reset")
@@ -46,6 +49,23 @@ class TestAgentCore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(service.appended_user, [("sess-123", "hello")])
         self.assertEqual(service.appended_assistant, [("sess-123", "ok")])
         service.run_prompt_with_tool_loop.assert_awaited_once()
+
+    async def test_agent_auto_continues_preliminary_router_output(self):
+        service = _StubService()
+        router = type("MockRouter", (), {})()
+        router.route_prompt = AsyncMock(
+            side_effect=[
+                "I'm still working on this; let me check one more thing.",
+                "Final: completed with concrete result.",
+            ]
+        )
+        agent = Agent(agent_service=service, router=router)
+
+        result = await agent.handle_message(chat_id=1, user_id=2, text="do work")
+
+        self.assertEqual(result.output, "Final: completed with concrete result.")
+        self.assertEqual(router.route_prompt.await_count, 2)
+        self.assertEqual(service.appended_assistant, [("sess-123", "Final: completed with concrete result.")])
 
     async def test_agent_reset_delegates_to_service(self):
         service = _StubService()

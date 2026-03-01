@@ -1782,6 +1782,10 @@ async def _process_prompt(
             )
         elif event == "loop.finished":
             await set_status("Finishing up and preparing the response.")
+        elif event == "loop.auto_continue":
+            msg = str(update_payload.get("message") or "I am continuing the task now.").strip()
+            await set_status(msg)
+            await narrate(msg, f"voice:loop.auto_continue:{str(update_payload.get('reason') or '')}")
 
     async def heartbeat() -> None:
         chat_id = update.effective_chat.id

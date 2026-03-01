@@ -544,6 +544,16 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                     "risk_tier": str(update_payload.get("risk_tier") or ""),
                 },
             }
+        if event == "loop.auto_continue":
+            return {
+                "type": "tool_event",
+                "name": "continuation",
+                "status": "result",
+                "detail": {
+                    "message": str(update_payload.get("message") or "I am continuing the task now."),
+                    "reason": str(update_payload.get("reason") or "preliminary_report"),
+                },
+            }
         return None
 
     def _session_style(session_id: str) -> Dict[str, Any]:
