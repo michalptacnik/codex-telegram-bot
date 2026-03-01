@@ -1,0 +1,27 @@
+{
+  "openai/gpt-4.1-mini": {
+    "prompt": 0.15,
+    "completion": 0.6
+  },
+  "responses_api/gpt-4o": {
+    "prompt": 2.5,
+    "completion": 10.0
+  },
+  "deepseek/deepseek-chat": {
+    "prompt": 0.27,
+    "completion": 1.1
+  },
+  "qwen/qwen-plus": {
+    "prompt": 0.4,
+    "completion": 1.2
+  },
+  "anthropic/claude-opus-4-6": {
+    "prompt": 15.0,
+    "completion": 75.0
+  },
+  "gemini/gemini-2.0-flash": {
+    "prompt": 0.1,
+    "completion": 0.4
+  }
+}
+

@@ -98,6 +98,7 @@ _COMMAND_HANDLERS = [
     ("deny", "handle_deny"),
     ("reset", "handle_reset"),
     ("status", "handle_status"),
+    ("cost", "handle_cost"),
     ("help", "handle_help"),
     ("workspace", "handle_workspace"),
     ("skills", "handle_skills"),
@@ -725,6 +726,27 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         logger.exception("Status handler error: %s", exc)
 
 
+async def handle_cost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        agent_service = context.bot_data.get("agent_service")
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        session = agent_service.get_or_create_session(chat_id=update.effective_chat.id, user_id=user_id)
+        session_cost = agent_service.session_cost_summary(session.session_id)
+        today_cost = agent_service.user_daily_cost_summary(user_id=user_id)
+        msg = (
+            f"Session: {session.session_id[:8]}\n"
+            f"Session tokens: {int(session_cost.get('total_tokens') or 0)}\n"
+            f"Session cost (USD): {float(session_cost.get('total_cost_usd') or 0.0):.6f}\n"
+            f"Today tokens: {int(today_cost.get('total_tokens') or 0)}\n"
+            f"Today cost (USD): {float(today_cost.get('total_cost_usd') or 0.0):.6f}"
+        )
+        await update.message.reply_text(msg)
+    except Exception as exc:
+        logger.exception("Cost handler error: %s", exc)
+
+
 async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if not update.message or not update.effective_chat:
@@ -743,7 +765,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 profile = agent.policy_profile
         text = (
             "Commands:\n"
-            "/new, /resume [id], /branch, /status, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /sessions, /tail [id], /kill [id], /email, /gh, /email_check, /contact, /template, /email_template\n"
+            "/new, /resume [id], /branch, /status, /cost, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /sessions, /tail [id], /kill [id], /email, /gh, /email_check, /contact, /template, /email_template\n"
             "\n"
             "Examples:\n"
             "- `!exec /bin/ls -la`\n"

@@ -185,10 +185,11 @@ class ResponsesApiProvider:
             data = response.json()
             text = _extract_responses_text(data)
             tool_calls = _extract_responses_tool_calls(data)
-            return {"text": text, "tool_calls": tool_calls}
+            usage = data.get("usage") if isinstance(data, dict) else {}
+            return {"text": text, "tool_calls": tool_calls, "usage": usage or {}, "model": self._model}
         except Exception as exc:
             logger.exception("ResponsesApiProvider tool call error")
-            return {"text": f"Error: {exc}", "tool_calls": []}
+            return {"text": f"Error: {exc}", "tool_calls": [], "usage": {}, "model": self._model}
 
     # ------------------------------------------------------------------
     # Structured tool-calling loop (Issue #102)

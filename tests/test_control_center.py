@@ -252,6 +252,12 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(retrieval_stats.status_code, 200)
             retrieval_refresh = client.post("/api/retrieval/refresh")
             self.assertEqual(retrieval_refresh.status_code, 200)
+            costs_api = client.get("/api/costs/daily")
+            self.assertEqual(costs_api.status_code, 200)
+            self.assertIn("items", costs_api.json())
+            costs_page = client.get("/costs")
+            self.assertEqual(costs_page.status_code, 200)
+            self.assertIn("Costs", costs_page.text)
 
             approvals_page = client.get("/approvals")
             self.assertEqual(approvals_page.status_code, 200)

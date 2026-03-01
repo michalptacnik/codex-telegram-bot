@@ -585,6 +585,24 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             for s in sessions
         ]
 
+    @app.get("/api/costs/session/{session_id}")
+    async def api_session_costs(request: Request, session_id: str) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        summary = agent_service.session_cost_summary(session_id=session_id)
+        events = agent_service.list_session_usage_events(session_id=session_id, limit=50)
+        return {"summary": summary, "events": events}
+
+    @app.get("/api/costs/user/{user_id}/daily")
+    async def api_user_daily_costs(request: Request, user_id: int, date: str = "") -> Dict[str, Any]:
+        _opt_api_scope(request)
+        return agent_service.user_daily_cost_summary(user_id=user_id, date=date)
+
+    @app.get("/api/costs/daily")
+    async def api_costs_daily(request: Request, date: str = "", limit: int = 100) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        items = agent_service.list_daily_cost_summaries(date=date, limit=max(1, min(limit, 500)))
+        return {"date": date, "items": items}
+
     @app.get("/api/approvals")
     async def api_list_approvals(request: Request, limit: int = 200) -> List[Dict[str, Any]]:
         _opt_api_scope(request)
@@ -1231,6 +1249,22 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             {"request": request, "nav": "sessions", "sessions": sessions},
         )
 
+    @app.get("/costs", response_class=HTMLResponse)
+    async def costs_page(request: Request, date: str = ""):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
+        day = (date or "").strip()
+        items = agent_service.list_daily_cost_summaries(date=day, limit=200)
+        return templates.TemplateResponse(
+            "costs.html",
+            {
+                "request": request,
+                "nav": "costs",
+                "items": items,
+                "date": day,
+            },
+        )
+
     @app.get("/approvals", response_class=HTMLResponse)
     async def approvals_page(request: Request):
         if (redir := _ui_auth_redirect(request)) is not None:
@@ -1469,6 +1503,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 }
                 for m in messages
             ],
+            "cost_summary": agent_service.session_cost_summary(session_id=session_id),
         }
 
     return app

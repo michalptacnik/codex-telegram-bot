@@ -36,7 +36,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class SqliteRunStore:
@@ -193,6 +193,51 @@ class SqliteRunStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_cron_jobs_due
                 ON cron_jobs (status, next_run)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS usage_events (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                    completion_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    cost_usd_estimate REAL,
+                    created_at TEXT NOT NULL,
+                    meta_json TEXT NOT NULL DEFAULT '{}'
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_usage_events_session_created
+                ON usage_events (session_id, created_at DESC)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_cost_rollups (
+                    session_id TEXT PRIMARY KEY,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_cost_usd REAL NOT NULL DEFAULT 0.0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_daily_cost_rollups (
+                    user_id TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    total_tokens INTEGER NOT NULL DEFAULT 0,
+                    total_cost_usd REAL NOT NULL DEFAULT 0.0,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (user_id, date)
+                )
                 """
             )
             conn.execute(
@@ -1549,6 +1594,185 @@ class SqliteRunStore:
                 """,
                 (status, next_run, str(error or "")[:400], int(failure_count), _utc_now(), job_id),
             )
+
+    # ------------------------------------------------------------------
+    # Usage and cost tracking
+    # ------------------------------------------------------------------
+
+    def record_usage_event(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        total_tokens: int,
+        cost_usd_estimate: Optional[float],
+        meta: Optional[Dict[str, object]] = None,
+    ) -> str:
+        event_id = str(uuid.uuid4())
+        created_at = _utc_now()
+        date = created_at[:10]
+        prompt_tokens_i = max(0, int(prompt_tokens or 0))
+        completion_tokens_i = max(0, int(completion_tokens or 0))
+        total_tokens_i = max(0, int(total_tokens or (prompt_tokens_i + completion_tokens_i)))
+        cost_value = float(cost_usd_estimate) if cost_usd_estimate is not None else None
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO usage_events
+                (id, user_id, session_id, provider, model, prompt_tokens, completion_tokens, total_tokens, cost_usd_estimate, created_at, meta_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    str(user_id),
+                    session_id,
+                    provider or "",
+                    model or "",
+                    prompt_tokens_i,
+                    completion_tokens_i,
+                    total_tokens_i,
+                    cost_value,
+                    created_at,
+                    json.dumps(meta or {}, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO session_cost_rollups (session_id, total_tokens, total_cost_usd, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    total_tokens = total_tokens + excluded.total_tokens,
+                    total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    session_id,
+                    total_tokens_i,
+                    float(cost_value or 0.0),
+                    created_at,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO user_daily_cost_rollups (user_id, date, total_tokens, total_cost_usd, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, date) DO UPDATE SET
+                    total_tokens = total_tokens + excluded.total_tokens,
+                    total_cost_usd = total_cost_usd + excluded.total_cost_usd,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    str(user_id),
+                    date,
+                    total_tokens_i,
+                    float(cost_value or 0.0),
+                    created_at,
+                ),
+            )
+        return event_id
+
+    def get_session_cost_rollup(self, session_id: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_cost_rollups WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return {"session_id": session_id, "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        return {
+            "session_id": row["session_id"],
+            "total_tokens": int(row["total_tokens"] or 0),
+            "total_cost_usd": float(row["total_cost_usd"] or 0.0),
+            "updated_at": row["updated_at"] or "",
+        }
+
+    def get_user_daily_cost_rollup(self, user_id: str, date: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM user_daily_cost_rollups WHERE user_id = ? AND date = ?",
+                (str(user_id), date),
+            ).fetchone()
+        if row is None:
+            return {"user_id": str(user_id), "date": date, "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        return {
+            "user_id": str(row["user_id"]),
+            "date": row["date"],
+            "total_tokens": int(row["total_tokens"] or 0),
+            "total_cost_usd": float(row["total_cost_usd"] or 0.0),
+            "updated_at": row["updated_at"] or "",
+        }
+
+    def list_user_daily_cost_rollups(self, date: str = "", limit: int = 100) -> List[dict]:
+        clauses = []
+        params: List[object] = []
+        if date:
+            clauses.append("date = ?")
+            params.append(date)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM user_daily_cost_rollups
+                {where}
+                ORDER BY total_cost_usd DESC, total_tokens DESC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "user_id": str(r["user_id"]),
+                "date": r["date"],
+                "total_tokens": int(r["total_tokens"] or 0),
+                "total_cost_usd": float(r["total_cost_usd"] or 0.0),
+                "updated_at": r["updated_at"] or "",
+            }
+            for r in rows
+        ]
+
+    def list_usage_events(self, session_id: str = "", limit: int = 100) -> List[dict]:
+        clauses = []
+        params: List[object] = []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM usage_events
+                {where}
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        out: List[dict] = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+            except Exception:
+                meta = {}
+            out.append(
+                {
+                    "id": r["id"],
+                    "user_id": str(r["user_id"]),
+                    "session_id": r["session_id"],
+                    "provider": r["provider"],
+                    "model": r["model"],
+                    "prompt_tokens": int(r["prompt_tokens"] or 0),
+                    "completion_tokens": int(r["completion_tokens"] or 0),
+                    "total_tokens": int(r["total_tokens"] or 0),
+                    "cost_usd_estimate": float(r["cost_usd_estimate"]) if r["cost_usd_estimate"] is not None else None,
+                    "created_at": r["created_at"],
+                    "meta": meta,
+                }
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Mission persistence (EPIC 6)

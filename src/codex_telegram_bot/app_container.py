@@ -149,6 +149,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         tool_policy_engine=tool_policy_engine,
         process_manager=process_manager,
         proactive_messenger=proactive_messenger,
+        config_dir=resolved_config_dir,
     )
 
     if run_store is None:

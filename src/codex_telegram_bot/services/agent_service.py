@@ -43,6 +43,7 @@ from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.cron_scheduler import CronScheduler
+from codex_telegram_bot.services.cost_tracking import estimate_cost_usd, normalize_usage
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
@@ -344,6 +345,7 @@ class AgentService:
         tool_policy_engine: Optional[Any] = None,
         process_manager: Optional[ProcessManager] = None,
         proactive_messenger: Optional[ProactiveMessenger] = None,
+        config_dir: Optional[Path] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -379,6 +381,7 @@ class AgentService:
         self._tool_policy_engine = tool_policy_engine
         self._process_manager = process_manager or ProcessManager(run_store=run_store)
         self._proactive_messenger = proactive_messenger
+        self._config_dir = config_dir.expanduser().resolve() if config_dir is not None else None
         self._last_process_cleanup_ts = 0.0
         self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
 
@@ -533,6 +536,14 @@ class AgentService:
                     tool_schemas=tool_schemas,
                     correlation_id="",
                 )
+            self._record_usage_from_provider_response(
+                response=response if isinstance(response, dict) else {},
+                session_id=session_id,
+                user_id=user_id,
+                provider_name=self._provider_label(provider),
+                model_name=str((response or {}).get("model") or getattr(provider, "_model", "")),
+                meta={"source": "native_tool_loop", "turn": turn + 1},
+            )
 
             events = decode_provider_response(response, allowed_tools=snapshot.names())
             decode_error = next((ev for ev in events if isinstance(ev, RuntimeContractError)), None)
@@ -2434,6 +2445,72 @@ class AgentService:
             "skill_packs_enabled": bool(self._skill_pack_loader is not None),
             "tool_policy_enabled": bool(self._tool_policy_engine is not None),
         }
+
+    def _record_usage_from_provider_response(
+        self,
+        *,
+        response: Dict[str, Any],
+        session_id: str,
+        user_id: int,
+        provider_name: str,
+        model_name: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if self._run_store is None:
+            return
+        usage_raw = response.get("usage") if isinstance(response, dict) else None
+        usage = usage_raw if isinstance(usage_raw, dict) else {}
+        prompt_tokens, completion_tokens, total_tokens = normalize_usage(usage)
+        if total_tokens <= 0:
+            return
+        provider = self._normalize_provider_name(provider_name or "unknown")
+        model = (model_name or str(response.get("model") or "")).strip()
+        if not model:
+            model = "unknown"
+        estimated = estimate_cost_usd(
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            usage=usage,
+            config_dir=self._config_dir,
+        )
+        self._run_store.record_usage_event(
+            user_id=str(user_id),
+            session_id=session_id,
+            provider=provider,
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            cost_usd_estimate=estimated,
+            meta={
+                "usage": usage,
+                **(meta or {}),
+            },
+        )
+
+    def session_cost_summary(self, session_id: str) -> Dict[str, Any]:
+        if self._run_store is None:
+            return {"session_id": session_id, "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        return self._run_store.get_session_cost_rollup(session_id)
+
+    def user_daily_cost_summary(self, user_id: int, date: str = "") -> Dict[str, Any]:
+        if self._run_store is None:
+            return {"user_id": str(user_id), "date": "", "total_tokens": 0, "total_cost_usd": 0.0, "updated_at": ""}
+        day = (date or datetime.now(timezone.utc).date().isoformat()).strip()
+        return self._run_store.get_user_daily_cost_rollup(str(user_id), day)
+
+    def list_daily_cost_summaries(self, date: str = "", limit: int = 100) -> List[Dict[str, Any]]:
+        if self._run_store is None:
+            return []
+        day = (date or "").strip()
+        return self._run_store.list_user_daily_cost_rollups(date=day, limit=limit)
+
+    def list_session_usage_events(self, session_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        if self._run_store is None:
+            return []
+        return self._run_store.list_usage_events(session_id=session_id, limit=limit)
 
     def reliability_snapshot(self, limit: int = 500) -> Dict[str, Any]:
         runs = self.list_recent_runs(limit=max(10, min(limit, 5000)))
