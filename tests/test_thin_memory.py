@@ -27,6 +27,7 @@ class TestThinMemoryLayout(unittest.TestCase):
 
             self.assertTrue((ws / "memory").is_dir())
             self.assertTrue((ws / "memory" / "MEMORY_INDEX.md").is_file())
+            self.assertTrue((ws / "memory" / "SOUL.md").is_file())
             self.assertTrue((ws / "memory" / "daily").is_dir())
             self.assertTrue((ws / "memory" / "pages").is_dir())
             text = (ws / "memory" / "MEMORY_INDEX.md").read_text(encoding="utf-8")

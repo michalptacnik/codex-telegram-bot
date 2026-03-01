@@ -7,6 +7,8 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from codex_telegram_bot.services.soul import ensure_soul_file
+
 MEMORY_INDEX_MAX_CHARS = max(
     1024,
     int((os.environ.get("MEMORY_INDEX_MAX_CHARS") or "8000").strip() or "8000"),
@@ -82,6 +84,7 @@ def ensure_memory_layout(workspace_root: Path) -> MemoryLayout:
     (pages_dir / "projects").mkdir(parents=True, exist_ok=True)
     if not index_path.exists():
         index_path.write_text(render_index(ThinMemoryIndex()), encoding="utf-8")
+    ensure_soul_file(ws)
     heartbeat = memory_dir / "HEARTBEAT.md"
     if not heartbeat.exists():
         heartbeat.write_text(
