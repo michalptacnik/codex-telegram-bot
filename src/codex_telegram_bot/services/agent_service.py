@@ -297,6 +297,21 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "protocol": "!tool",
         "args": {"id": "string (required)"},
     },
+    "heartbeat_get": {
+        "name": "heartbeat_get",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "heartbeat_update": {
+        "name": "heartbeat_update",
+        "protocol": "!tool",
+        "args": {"text": "string (optional)", "patch": "object (optional)"},
+    },
+    "heartbeat_run_once": {
+        "name": "heartbeat_run_once",
+        "protocol": "!tool",
+        "args": {"session_id": "string (optional)", "dry_run": "bool (optional)"},
+    },
     # MCP tools (Issue #103)
     "mcp_search": {
         "name": "mcp_search",

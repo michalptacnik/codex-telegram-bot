@@ -30,7 +30,14 @@ TOOL_GROUPS: Dict[str, List[str]] = {
     "filesystem": ["read_file", "write_file"],
     "runtime": ["shell_exec"],
     "sessions": ["sessions_list", "sessions_history", "sessions_send", "sessions_spawn", "session_status"],
-    "scheduling": ["schedule_task", "list_schedules", "cancel_schedule"],
+    "scheduling": [
+        "schedule_task",
+        "list_schedules",
+        "cancel_schedule",
+        "heartbeat_get",
+        "heartbeat_update",
+        "heartbeat_run_once",
+    ],
     "messaging": ["send_message"],
     "memory": [
         "memory_get",

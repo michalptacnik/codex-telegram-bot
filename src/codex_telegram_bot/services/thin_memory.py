@@ -70,6 +70,24 @@ def ensure_memory_layout(workspace_root: Path) -> MemoryLayout:
     (pages_dir / "projects").mkdir(parents=True, exist_ok=True)
     if not index_path.exists():
         index_path.write_text(render_index(ThinMemoryIndex()), encoding="utf-8")
+    heartbeat = memory_dir / "HEARTBEAT.md"
+    if not heartbeat.exists():
+        heartbeat.write_text(
+            "# HEARTBEAT v1\n"
+            "## Daily (active hours only)\n"
+            "- [ ] Review today's obligations\n"
+            "- [ ] Summarize ongoing missions\n"
+            "## Weekly\n"
+            "- [ ] Weekly review\n"
+            "## Monitors\n"
+            "- [ ] Check GitHub issues assigned to me\n"
+            "## Waiting on\n"
+            "- [ ] Replies from clients\n"
+            "## Quiet Hours\n"
+            "- start: 22:00\n"
+            "- end: 08:00\n",
+            encoding="utf-8",
+        )
 
     return MemoryLayout(
         root=ws,

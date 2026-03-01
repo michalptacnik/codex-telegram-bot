@@ -15,6 +15,11 @@ from codex_telegram_bot.tools.git import (
     GitLogTool,
     GitStatusTool,
 )
+from codex_telegram_bot.tools.heartbeat import (
+    HeartbeatGetTool,
+    HeartbeatRunOnceTool,
+    HeartbeatUpdateTool,
+)
 from codex_telegram_bot.tools.memory import (
     MemoryAppendDailyTool,
     MemoryGetTool,
@@ -91,6 +96,15 @@ def build_default_tool_registry(
         registry.register(ScheduleTaskTool(run_store=run_store, access_controller=access_controller))
         registry.register(ListSchedulesTool(run_store=run_store, access_controller=access_controller))
         registry.register(CancelScheduleTool(run_store=run_store, access_controller=access_controller))
+        registry.register(HeartbeatGetTool())
+        registry.register(HeartbeatUpdateTool())
+        registry.register(
+            HeartbeatRunOnceTool(
+                run_store=run_store,
+                access_controller=access_controller,
+                messenger=proactive_messenger,
+            )
+        )
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
@@ -133,6 +147,9 @@ __all__ = [
     "ScheduleTaskTool",
     "ListSchedulesTool",
     "CancelScheduleTool",
+    "HeartbeatGetTool",
+    "HeartbeatUpdateTool",
+    "HeartbeatRunOnceTool",
     "MemoryGetTool",
     "MemorySearchTool",
     "MemoryIndexGetTool",

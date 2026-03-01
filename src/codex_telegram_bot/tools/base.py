@@ -295,6 +295,39 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["id"],
         },
     },
+    "heartbeat_get": {
+        "name": "heartbeat_get",
+        "description": "Read HEARTBEAT.md configuration.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "heartbeat_update": {
+        "name": "heartbeat_update",
+        "description": "Update HEARTBEAT.md from text or structured patch.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Full HEARTBEAT markdown content"},
+                "patch": {"type": "object", "description": "Structured patch object"},
+            },
+            "required": [],
+        },
+    },
+    "heartbeat_run_once": {
+        "name": "heartbeat_run_once",
+        "description": "Run one heartbeat evaluation and optionally send proactive message.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "session_id": {"type": "string", "description": "Optional target session ID (default current)"},
+                "dry_run": {"type": "boolean", "description": "When true, return proposed action without sending"},
+            },
+            "required": [],
+        },
+    },
     "send_email_smtp": {
         "name": "send_email_smtp",
         "description": "Send an email via SMTP.",
