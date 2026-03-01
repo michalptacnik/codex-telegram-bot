@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from codex_telegram_bot.presentation.formatter import format_message
 from codex_telegram_bot.services.agent_service import (
     AgentService,
     AUTONOMOUS_TOOL_LOOP_ENV,
@@ -537,17 +538,25 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             }
         return None
 
+    def _session_style(session_id: str) -> Dict[str, Any]:
+        status = agent_service.soul_status(session_id=session_id)
+        style = status.get("style")
+        if isinstance(style, dict):
+            return dict(style)
+        return {}
+
     async def _deliver_websocket_proactive(payload: Dict[str, Any]) -> None:
         session_id = str(payload.get("session_id") or "").strip()
         text = str(payload.get("text") or "").strip()
         if not session_id or not text:
             return
+        formatted = format_message(text, channel="web", style=_session_style(session_id))
         await _chat_broadcast_session(
             session_id,
             {
                 "type": "assistant_chunk",
                 "session_id": session_id,
-                "text": text,
+                "text": formatted.formatted_text,
                 "proactive": True,
             },
         )
@@ -1805,7 +1814,8 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                     await websocket.send_json({"type": "done", "session_id": session.session_id})
                     continue
 
-                chunks = _chunk_text(turn.text or "")
+                formatted = format_message(turn.text or "", channel="web", style=_session_style(session.session_id))
+                chunks = _chunk_text(formatted.formatted_text or "")
                 if not chunks:
                     chunks = ["(no output)"]
                 for chunk in chunks:
@@ -2114,6 +2124,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         heartbeat = agent_service.heartbeat_status(session_id=session_id)
         soul = agent_service.soul_status(session_id=session_id)
         soul_history = agent_service.list_soul_versions(session_id=session_id, limit=30)
+        style = dict(soul.get("style") or {})
         return {
             "session": {
                 "session_id": session.session_id,
@@ -2129,7 +2140,11 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             "recent_messages": [
                 {
                     "role": m.role,
-                    "content": (m.content or "")[:500],
+                    "content": (
+                        format_message((m.content or "")[:500], channel="web", style=style).formatted_text
+                        if str(m.role or "").strip().lower() == "assistant"
+                        else (m.content or "")[:500]
+                    ),
                     "run_id": m.run_id,
                     "created_at": m.created_at.isoformat() if m.created_at else "",
                 }

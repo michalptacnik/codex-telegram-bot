@@ -91,6 +91,60 @@
   let activeSessionId = "{{ selected_session_id }}";
   let currentAssistant = null;
 
+  function escapeHtml(value) {
+    return String(value || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;");
+  }
+
+  function inlineMarkdown(text) {
+    let out = escapeHtml(text);
+    out = out.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    out = out.replace(/\*(.+?)\*/g, "<em>$1</em>");
+    return out;
+  }
+
+  function renderMarkdownLite(text) {
+    const lines = String(text || "").split("\n");
+    const html = [];
+    let inList = false;
+    const closeList = () => {
+      if (inList) {
+        html.push("</ul>");
+        inList = false;
+      }
+    };
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) {
+        closeList();
+        html.push("<br/>");
+        continue;
+      }
+      if (line.startsWith("- ")) {
+        if (!inList) {
+          html.push("<ul>");
+          inList = true;
+        }
+        html.push(`<li>${inlineMarkdown(line.slice(2))}</li>`);
+        continue;
+      }
+      closeList();
+      html.push(`<p>${inlineMarkdown(line)}</p>`);
+    }
+    closeList();
+    return html.join("");
+  }
+
+  function setBubbleContent(bubble, role, text) {
+    if (role === "assistant") {
+      bubble.innerHTML = renderMarkdownLite(text);
+      return;
+    }
+    bubble.textContent = text;
+  }
+
   function wsUrl() {
     const proto = window.location.protocol === "https:" ? "wss" : "ws";
     return `${proto}://${window.location.host}/ws/chat`;
@@ -101,7 +155,8 @@
     row.className = `chat-msg ${role}`;
     const bubble = document.createElement("div");
     bubble.className = "chat-bubble";
-    bubble.textContent = text;
+    bubble.dataset.raw = text || "";
+    setBubbleContent(bubble, role, bubble.dataset.raw);
     row.appendChild(bubble);
     chatLog.appendChild(row);
     chatLog.scrollTop = chatLog.scrollHeight;
@@ -297,7 +352,8 @@
       if (!currentAssistant) {
         currentAssistant = appendMessage("assistant", "");
       }
-      currentAssistant.textContent += payload.text || "";
+      currentAssistant.dataset.raw = `${currentAssistant.dataset.raw || ""}${payload.text || ""}`;
+      setBubbleContent(currentAssistant, "assistant", currentAssistant.dataset.raw);
       chatLog.scrollTop = chatLog.scrollHeight;
       return;
     }

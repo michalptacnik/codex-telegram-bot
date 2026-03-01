@@ -79,9 +79,11 @@ except Exception:  # pragma: no cover - exercised only in minimal test environme
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
+from codex_telegram_bot.presentation.formatter import format_message
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.execution_profile import UNSAFE_UNLOCK_PHRASE
 from codex_telegram_bot.services.message_updater import MessageUpdater
+from codex_telegram_bot.services.soul import SoulStore
 from .util import chunk_text
 
 logger = logging.getLogger(__name__)
@@ -374,6 +376,22 @@ def _humanize_action_preview(command: str) -> str:
         if len(tokens) >= 2:
             return f"tool `{tokens[1]}`"
     return f"`{text[:120]}`"
+
+
+def _session_style(agent_service: AgentService, session_id: str) -> dict:
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {}
+    try:
+        ws = agent_service.session_workspace(session_id=sid)
+        profile = SoulStore(ws).load_profile()
+        return {
+            "emoji": profile.style.emoji,
+            "emphasis": profile.style.emphasis,
+            "brevity": profile.style.brevity,
+        }
+    except Exception:
+        return {}
 
 
 def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> bool:
@@ -1846,8 +1864,16 @@ async def _process_prompt(
             delay_sec=EPHEMERAL_STATUS_TTL_SEC,
         )
     )
-    for chunk in chunk_text(output, MAX_OUTPUT_CHARS):
-        await update.message.reply_text(chunk)
+    style = _session_style(agent_service, response.session_id)
+    formatted = format_message(output, channel="telegram", style=style)
+    for chunk in chunk_text(formatted.formatted_text, MAX_OUTPUT_CHARS):
+        try:
+            if formatted.parse_mode:
+                await update.message.reply_text(chunk, parse_mode=formatted.parse_mode)
+            else:
+                await update.message.reply_text(chunk)
+        except Exception:
+            await update.message.reply_text(chunk)
     agent_service.record_channel_message(
         session_id=response.session_id,
         user_id=user_id,
@@ -1947,11 +1973,13 @@ def build_application(
         text = str(payload.get("text") or "")
         if not text:
             return
-        kwargs = {"chat_id": chat_id, "text": text}
+        style = _session_style(agent_service, str(payload.get("session_id") or ""))
+        formatted = format_message(text, channel="telegram", style=style)
+        kwargs = {"chat_id": chat_id, "text": formatted.formatted_text}
         if bool(payload.get("silent", False)):
             kwargs["disable_notification"] = True
-        if bool(payload.get("markdown", False)):
-            kwargs["parse_mode"] = "Markdown"
+        if formatted.parse_mode:
+            kwargs["parse_mode"] = formatted.parse_mode
         await app.bot.send_message(**kwargs)
 
     agent_service.register_proactive_transport("telegram", _telegram_proactive_sender)
