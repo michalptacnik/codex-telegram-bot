@@ -79,6 +79,14 @@ class ScheduleTaskTool:
         one_shot = True
         cron_expr = ""
         anchor = parse_natural_when(when_raw, tz_name, now=now_local) if when_raw else None
+        if when_raw and anchor is None:
+            return ToolResult(
+                ok=False,
+                output=(
+                    "Could not parse 'when'. Try examples: "
+                    "'tomorrow 09:00', 'in 2 hours', 'next Monday at 23:45', or ISO datetime."
+                ),
+            )
         if anchor is not None and not validate_reasonable_datetime(anchor):
             return ToolResult(ok=False, output="Parsed date out of allowed range (2000-2100).")
         try:
@@ -168,4 +176,3 @@ class CancelScheduleTool:
         if not cancelled:
             return ToolResult(ok=False, output="Schedule already canceled or inactive.")
         return ToolResult(ok=True, output=f"Canceled schedule {job_id}.")
-

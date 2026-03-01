@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
+import codex_telegram_bot.services.cron_utils as cron_utils
 from codex_telegram_bot.services.cron_utils import cron_next_run, parse_natural_when
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
 from codex_telegram_bot.tools.schedule import ScheduleTaskTool
@@ -25,6 +26,31 @@ class TestCronUtils(unittest.TestCase):
         base = datetime(2026, 3, 1, 10, 2, tzinfo=ZoneInfo("Europe/Amsterdam"))
         nxt = cron_next_run("*/5 * * * *", base)
         self.assertEqual((nxt.hour, nxt.minute), (10, 5))
+
+    def test_fallback_parses_tomorrow_without_dateparser(self):
+        tz_name = "Europe/Amsterdam"
+        base = datetime(2026, 3, 1, 16, 0, tzinfo=ZoneInfo(tz_name))
+        original = cron_utils.dateparser
+        cron_utils.dateparser = None
+        try:
+            parsed = parse_natural_when("tomorrow 9:00", tz_name=tz_name, now=base)
+            self.assertIsNotNone(parsed)
+            self.assertEqual((parsed.year, parsed.month, parsed.day), (2026, 3, 2))
+            self.assertEqual((parsed.hour, parsed.minute), (9, 0))
+        finally:
+            cron_utils.dateparser = original
+
+    def test_fallback_parses_relative_offset_without_dateparser(self):
+        tz_name = "Europe/Amsterdam"
+        base = datetime(2026, 3, 1, 16, 0, tzinfo=ZoneInfo(tz_name))
+        original = cron_utils.dateparser
+        cron_utils.dateparser = None
+        try:
+            parsed = parse_natural_when("in 2 hours", tz_name=tz_name, now=base)
+            self.assertIsNotNone(parsed)
+            self.assertEqual((parsed.hour, parsed.minute), (18, 0))
+        finally:
+            cron_utils.dateparser = original
 
 
 class TestCronSchedulingFlow(unittest.IsolatedAsyncioTestCase):
@@ -80,4 +106,3 @@ class TestCronSchedulingFlow(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

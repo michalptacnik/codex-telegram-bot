@@ -44,7 +44,13 @@ def parse_natural_when(when: str, tz_name: str, now: Optional[datetime] = None) 
     iso_try = _parse_iso(text, tz)
     if iso_try is not None:
         return iso_try
-    return _parse_next_weekday_at_time(text, base)
+    relative_try = _parse_relative_day_or_time(text, base)
+    if relative_try is not None:
+        return relative_try
+    in_offset_try = _parse_in_offset(text, base)
+    if in_offset_try is not None:
+        return in_offset_try
+    return _parse_weekday_at_time(text, base)
 
 
 def validate_reasonable_datetime(dt: datetime) -> bool:
@@ -133,21 +139,94 @@ def _parse_iso(text: str, tz: ZoneInfo) -> Optional[datetime]:
     return dt.astimezone(tz)
 
 
-def _parse_next_weekday_at_time(text: str, now: datetime) -> Optional[datetime]:
-    match = re.match(r"(?is)^next\s+([a-z]+)\s+at\s+(\d{1,2}):(\d{2})$", text.strip())
+def _parse_weekday_at_time(text: str, now: datetime) -> Optional[datetime]:
+    match = re.match(r"(?is)^(next\s+)?([a-z]+)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$", text.strip())
     if not match:
         return None
-    day_name = match.group(1).strip().lower()
+    has_next = bool(match.group(1))
+    day_name = match.group(2).strip().lower()
     weekday = _WEEKDAY.get(day_name)
     if weekday is None:
         return None
-    hour = int(match.group(2))
-    minute = int(match.group(3))
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+    clock = _parse_clock(match.group(3), match.group(4), match.group(5))
+    if clock is None:
         return None
+    hour, minute = clock
     days_ahead = (weekday - now.weekday()) % 7
-    if days_ahead == 0:
+    if has_next and days_ahead == 0:
         days_ahead = 7
     target = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if not has_next and target <= now:
+        days_ahead = 7
+        target = (now + timedelta(days=days_ahead)).replace(hour=hour, minute=minute, second=0, microsecond=0)
     return target
 
+
+def _parse_relative_day_or_time(text: str, now: datetime) -> Optional[datetime]:
+    rel = re.match(r"(?is)^(today|tomorrow)(?:\s+at)?(?:\s+(\d{1,2})(?::(\d{2}))?\s*([ap]m)?)?$", text.strip())
+    if rel:
+        day = rel.group(1).strip().lower()
+        clock = _parse_clock(rel.group(2), rel.group(3), rel.group(4)) if rel.group(2) else (now.hour, now.minute)
+        if clock is None:
+            return None
+        hour, minute = clock
+        add_days = 1 if day == "tomorrow" else 0
+        target = (now + timedelta(days=add_days)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if day == "today" and target <= now:
+            target = target + timedelta(days=1)
+        return target
+    at_time = re.match(r"(?is)^(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?$", text.strip())
+    if not at_time:
+        return None
+    clock = _parse_clock(at_time.group(1), at_time.group(2), at_time.group(3))
+    if clock is None:
+        return None
+    hour, minute = clock
+    target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if target <= now:
+        target = target + timedelta(days=1)
+    return target
+
+
+def _parse_in_offset(text: str, now: datetime) -> Optional[datetime]:
+    rel = re.match(
+        r"(?is)^in\s+(\d+)\s*(minute|minutes|min|mins|hour|hours|hr|hrs|day|days)\s*$",
+        text.strip(),
+    )
+    if not rel:
+        return None
+    amount = int(rel.group(1))
+    if amount <= 0:
+        return None
+    unit = rel.group(2).strip().lower()
+    if unit in {"minute", "minutes", "min", "mins"}:
+        return now + timedelta(minutes=amount)
+    if unit in {"hour", "hours", "hr", "hrs"}:
+        return now + timedelta(hours=amount)
+    if unit in {"day", "days"}:
+        return now + timedelta(days=amount)
+    return None
+
+
+def _parse_clock(hour_raw: Optional[str], minute_raw: Optional[str], ampm_raw: Optional[str]) -> Optional[tuple[int, int]]:
+    if hour_raw is None:
+        return None
+    try:
+        hour = int(hour_raw)
+        minute = int(minute_raw) if minute_raw is not None else 0
+    except ValueError:
+        return None
+    ampm = (ampm_raw or "").strip().lower()
+    if ampm:
+        if not (1 <= hour <= 12):
+            return None
+        if ampm == "pm" and hour != 12:
+            hour += 12
+        if ampm == "am" and hour == 12:
+            hour = 0
+    else:
+        if not (0 <= hour <= 23):
+            return None
+    if not (0 <= minute <= 59):
+        return None
+    return hour, minute
