@@ -1733,7 +1733,7 @@ async def _process_prompt(
             prefix = f"Action {action_index}/{action_max}" if action_index and action_max else "Action"
             await set_status(f"{prefix}: {goal[:120]} | tools: {tools_text}")
             await narrate(
-                f"I am attempting this action: {goal or 'continue task execution'}. "
+                f"Working on: {goal or 'continue task execution'}. "
                 f"Planned steps: {steps_total or '?'} using tools: {tools_text}.",
                 f"voice:loop.action.started:{action_index}:{tools_text[:80]}",
             )
