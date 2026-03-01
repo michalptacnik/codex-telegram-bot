@@ -1,6 +1,6 @@
-# codex-telegram-bot
+# Agent HQ
 
-A Telegram bot that forwards user messages to the local `codex` CLI and returns the response back in chat.
+Agent HQ (`codex-telegram-bot`) is a Telegram-first agent runtime that forwards user messages to the local `codex` CLI and returns the response back in chat.
 
 Designed for private/self-hosted use, with an optional allowlist to prevent unauthorized usage.
 
