@@ -388,6 +388,23 @@ def _looks_like_tool_leak(text: str) -> bool:
     return bool(re.match(r"(?is)^\s*\{.*\"(name|tool|args)\"\s*:", raw))
 
 
+def _looks_like_direct_execution_prompt(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("!exec", "!tool", "!loop")):
+        return True
+    if _extract_exec_argv(raw):
+        return True
+    return _looks_like_tool_leak(raw)
+
+
+def _initial_status_text(text: str) -> str:
+    if _looks_like_direct_execution_prompt(text):
+        return "On it — preparing execution..."
+    return "Got it — let me think this through."
+
+
 def _sanitize_command_name(name: str) -> str:
     sanitized = re.sub(r"[^a-z0-9_]", "_", (name or "").strip().lower())
     sanitized = re.sub(r"_+", "_", sanitized).strip("_")
@@ -1228,7 +1245,7 @@ async def _process_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE, te
         "steps_total": 0,
         "started_at": asyncio.get_running_loop().time(),
     }
-    status_msg = await update.message.reply_text("On it — preparing execution...")
+    status_msg = await update.message.reply_text(_initial_status_text(text))
     message_updater = context.application.bot_data.setdefault("message_updater", MessageUpdater())
 
     async def set_status(text_value: str) -> None:
