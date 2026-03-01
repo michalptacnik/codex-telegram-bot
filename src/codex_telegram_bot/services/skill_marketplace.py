@@ -4,6 +4,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import shutil
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,7 @@ class SkillMarketplace:
             else (Path.home() / ".config" / "codex-telegram-bot").resolve()
         )
         self._sources = load_skill_sources()
+        self._trusted_publisher_keys = self._read_trusted_publisher_keys()
 
     def sources_list(self) -> List[Dict[str, Any]]:
         out = []
@@ -153,6 +155,17 @@ class SkillMarketplace:
         parsed = parse_skill_md(skill_md.decode("utf-8", errors="replace"))
         if parsed is None:
             raise ValueError("SKILL.md frontmatter could not be parsed")
+        frontmatter = _extract_frontmatter(skill_md.decode("utf-8", errors="replace"))
+        publisher = str(frontmatter.get("publisher") or "").strip()
+        signed_at = str(frontmatter.get("signed_at") or "").strip()
+        signature = str(frontmatter.get("signature") or "").strip()
+        public_key_id = str(frontmatter.get("public_key_id") or "").strip()
+        verified = bool(
+            publisher
+            and signature
+            and public_key_id
+            and public_key_id in self._trusted_publisher_keys
+        )
         skill_id = parsed.skill_id
         dest_root = (
             self._workspace_root / ".skills" / "marketplace"
@@ -182,6 +195,11 @@ class SkillMarketplace:
             "hashes": hashes,
             "installed_at": datetime.now(timezone.utc).isoformat(),
             "target": normalized_target,
+            "publisher": publisher,
+            "signed_at": signed_at,
+            "signature": signature,
+            "public_key_id": public_key_id,
+            "verified": verified,
         }
         (skill_root / ".marketplace.json").write_text(
             json.dumps(metadata, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
@@ -199,12 +217,18 @@ class SkillMarketplace:
                 install_ref=install_ref,
                 sha256_manifest=hashes,
                 enabled=False,
+                verified=verified,
+                publisher=publisher,
+                public_key_id=public_key_id,
             )
         return {
             "skill_id": skill_id,
             "installed_path": str(skill_root),
             "target": normalized_target,
             "hash_count": len(hashes),
+            "verified": verified,
+            "publisher": publisher,
+            "public_key_id": public_key_id,
         }
 
     def enable(self, skill_id: str) -> Dict[str, Any]:
@@ -447,3 +471,28 @@ class SkillMarketplace:
                     raise ValueError(f"hash mismatch for {rel}")
         if not found:
             raise ValueError("installed skill metadata not found")
+
+    def _read_trusted_publisher_keys(self) -> set[str]:
+        raw = (os.environ.get("SKILL_TRUSTED_PUBLISHER_KEYS") or "").strip()
+        if not raw:
+            return set()
+        out = set()
+        for item in raw.split(","):
+            key = str(item or "").strip()
+            if key:
+                out.add(key)
+        return out
+
+
+def _extract_frontmatter(text: str) -> Dict[str, str]:
+    match = re.match(r"^---\s*\n(.*?)\n---", text or "", re.DOTALL)
+    if not match:
+        return {}
+    out: Dict[str, str] = {}
+    for raw in match.group(1).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or ":" not in line:
+            continue
+        key, _, value = line.partition(":")
+        out[key.strip().lower()] = value.strip().strip("'\"")
+    return out

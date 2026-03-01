@@ -1,8 +1,10 @@
 import base64
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.providers.fallback import EchoFallbackProvider
@@ -127,6 +129,54 @@ class TestSkillMarketplace(unittest.TestCase):
             prompt = service.build_session_prompt(session_id=session_id, user_prompt="hello")
             self.assertNotIn("Some body content.", prompt)
             self.assertIn("Skill usage contract:", prompt)
+
+    def test_trusted_publisher_sets_verified_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SqliteRunStore(db_path=root / "state.db")
+            manager = SkillManager(config_dir=root / "cfg")
+            with patch.dict(os.environ, {"SKILL_TRUSTED_PUBLISHER_KEYS": "pk-live-1"}, clear=False):
+                market = SkillMarketplace(
+                    store=store,
+                    skill_manager=manager,
+                    workspace_root=root,
+                    config_dir=root / "cfg",
+                )
+            entry = {
+                "id": "demo:writer",
+                "source_name": "demo",
+                "skill_name": "writer",
+                "version": "1.0.0",
+                "description": "Writer skill",
+                "tags": ["writing"],
+                "install_ref": {
+                    "type": "github_repo_skill",
+                    "repo": "acme/skills",
+                    "path": "skills/writer",
+                    "ref": "main",
+                },
+                "last_fetched_at": "2026-03-01T00:00:00+00:00",
+            }
+            store.upsert_skill_catalog_entries("demo", [entry])
+            signed_skill = (
+                "---\n"
+                "skill_id: writer\n"
+                "name: Writer\n"
+                "description: Writing helper\n"
+                "keywords: [write]\n"
+                "tools: []\n"
+                "publisher: Acme\n"
+                "signed_at: 2026-03-01T10:00:00Z\n"
+                "signature: abc123\n"
+                "public_key_id: pk-live-1\n"
+                "---\n"
+                "body\n"
+            )
+            market._fetch_skill_bundle = lambda install_ref: {  # type: ignore[assignment]
+                "SKILL.md": signed_skill.encode("utf-8"),
+            }
+            installed = market.install(skill_ref="demo:writer", target="workspace")
+            self.assertTrue(installed.get("verified"))
 
 
 if __name__ == "__main__":
