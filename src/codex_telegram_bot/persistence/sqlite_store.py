@@ -2,6 +2,7 @@ import sqlite3
 import uuid
 import json
 import logging
+import secrets
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -36,7 +37,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 class SqliteRunStore:
@@ -266,6 +267,44 @@ class SqliteRunStore:
                     details_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS channel_link_codes (
+                    code TEXT PRIMARY KEY,
+                    channel TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    used_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_channel_link_codes_channel_expires
+                ON channel_link_codes (channel, expires_at)
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS channel_links (
+                    channel TEXT NOT NULL,
+                    external_user_id TEXT NOT NULL,
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (channel, external_user_id)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_channel_links_chat_user
+                ON channel_links (channel, chat_id, user_id)
                 """
             )
             conn.execute(
@@ -1938,6 +1977,184 @@ class SqliteRunStore:
                 }
             )
         return out
+
+    # ------------------------------------------------------------------
+    # Channel linking (WhatsApp / future channels)
+    # ------------------------------------------------------------------
+
+    def create_channel_link_code(
+        self,
+        *,
+        channel: str,
+        chat_id: int,
+        user_id: int,
+        ttl_sec: int = 900,
+    ) -> dict:
+        now_dt = datetime.now(timezone.utc)
+        now = now_dt.isoformat()
+        expires_at = (now_dt + timedelta(seconds=max(60, int(ttl_sec)))).isoformat()
+        normalized_channel = str(channel or "").strip().lower()
+        if not normalized_channel:
+            raise ValueError("channel is required")
+        # Keep codes user-friendly and short for chat apps.
+        for _ in range(8):
+            code = f"{secrets.randbelow(900000) + 100000}"
+            try:
+                with self._connect() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO channel_link_codes
+                        (code, channel, chat_id, user_id, created_at, expires_at, used_at)
+                        VALUES (?, ?, ?, ?, ?, ?, NULL)
+                        """,
+                        (
+                            code,
+                            normalized_channel,
+                            int(chat_id),
+                            int(user_id),
+                            now,
+                            expires_at,
+                        ),
+                    )
+                return {
+                    "code": code,
+                    "channel": normalized_channel,
+                    "chat_id": int(chat_id),
+                    "user_id": int(user_id),
+                    "created_at": now,
+                    "expires_at": expires_at,
+                }
+            except sqlite3.IntegrityError:
+                continue
+        raise RuntimeError("failed to allocate channel link code")
+
+    def consume_channel_link_code(
+        self,
+        *,
+        channel: str,
+        code: str,
+        external_user_id: str,
+    ) -> Optional[dict]:
+        normalized_channel = str(channel or "").strip().lower()
+        normalized_code = str(code or "").strip()
+        normalized_external = str(external_user_id or "").strip()
+        if not normalized_channel or not normalized_code or not normalized_external:
+            return None
+        now = _utc_now()
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM channel_link_codes
+                WHERE code = ? AND channel = ? AND used_at IS NULL
+                """,
+                (normalized_code, normalized_channel),
+            ).fetchone()
+            if row is None:
+                return None
+            expires_at = str(row["expires_at"] or "")
+            if expires_at and expires_at <= now:
+                conn.execute(
+                    "UPDATE channel_link_codes SET used_at = ? WHERE code = ?",
+                    (now, normalized_code),
+                )
+                return None
+            conn.execute(
+                "UPDATE channel_link_codes SET used_at = ? WHERE code = ?",
+                (now, normalized_code),
+            )
+            conn.execute(
+                """
+                INSERT INTO channel_links
+                (channel, external_user_id, chat_id, user_id, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(channel, external_user_id) DO UPDATE SET
+                    chat_id = excluded.chat_id,
+                    user_id = excluded.user_id,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    normalized_channel,
+                    normalized_external,
+                    int(row["chat_id"]),
+                    int(row["user_id"]),
+                    now,
+                    now,
+                ),
+            )
+            return {
+                "channel": normalized_channel,
+                "external_user_id": normalized_external,
+                "chat_id": int(row["chat_id"]),
+                "user_id": int(row["user_id"]),
+                "expires_at": expires_at,
+                "linked_at": now,
+            }
+
+    def get_channel_link(self, *, channel: str, external_user_id: str) -> Optional[dict]:
+        normalized_channel = str(channel or "").strip().lower()
+        normalized_external = str(external_user_id or "").strip()
+        if not normalized_channel or not normalized_external:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM channel_links
+                WHERE channel = ? AND external_user_id = ?
+                """,
+                (normalized_channel, normalized_external),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "channel": str(row["channel"] or ""),
+            "external_user_id": str(row["external_user_id"] or ""),
+            "chat_id": int(row["chat_id"] or 0),
+            "user_id": int(row["user_id"] or 0),
+            "created_at": str(row["created_at"] or ""),
+            "updated_at": str(row["updated_at"] or ""),
+        }
+
+    def list_channel_links(
+        self,
+        *,
+        channel: str,
+        chat_id: int = 0,
+        user_id: int = 0,
+        limit: int = 20,
+    ) -> List[dict]:
+        normalized_channel = str(channel or "").strip().lower()
+        if not normalized_channel:
+            return []
+        clauses = ["channel = ?"]
+        params: List[object] = [normalized_channel]
+        if int(chat_id or 0):
+            clauses.append("chat_id = ?")
+            params.append(int(chat_id))
+        if int(user_id or 0):
+            clauses.append("user_id = ?")
+            params.append(int(user_id))
+        where = " AND ".join(clauses)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM channel_links
+                WHERE {where}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (*params, max(1, int(limit))),
+            ).fetchall()
+        return [
+            {
+                "channel": str(row["channel"] or ""),
+                "external_user_id": str(row["external_user_id"] or ""),
+                "chat_id": int(row["chat_id"] or 0),
+                "user_id": int(row["user_id"] or 0),
+                "created_at": str(row["created_at"] or ""),
+                "updated_at": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
 
     # ------------------------------------------------------------------
     # Mission persistence (EPIC 6)

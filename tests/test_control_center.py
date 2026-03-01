@@ -380,6 +380,46 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(deny_event.get("status"), "result")
             self.assertIn("Denied", str((deny_event.get("detail") or {}).get("output") or ""))
 
+    async def test_whatsapp_link_code_and_webhook(self):
+        old_enabled = os.environ.get("WHATSAPP_ENABLED")
+        old_token = os.environ.get("WHATSAPP_WEBHOOK_TOKEN")
+        try:
+            os.environ["WHATSAPP_ENABLED"] = "1"
+            os.environ.pop("WHATSAPP_WEBHOOK_TOKEN", None)
+            app = create_app(self.service)
+            client = TestClient(app)
+            link = client.post(
+                "/api/whatsapp/link-code",
+                json={"chat_id": 101, "user_id": 202, "ttl_sec": 600},
+            )
+            self.assertEqual(link.status_code, 200)
+            code = str(link.json().get("code") or "")
+            self.assertTrue(code)
+
+            linked = client.post(
+                "/whatsapp/webhook",
+                data={"From": "whatsapp:+15551234567", "Body": f"/link {code}"},
+            )
+            self.assertEqual(linked.status_code, 200)
+            self.assertIn("Linked successfully", linked.text)
+
+            reply = client.post(
+                "/whatsapp/webhook",
+                data={"From": "whatsapp:+15551234567", "Body": "hello from whatsapp"},
+            )
+            self.assertEqual(reply.status_code, 200)
+            self.assertIn("<Response>", reply.text)
+            self.assertIn("hello from whatsapp", reply.text)
+        finally:
+            if old_enabled is None:
+                os.environ.pop("WHATSAPP_ENABLED", None)
+            else:
+                os.environ["WHATSAPP_ENABLED"] = old_enabled
+            if old_token is None:
+                os.environ.pop("WHATSAPP_WEBHOOK_TOKEN", None)
+            else:
+                os.environ["WHATSAPP_WEBHOOK_TOKEN"] = old_token
+
     async def test_agents_page_uses_registry_provider_options(self):
         tmp = tempfile.TemporaryDirectory()
         try:

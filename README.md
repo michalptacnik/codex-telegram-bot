@@ -34,6 +34,7 @@ Designed for private/self-hosted use, with an optional allowlist to prevent unau
 - Gateway/control plane:
   - Control Center provides a Gateway-style admin API/UI for sessions, runs, reliability, and runtime visibility
   - Real-time web chat page (`/chat`) over WebSocket (`/ws/chat`) with live tool status events and inline approval actions
+  - Optional WhatsApp bridge (`/whatsapp/webhook`) with one-time account linking and approval commands (`/pending`, `/approve`, `/deny`)
   - Runtime backend visibility endpoint: `/api/runtime/capabilities`
 - Cost tracking:
   - Usage events stored per provider turn
@@ -251,6 +252,10 @@ Environment variables override `.env`:
 - `MAX_SESSIONS_PER_USER` (default: `3`; concurrent process sessions per chat/user)
 - `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
 - `MESSAGE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_message`)
+- `WHATSAPP_ENABLED` (default: `1`; set `0` to disable WhatsApp bridge endpoints)
+- `WHATSAPP_WEBHOOK_TOKEN` (optional; if set, required as `X-Codex-Webhook-Token` header or `?token=` query on `/whatsapp/webhook`)
+- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` (optional; when set, enables proactive outbound WhatsApp delivery)
+- `WHATSAPP_HTTP_TIMEOUT_S` (default: `15`)
 - `MODEL_PRICE_CONFIG` (optional path to JSON model pricing map; falls back to `prices.json`)
 - `DEFAULT_AGENT_POLICY_PROFILE` is `trusted` in seeded state; use `balanced`/`strict` if you want workspace-constrained file tools
 - `REPO_SCAN_MAX_FILES` (default: `3000`)

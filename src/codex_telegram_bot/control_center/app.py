@@ -1,8 +1,10 @@
 import asyncio
 from dataclasses import asdict
 import os
+import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Set
+from xml.sax.saxutils import escape as xml_escape
 
 from pydantic import BaseModel
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -15,6 +17,8 @@ from codex_telegram_bot.services.agent_service import AgentService, AUTONOMOUS_T
 from codex_telegram_bot.services.error_codes import ERROR_CATALOG, detect_error_code, get_catalog_entry
 from codex_telegram_bot.services.onboarding import OnboardingStore
 from codex_telegram_bot.services.plugin_lifecycle import PluginLifecycleManager
+from codex_telegram_bot.services.whatsapp_bridge import WhatsAppBridge
+from codex_telegram_bot.services.whatsapp_transport import build_twilio_whatsapp_sender_from_env
 from codex_telegram_bot.config import get_env_path, load_env_file, write_env_file
 
 
@@ -62,6 +66,12 @@ class UnsafeUnlockConfirmRequest(BaseModel):
     code: str
     phrase: str
     user_id: int = 0
+
+
+class WhatsAppLinkCodeRequest(BaseModel):
+    chat_id: int
+    user_id: int
+    ttl_sec: int = 900
 
 
 def _chunk_text(text: str, chunk_size: int = 220) -> List[str]:
@@ -182,6 +192,11 @@ def _env_flag_enabled(value: str) -> bool:
 
 def _normalize_checkbox_flag(value: str) -> str:
     return "1" if _env_flag_enabled(value) else "0"
+
+
+def _twiml_message(text: str) -> str:
+    safe = xml_escape(str(text or "").strip()[:1400])
+    return f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{safe}</Message></Response>'
 
 
 def create_app(agent_service: AgentService, provider_registry=None, metrics_collector=None) -> FastAPI:
@@ -530,6 +545,28 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         )
 
     agent_service.register_proactive_transport("websocket", _deliver_websocket_proactive)
+    whatsapp_bridge: WhatsAppBridge | None = None
+    if _env_flag_enabled(os.environ.get("WHATSAPP_ENABLED", "1")):
+        run_store = getattr(agent_service, "run_store", None)
+        if run_store is not None:
+            whatsapp_sender = build_twilio_whatsapp_sender_from_env()
+            whatsapp_bridge = WhatsAppBridge(
+                agent_service=agent_service,
+                run_store=run_store,
+                sender=whatsapp_sender,
+            )
+            if whatsapp_sender is not None:
+                agent_service.register_proactive_transport("whatsapp", whatsapp_bridge.deliver_proactive)
+
+    def _whatsapp_webhook_authorized(request: Request) -> bool:
+        expected = (os.environ.get("WHATSAPP_WEBHOOK_TOKEN") or "").strip()
+        if not expected:
+            return True
+        supplied = (
+            (request.headers.get("x-codex-webhook-token") or "").strip()
+            or (request.query_params.get("token") or "").strip()
+        )
+        return bool(supplied) and secrets.compare_digest(supplied, expected)
 
     @app.on_event("startup")
     async def _startup_background_scheduler() -> None:
@@ -832,6 +869,32 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         )
         state["warning"] = agent_service.execution_profile_warning()
         return state
+
+    @app.post("/api/whatsapp/link-code")
+    async def api_whatsapp_link_code(request: Request, req: WhatsAppLinkCodeRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        if whatsapp_bridge is None:
+            raise HTTPException(status_code=503, detail="WhatsApp bridge not enabled.")
+        return whatsapp_bridge.create_link_code(
+            chat_id=int(req.chat_id),
+            user_id=int(req.user_id),
+            ttl_sec=max(60, int(req.ttl_sec or 900)),
+        )
+
+    @app.post("/whatsapp/webhook")
+    async def whatsapp_webhook(request: Request):
+        if not _whatsapp_webhook_authorized(request):
+            raise HTTPException(status_code=401, detail="Unauthorized webhook token.")
+        if whatsapp_bridge is None:
+            return PlainTextResponse(_twiml_message("WhatsApp bridge is not enabled."), media_type="application/xml")
+        form = await request.form()
+        sender = str(form.get("From") or "").strip()
+        text = str(form.get("Body") or "").strip()
+        try:
+            reply = await whatsapp_bridge.handle_inbound(external_user_id=sender, text=text)
+        except Exception as exc:
+            reply = f"Error: {str(exc)[:180]}"
+        return PlainTextResponse(_twiml_message(reply), media_type="application/xml")
 
     @app.get("/api/approvals")
     async def api_list_approvals(request: Request, limit: int = 200) -> List[Dict[str, Any]]:
@@ -1758,6 +1821,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 "execution_profile_audit": agent_service.list_execution_profile_audit(limit=25),
                 "unsafe_unlock_phrase": "I UNDERSTAND THIS CAN EXECUTE ARBITRARY CODE ON MY MACHINE",
                 "error": error,
+                "whatsapp_enabled": bool(whatsapp_bridge is not None),
             },
         )
 

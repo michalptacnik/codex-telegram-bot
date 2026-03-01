@@ -1158,6 +1158,10 @@ class AgentService:
         return self._access_controller
 
     @property
+    def run_store(self):
+        return self._run_store
+
+    @property
     def process_manager(self) -> Optional[ProcessManager]:
         return self._process_manager
 

@@ -97,4 +97,54 @@
     </tbody>
   </table>
 </section>
+
+<section class="card table-card">
+  <div class="k">WhatsApp Linking</div>
+  {% if whatsapp_enabled %}
+  <p class="dim">Generate a one-time code, then send <code>/link &lt;code&gt;</code> from WhatsApp.</p>
+  <form id="whatsapp-link-form" class="toolbar">
+    <label for="wa-chat-id">Chat ID</label>
+    <input id="wa-chat-id" name="chat_id" value="1" />
+    <label for="wa-user-id">User ID</label>
+    <input id="wa-user-id" name="user_id" value="1" />
+    <label for="wa-ttl">TTL sec</label>
+    <input id="wa-ttl" name="ttl_sec" value="900" />
+    <button class="btn" type="submit">Generate Code</button>
+  </form>
+  <pre id="wa-link-output" class="output">(none)</pre>
+  <script>
+    (function () {
+      const form = document.getElementById("whatsapp-link-form");
+      const out = document.getElementById("wa-link-output");
+      if (!form || !out) return;
+      form.addEventListener("submit", async function (ev) {
+        ev.preventDefault();
+        out.textContent = "Generating...";
+        try {
+          const payload = {
+            chat_id: Number(document.getElementById("wa-chat-id").value || "0"),
+            user_id: Number(document.getElementById("wa-user-id").value || "0"),
+            ttl_sec: Number(document.getElementById("wa-ttl").value || "900"),
+          };
+          const res = await fetch("/api/whatsapp/link-code", {
+            method: "POST",
+            headers: {"content-type": "application/json"},
+            body: JSON.stringify(payload),
+          });
+          const body = await res.json();
+          if (!res.ok) {
+            out.textContent = body.detail || JSON.stringify(body);
+            return;
+          }
+          out.textContent = `code=${body.code}\nexpires_at=${body.expires_at}\nchat_id=${body.chat_id}\nuser_id=${body.user_id}`;
+        } catch (err) {
+          out.textContent = String(err || "unknown error");
+        }
+      });
+    })();
+  </script>
+  {% else %}
+  <p class="dim">WhatsApp bridge is disabled. Set <code>WHATSAPP_ENABLED=1</code> and restart Control Center.</p>
+  {% endif %}
+</section>
 {% endblock %}
