@@ -55,6 +55,7 @@ from codex_telegram_bot.services.execution_profile import (
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
+from codex_telegram_bot.services.thin_memory import ensure_memory_layout
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
 from codex_telegram_bot.tools.email import email_tool_enabled
@@ -1023,6 +1024,7 @@ class AgentService:
 
     def initialize_session_workspace(self, session_id: str, previous_session_id: str = "") -> Dict[str, Any]:
         ws = self.session_workspace(session_id=session_id).resolve()
+        ensure_memory_layout(ws)
         previous_root = ""
         if previous_session_id:
             previous_root = self._session_workspace_roots.get(previous_session_id, "")
