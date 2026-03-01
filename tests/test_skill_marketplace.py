@@ -126,6 +126,7 @@ class TestSkillMarketplace(unittest.TestCase):
             service.initialize_session_workspace(session_id=session_id)
             prompt = service.build_session_prompt(session_id=session_id, user_prompt="hello")
             self.assertNotIn("Some body content.", prompt)
+            self.assertIn("Skill usage contract:", prompt)
 
 
 if __name__ == "__main__":

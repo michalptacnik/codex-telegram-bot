@@ -91,6 +91,10 @@ MEMORY_USAGE_CONTRACT = (
     "Use memory_pointer_open only when detailed context is required. "
     "Do not assume full memory pages or daily logs are preloaded."
 )
+SKILL_DISCLOSURE_CONTRACT = (
+    "Skill usage contract: do not dump all skills. "
+    "Select the minimal relevant skill(s) and load detail only when needed."
+)
 TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
     "exec": {
         "name": "exec",
@@ -1306,7 +1310,7 @@ class AgentService:
         retrieval_lines, retrieval_meta = self._build_retrieval_context_with_meta(user_prompt=user_prompt, limit=4)
         planning_lines = _planning_guidance_lines(user_prompt=user_prompt)
         capability_lines = self._build_capability_context(user_prompt=user_prompt)
-        style_lines = [f"Style guide: {MICRO_STYLE_GUIDE}", MEMORY_USAGE_CONTRACT]
+        style_lines = [f"Style guide: {MICRO_STYLE_GUIDE}", MEMORY_USAGE_CONTRACT, SKILL_DISCLOSURE_CONTRACT]
         memory_lines = self._build_thin_memory_context(session_id=session_id)
         if not self._run_store:
             prefix = style_lines + memory_lines + capability_lines + planning_lines + retrieval_lines
