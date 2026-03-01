@@ -95,6 +95,11 @@ class TestCommandRegistryValidation(unittest.TestCase):
         for cmd in {"sessions", "tail", "kill"}:
             self.assertIn(cmd, names)
 
+    def test_execution_profile_command_registered(self):
+        registry = _build_command_registry()
+        names = {name for name, _ in registry}
+        self.assertIn("profile", names)
+
 
 class TestOutputFirewallDetection(unittest.TestCase):
     def test_detects_embedded_tool_line_after_prose(self):

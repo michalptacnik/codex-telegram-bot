@@ -31,6 +31,7 @@ from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.mcp_bridge import McpBridge, _mcp_enabled
+from codex_telegram_bot.services.execution_profile import ExecutionProfileManager
 from codex_telegram_bot.services.skill_manager import SkillManager
 from codex_telegram_bot.services.skill_pack import SkillPackLoader
 from codex_telegram_bot.services.tool_policy import ToolPolicyEngine
@@ -153,10 +154,21 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     )
 
     if run_store is None:
-        return AgentService(**common_kwargs)
+        execution_profile_manager = ExecutionProfileManager(
+            store=None,
+            default_profile=(os.environ.get("EXECUTION_PROFILE") or "safe"),
+        )
+        return AgentService(
+            **common_kwargs,
+            execution_profile_manager=execution_profile_manager,
+        )
     run_store.recover_interrupted_runs()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=max(60, approval_ttl_sec))
     run_store.expire_tool_approvals_before(cutoff.isoformat())
+    execution_profile_manager = ExecutionProfileManager(
+        store=run_store,
+        default_profile=(os.environ.get("EXECUTION_PROFILE") or "safe"),
+    )
     event_bus = EventBus()
     retention_policy = SessionRetentionPolicy(
         store=run_store,
@@ -168,6 +180,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         run_store=run_store,
         event_bus=event_bus,
         retention_policy=retention_policy,
+        execution_profile_manager=execution_profile_manager,
     )
 
 

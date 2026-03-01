@@ -53,6 +53,17 @@ class SkillInstallRequest(BaseModel):
     source_url: str
 
 
+class ExecutionProfileRequest(BaseModel):
+    profile: str
+    user_id: int = 0
+
+
+class UnsafeUnlockConfirmRequest(BaseModel):
+    code: str
+    phrase: str
+    user_id: int = 0
+
+
 def _chunk_text(text: str, chunk_size: int = 220) -> List[str]:
     raw = str(text or "")
     if not raw:
@@ -775,6 +786,52 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         _opt_api_scope(request)
         items = agent_service.list_daily_cost_summaries(date=date, limit=max(1, min(limit, 500)))
         return {"date": date, "items": items}
+
+    @app.get("/api/execution-profile")
+    async def api_execution_profile(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        state = agent_service.execution_profile_state()
+        state["warning"] = agent_service.execution_profile_warning()
+        return state
+
+    @app.get("/api/execution-profile/audit")
+    async def api_execution_profile_audit(request: Request, limit: int = 100) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        items = agent_service.list_execution_profile_audit(limit=max(1, min(limit, 500)))
+        return {"items": items}
+
+    @app.post("/api/execution-profile/set")
+    async def api_execution_profile_set(request: Request, req: ExecutionProfileRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        state = agent_service.set_execution_profile(
+            profile=req.profile,
+            user_id=int(req.user_id or 0),
+            origin="web",
+        )
+        state["warning"] = agent_service.execution_profile_warning()
+        return state
+
+    @app.post("/api/execution-profile/start-unsafe-unlock")
+    async def api_execution_profile_start_unlock(request: Request, user_id: int = 0) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        return agent_service.start_unsafe_unlock(
+            user_id=int(user_id or 0),
+            origin="web",
+        )
+
+    @app.post("/api/execution-profile/confirm-unsafe-unlock")
+    async def api_execution_profile_confirm_unlock(
+        request: Request, req: UnsafeUnlockConfirmRequest
+    ) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="admin:*")
+        state = agent_service.confirm_unsafe_unlock(
+            user_id=int(req.user_id or 0),
+            origin="web",
+            code=req.code,
+            phrase=req.phrase,
+        )
+        state["warning"] = agent_service.execution_profile_warning()
+        return state
 
     @app.get("/api/approvals")
     async def api_list_approvals(request: Request, limit: int = 200) -> List[Dict[str, Any]]:
@@ -1683,11 +1740,12 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         return RedirectResponse(url="/agents", status_code=303)
 
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(request: Request):
+    async def settings_page(request: Request, error: str = ""):
         if (redir := _ui_auth_redirect(request)) is not None:
             return redir
         version = await agent_service.provider_version()
         provider_health = await agent_service.provider_health()
+        profile_state = agent_service.execution_profile_state()
         return templates.TemplateResponse(
             "settings.html",
             {
@@ -1695,8 +1753,53 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 "nav": "settings",
                 "provider_version": version,
                 "provider_health": provider_health,
+                "execution_profile": profile_state,
+                "execution_profile_warning": agent_service.execution_profile_warning(),
+                "execution_profile_audit": agent_service.list_execution_profile_audit(limit=25),
+                "unsafe_unlock_phrase": "I UNDERSTAND THIS CAN EXECUTE ARBITRARY CODE ON MY MACHINE",
+                "error": error,
             },
         )
+
+    @app.post("/settings/execution-profile")
+    async def settings_set_execution_profile(request: Request, profile: str = Form(...), user_id: str = Form("0")):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
+        try:
+            if str(profile or "").strip().lower() == "unsafe":
+                agent_service.start_unsafe_unlock(
+                    user_id=int(str(user_id or "0") or 0),
+                    origin="web",
+                )
+            else:
+                agent_service.set_execution_profile(
+                    profile=profile,
+                    user_id=int(str(user_id or "0") or 0),
+                    origin="web",
+                )
+        except Exception as exc:
+            return RedirectResponse(url=f"/settings?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/settings", status_code=303)
+
+    @app.post("/settings/execution-profile/confirm-unsafe")
+    async def settings_confirm_unsafe_unlock(
+        request: Request,
+        code: str = Form(""),
+        phrase: str = Form(""),
+        user_id: str = Form("0"),
+    ):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
+        try:
+            agent_service.confirm_unsafe_unlock(
+                user_id=int(str(user_id or "0") or 0),
+                origin="web",
+                code=code,
+                phrase=phrase,
+            )
+        except Exception as exc:
+            return RedirectResponse(url=f"/settings?error={str(exc)}", status_code=303)
+        return RedirectResponse(url="/settings", status_code=303)
 
     # ------------------------------------------------------------------
     # EPIC 3: Provider management API

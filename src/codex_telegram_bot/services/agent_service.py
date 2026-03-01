@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
+from codex_telegram_bot.config import load_env_file, write_env_file
 from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
 from codex_telegram_bot.domain.contracts import ProviderAdapter, ExecutionRunner
 from codex_telegram_bot.domain.agents import AgentRecord
@@ -44,6 +45,13 @@ from codex_telegram_bot.services.access_control import AccessController
 from codex_telegram_bot.services.capability_router import CapabilityRouter
 from codex_telegram_bot.services.cron_scheduler import CronScheduler
 from codex_telegram_bot.services.cost_tracking import estimate_cost_usd, normalize_usage
+from codex_telegram_bot.services.execution_profile import (
+    ExecutionProfileManager,
+    PROFILE_POWER_USER,
+    PROFILE_SAFE,
+    PROFILE_UNSAFE,
+    UNSAFE_UNLOCK_PHRASE,
+)
 from codex_telegram_bot.services.session_retention import SessionRetentionPolicy
 from codex_telegram_bot.services.proactive_messenger import ProactiveMessenger
 from codex_telegram_bot.services.workspace_manager import WorkspaceManager
@@ -346,6 +354,7 @@ class AgentService:
         process_manager: Optional[ProcessManager] = None,
         proactive_messenger: Optional[ProactiveMessenger] = None,
         config_dir: Optional[Path] = None,
+        execution_profile_manager: Optional[ExecutionProfileManager] = None,
     ):
         self._provider = provider
         self._provider_registry = provider_registry
@@ -382,6 +391,10 @@ class AgentService:
         self._process_manager = process_manager or ProcessManager(run_store=run_store)
         self._proactive_messenger = proactive_messenger
         self._config_dir = config_dir.expanduser().resolve() if config_dir is not None else None
+        self._execution_profile_manager = execution_profile_manager or ExecutionProfileManager(
+            store=run_store,
+            default_profile=(os.environ.get("EXECUTION_PROFILE") or PROFILE_SAFE),
+        )
         self._last_process_cleanup_ts = 0.0
         self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
 
@@ -2437,6 +2450,7 @@ class AgentService:
     def runtime_capabilities(self) -> Dict[str, Any]:
         runner_name = self._execution_runner.__class__.__name__
         backend = "docker" if "docker" in runner_name.lower() else "local"
+        profile_state = self.execution_profile_state()
         return {
             "execution_backend": backend,
             "execution_runner": runner_name,
@@ -2444,7 +2458,65 @@ class AgentService:
             "mcp_bridge_enabled": bool(self._mcp_bridge is not None),
             "skill_packs_enabled": bool(self._skill_pack_loader is not None),
             "tool_policy_enabled": bool(self._tool_policy_engine is not None),
+            "execution_profile": profile_state.get("profile", PROFILE_SAFE),
+            "unsafe_active": bool(profile_state.get("unsafe_active", False)),
+            "unsafe_seconds_remaining": int(profile_state.get("seconds_until_unsafe_expiry", 0) or 0),
         }
+
+    def execution_profile_state(self) -> Dict[str, Any]:
+        return self._execution_profile_manager.get_state().to_dict()
+
+    def execution_profile_warning(self) -> str:
+        return self._execution_profile_manager.unsafe_warning_text()
+
+    def list_execution_profile_audit(self, limit: int = 100) -> List[Dict[str, Any]]:
+        return list(self._execution_profile_manager.list_audit(limit=max(1, int(limit))))
+
+    def set_execution_profile(self, *, profile: str, user_id: int, origin: str) -> Dict[str, Any]:
+        if self._access_controller is not None:
+            self._access_controller.check_action(user_id, "manage_agents", 0)
+        state = self._execution_profile_manager.set_profile(
+            profile=profile,
+            user_id=str(user_id),
+            origin=origin,
+            reason="manual_profile_set",
+        )
+        self._persist_execution_profile_env(state.profile)
+        return state.to_dict()
+
+    def start_unsafe_unlock(self, *, user_id: int, origin: str) -> Dict[str, Any]:
+        if self._access_controller is not None:
+            self._access_controller.check_action(user_id, "manage_agents", 0)
+        payload = self._execution_profile_manager.start_unsafe_unlock(
+            user_id=str(user_id),
+            origin=origin,
+        )
+        return payload
+
+    def confirm_unsafe_unlock(self, *, user_id: int, origin: str, code: str, phrase: str) -> Dict[str, Any]:
+        if self._access_controller is not None:
+            self._access_controller.check_action(user_id, "manage_agents", 0)
+        state = self._execution_profile_manager.confirm_unsafe_unlock(
+            user_id=str(user_id),
+            origin=origin,
+            code=code,
+            phrase=phrase,
+        )
+        self._persist_execution_profile_env(state.profile)
+        return state.to_dict()
+
+    def _persist_execution_profile_env(self, profile: str) -> None:
+        if self._config_dir is None:
+            return
+        env_path = self._config_dir / ".env"
+        env = load_env_file(env_path) if env_path.exists() else {}
+        env["EXECUTION_PROFILE"] = str(profile or PROFILE_SAFE)
+        write_env_file(env_path, env)
+        runtime_env_path = self._config_dir / "runtime.env"
+        runtime_env = load_env_file(runtime_env_path) if runtime_env_path.exists() else {}
+        runtime_env["EXECUTION_PROFILE"] = str(profile or PROFILE_SAFE)
+        write_env_file(runtime_env_path, runtime_env)
+        os.environ["EXECUTION_PROFILE"] = str(profile or PROFILE_SAFE)
 
     def _record_usage_from_provider_response(
         self,

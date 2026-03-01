@@ -8,6 +8,9 @@
 </head>
 <body>
   <a class="skip-link" href="#main-content">Skip to content</a>
+  <div id="execution-profile-banner" style="display:none;padding:10px 14px;background:#7f1d1d;color:#fee2e2;font-weight:600;border-bottom:1px solid #ef4444;">
+    UNSAFE MODE ENABLED
+  </div>
   <div class="layout">
     <aside class="sidebar" aria-label="Primary">
       <div class="brand">Control Center</div>
@@ -30,5 +33,23 @@
       {% block content %}{% endblock %}
     </main>
   </div>
+  <script>
+    (async () => {
+      try {
+        const resp = await fetch("/api/execution-profile");
+        if (!resp.ok) return;
+        const state = await resp.json();
+        if (!state || !state.unsafe_active) return;
+        const banner = document.getElementById("execution-profile-banner");
+        if (!banner) return;
+        const sec = Number(state.seconds_until_unsafe_expiry || 0);
+        const hh = Math.floor(sec / 3600);
+        const mm = Math.floor((sec % 3600) / 60);
+        banner.textContent = `UNSAFE MODE ENABLED — arbitrary code execution allowed (expires in ${hh}h ${mm}m)`;
+        banner.style.display = "block";
+      } catch (_err) {
+      }
+    })();
+  </script>
 </body>
 </html>

@@ -66,6 +66,7 @@ from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.app_container import build_agent_service
 from codex_telegram_bot.execution.policy import ExecutionPolicyEngine
 from codex_telegram_bot.services.agent_service import AgentService
+from codex_telegram_bot.services.execution_profile import UNSAFE_UNLOCK_PHRASE
 from codex_telegram_bot.services.message_updater import MessageUpdater
 from .util import chunk_text
 
@@ -100,6 +101,7 @@ _COMMAND_HANDLERS = [
     ("status", "handle_status"),
     ("cost", "handle_cost"),
     ("help", "handle_help"),
+    ("profile", "handle_profile"),
     ("workspace", "handle_workspace"),
     ("skills", "handle_skills"),
     ("email", "handle_email"),
@@ -363,6 +365,34 @@ def _allow_user_command(context: ContextTypes.DEFAULT_TYPE, user_id: int) -> boo
     stamps.append(now)
     limiter[key] = stamps
     return True
+
+
+def _is_admin_user(agent_service: AgentService, user_id: int, chat_id: int) -> bool:
+    access = getattr(agent_service, "access_controller", None)
+    if access is None:
+        return False
+    try:
+        profile = access.get_profile(user_id, chat_id)
+    except Exception:
+        return False
+    roles = {str(item).strip().lower() for item in list(getattr(profile, "roles", []) or [])}
+    return "admin" in roles
+
+
+async def _warn_unsafe_if_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    *,
+    agent_service: AgentService,
+    user_id: int,
+    chat_id: int,
+) -> None:
+    if not _is_admin_user(agent_service, user_id, chat_id):
+        return
+    warning = str(agent_service.execution_profile_warning() or "").strip()
+    if not warning:
+        return
+    await update.message.reply_text(warning)
 
 
 def _is_valid_command_name(name: str) -> bool:
@@ -637,6 +667,13 @@ async def handle_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             chat_id=update.effective_chat.id,
             user_id=user_id,
         )
+        await _warn_unsafe_if_admin(
+            update,
+            context,
+            agent_service=agent_service,
+            user_id=user_id,
+            chat_id=update.effective_chat.id,
+        )
         for chunk in chunk_text(_humanize_approval_execution_output(out), MAX_OUTPUT_CHARS):
             await update.message.reply_text(chunk)
     except Exception as exc:
@@ -672,6 +709,13 @@ async def handle_deny(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             approval_id=match["approval_id"],
             chat_id=update.effective_chat.id,
             user_id=user_id,
+        )
+        await _warn_unsafe_if_admin(
+            update,
+            context,
+            agent_service=agent_service,
+            user_id=user_id,
+            chat_id=update.effective_chat.id,
         )
         await update.message.reply_text(out)
     except Exception as exc:
@@ -721,6 +765,9 @@ async def handle_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             f"Context: prompt={diagnostics.get('prompt_chars', 0)} chars, "
             f"retrieval={diagnostics.get('retrieval_confidence', 'n/a')}"
         )
+        warning = str(agent_service.execution_profile_warning() or "").strip()
+        if warning:
+            msg = msg + "\n" + warning
         await update.message.reply_text(msg)
     except Exception as exc:
         logger.exception("Status handler error: %s", exc)
@@ -765,7 +812,7 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 profile = agent.policy_profile
         text = (
             "Commands:\n"
-            "/new, /resume [id], /branch, /status, /cost, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /sessions, /tail [id], /kill [id], /email, /gh, /email_check, /contact, /template, /email_template\n"
+            "/new, /resume [id], /branch, /status, /cost, /profile, /workspace, /skills, /pending, /approve <id>, /deny <id>, /interrupt, /continue, /sessions, /tail [id], /kill [id], /email, /gh, /email_check, /contact, /template, /email_template\n"
             "\n"
             "Examples:\n"
             "- `!exec /bin/ls -la`\n"
@@ -782,6 +829,109 @@ async def handle_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.message.reply_text(text, parse_mode="Markdown")
     except Exception as exc:
         logger.exception("Help handler error: %s", exc)
+
+
+async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        if not _allow_user_command(context, user_id):
+            await update.message.reply_text("Rate limit: too many commands. Please wait a minute.")
+            return
+        agent_service = context.bot_data.get("agent_service")
+        chat_id = update.effective_chat.id
+        state = agent_service.execution_profile_state()
+        is_admin = _is_admin_user(agent_service, user_id, chat_id)
+        args = [str(a or "").strip() for a in list(context.args or []) if str(a or "").strip()]
+        if not args:
+            lines = [
+                f"Execution profile: `{state.get('profile', 'safe')}`",
+                f"UNSAFE active: `{bool(state.get('unsafe_active', False))}`",
+            ]
+            expires_at = str(state.get("unsafe_expires_at") or "")
+            if expires_at:
+                lines.append(f"UNSAFE expires at: `{expires_at}`")
+            warning = str(agent_service.execution_profile_warning() or "").strip()
+            if warning:
+                lines.append(warning)
+            if is_admin:
+                lines.append("Set profile: `/profile safe|power_user|unsafe`")
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            return
+
+        if not is_admin:
+            await update.message.reply_text("Error: only admin users can change execution profile.")
+            return
+
+        target = args[0].lower()
+        if target in {"safe", "power", "power_user"}:
+            mapped = "power_user" if target in {"power", "power_user"} else "safe"
+            state = agent_service.set_execution_profile(
+                profile=mapped,
+                user_id=user_id,
+                origin="telegram",
+            )
+            await update.message.reply_text(
+                f"Execution profile set to `{state.get('profile', mapped)}`.",
+                parse_mode="Markdown",
+            )
+            await _warn_unsafe_if_admin(
+                update,
+                context,
+                agent_service=agent_service,
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+            return
+
+        if target == "unsafe":
+            if len(args) == 1:
+                unlock = agent_service.start_unsafe_unlock(user_id=user_id, origin="telegram")
+                code = str(unlock.get("code") or "")
+                ready_at = str(unlock.get("ready_at") or "")
+                await update.message.reply_text(
+                    "UNSAFE unlock initiated.\n"
+                    f"Code: `{code}`\n"
+                    f"Ready at: `{ready_at}`\n"
+                    "After countdown, confirm with:\n"
+                    f"`/profile unsafe {code} {UNSAFE_UNLOCK_PHRASE}`",
+                    parse_mode="Markdown",
+                )
+                return
+            code = args[1] if len(args) >= 2 else ""
+            phrase = " ".join(args[2:]).strip() if len(args) >= 3 else ""
+            if not code or not phrase:
+                await update.message.reply_text(
+                    "Usage: /profile unsafe <unlock_code> I UNDERSTAND THIS CAN EXECUTE ARBITRARY CODE ON MY MACHINE"
+                )
+                return
+            state = agent_service.confirm_unsafe_unlock(
+                user_id=user_id,
+                origin="telegram",
+                code=code,
+                phrase=phrase,
+            )
+            await update.message.reply_text(
+                f"UNSAFE mode enabled until `{state.get('unsafe_expires_at', '-')}`.",
+                parse_mode="Markdown",
+            )
+            await _warn_unsafe_if_admin(
+                update,
+                context,
+                agent_service=agent_service,
+                user_id=user_id,
+                chat_id=chat_id,
+            )
+            return
+
+        await update.message.reply_text("Usage: /profile safe|power_user|unsafe")
+    except Exception as exc:
+        logger.exception("Profile handler error: %s", exc)
+        await update.message.reply_text(f"Error: {str(exc)[:220]}")
 
 
 async def handle_workspace(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1151,6 +1301,15 @@ async def handle_reinstall(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
             return
+        agent_service = context.bot_data.get("agent_service")
+        if update.message and update.effective_chat:
+            await _warn_unsafe_if_admin(
+                update,
+                context,
+                agent_service=agent_service,
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+            )
         context.application.bot_data.get("reinstall_callback")()
         await update.message.reply_text("Reinstall scheduled. Restarting now.")
         await asyncio.sleep(0.5)
@@ -1165,6 +1324,15 @@ async def handle_purge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
             return
+        agent_service = context.bot_data.get("agent_service")
+        if update.message and update.effective_chat:
+            await _warn_unsafe_if_admin(
+                update,
+                context,
+                agent_service=agent_service,
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+            )
         context.application.bot_data.get("purge_callback")()
         await update.message.reply_text("Purged .env. Restarting now.")
         await asyncio.sleep(0.5)
@@ -1179,6 +1347,15 @@ async def handle_restart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         allowlist = context.bot_data.get("allowlist")
         if not is_allowed(user_id, allowlist):
             return
+        agent_service = context.bot_data.get("agent_service")
+        if update.message and update.effective_chat:
+            await _warn_unsafe_if_admin(
+                update,
+                context,
+                agent_service=agent_service,
+                user_id=user_id,
+                chat_id=update.effective_chat.id,
+            )
         await update.message.reply_text("Restarting now.")
         await asyncio.sleep(0.5)
         context.application.bot_data.get("restart_callback")()

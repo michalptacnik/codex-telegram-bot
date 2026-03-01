@@ -259,6 +259,18 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
             costs_api = client.get("/api/costs/daily")
             self.assertEqual(costs_api.status_code, 200)
             self.assertIn("items", costs_api.json())
+            profile_api = client.get("/api/execution-profile")
+            self.assertEqual(profile_api.status_code, 200)
+            self.assertEqual(profile_api.json().get("profile"), "safe")
+            set_profile = client.post(
+                "/api/execution-profile/set",
+                json={"profile": "power_user", "user_id": 0},
+            )
+            self.assertEqual(set_profile.status_code, 200)
+            self.assertEqual(set_profile.json().get("profile"), "power_user")
+            start_unlock = client.post("/api/execution-profile/start-unsafe-unlock", params={"user_id": 0})
+            self.assertEqual(start_unlock.status_code, 200)
+            self.assertTrue(start_unlock.json().get("code"))
             costs_page = client.get("/costs")
             self.assertEqual(costs_page.status_code, 200)
             self.assertIn("Costs", costs_page.text)

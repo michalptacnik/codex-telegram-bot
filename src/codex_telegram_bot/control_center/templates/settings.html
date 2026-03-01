@@ -7,14 +7,27 @@
   </div>
 </div>
 
+{% if execution_profile_warning %}
+<section class="error-banner" style="margin-top: 12px;">
+  <div class="k">Security Warning</div>
+  <div>{{ execution_profile_warning }}</div>
+</section>
+{% endif %}
+{% if error %}
+<section class="error-banner" style="margin-top: 12px;">
+  <div class="k">Error</div>
+  <div>{{ error }}</div>
+</section>
+{% endif %}
+
 <section class="cards">
   <article class="card">
     <div class="k">Provider Version</div>
     <div class="v" style="font-size: 20px;">{{ provider_version }}</div>
   </article>
   <article class="card">
-    <div class="k">Execution Mode</div>
-    <div class="v" style="font-size: 20px;">Local Shell</div>
+    <div class="k">Execution Profile</div>
+    <div class="v" style="font-size: 20px;">{{ execution_profile.profile }}</div>
   </article>
   <article class="card">
     <div class="k">State Storage</div>
@@ -27,7 +40,61 @@
 </section>
 
 <section class="card table-card">
+  <div class="k">Execution Profile Controls</div>
+  <p class="dim">SAFE is default. UNSAFE requires unlock countdown + phrase confirmation and auto-expires in 24h.</p>
+  <form method="POST" action="/settings/execution-profile" class="toolbar">
+    <label for="profile">Profile</label>
+    <select id="profile" name="profile">
+      <option value="safe" {% if execution_profile.profile == 'safe' %}selected{% endif %}>SAFE</option>
+      <option value="power_user" {% if execution_profile.profile == 'power_user' %}selected{% endif %}>POWER_USER</option>
+      <option value="unsafe" {% if execution_profile.profile == 'unsafe' %}selected{% endif %}>UNSAFE (start unlock)</option>
+    </select>
+    <label for="profile-user-id">Admin user ID</label>
+    <input id="profile-user-id" name="user_id" value="{{ execution_profile.enabled_by_user_id or '0' }}" />
+    <button class="btn" type="submit">Apply</button>
+  </form>
+  <form method="POST" action="/settings/execution-profile/confirm-unsafe" class="toolbar">
+    <label for="unsafe-code">Unlock code</label>
+    <input id="unsafe-code" name="code" placeholder="6-digit code" />
+    <label for="unsafe-user-id">Admin user ID</label>
+    <input id="unsafe-user-id" name="user_id" value="{{ execution_profile.enabled_by_user_id or '0' }}" />
+    <input type="hidden" name="phrase" value="{{ unsafe_unlock_phrase }}" />
+    <button class="btn" type="submit">Confirm UNSAFE</button>
+  </form>
+  <div class="dim mono">
+    phrase: {{ unsafe_unlock_phrase }}<br />
+    unsafe_expires_at: {{ execution_profile.unsafe_expires_at or '-' }}
+  </div>
+</section>
+
+<section class="card table-card">
   <div class="k">Provider Health</div>
   <pre class="output">{{ provider_health | tojson(indent=2) }}</pre>
+</section>
+
+<section class="card table-card">
+  <div class="k">Execution Profile Audit</div>
+  <table>
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Origin</th>
+        <th>User</th>
+        <th>From → To</th>
+        <th>Reason</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in execution_profile_audit %}
+      <tr>
+        <td class="mono">{{ row.created_at }}</td>
+        <td>{{ row.origin }}</td>
+        <td class="mono">{{ row.changed_by_user_id }}</td>
+        <td class="mono">{{ row.from_profile }} → {{ row.to_profile }}</td>
+        <td>{{ row.reason }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
 </section>
 {% endblock %}

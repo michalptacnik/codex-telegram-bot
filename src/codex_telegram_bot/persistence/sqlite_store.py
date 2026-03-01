@@ -36,7 +36,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 class SqliteRunStore:
@@ -237,6 +237,34 @@ class SqliteRunStore:
                     total_cost_usd REAL NOT NULL DEFAULT 0.0,
                     updated_at TEXT NOT NULL,
                     PRIMARY KEY (user_id, date)
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS execution_profile_state (
+                    id INTEGER PRIMARY KEY,
+                    profile TEXT NOT NULL,
+                    unsafe_enabled_at TEXT,
+                    unsafe_expires_at TEXT,
+                    enabled_by_user_id TEXT NOT NULL DEFAULT '',
+                    unlock_code_hash TEXT NOT NULL DEFAULT '',
+                    unlock_started_at TEXT,
+                    last_changed_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS execution_profile_audit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    origin TEXT NOT NULL,
+                    changed_by_user_id TEXT NOT NULL,
+                    from_profile TEXT NOT NULL,
+                    to_profile TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    details_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
                 )
                 """
             )
@@ -499,6 +527,18 @@ class SqliteRunStore:
                 """,
                 (_utc_now(), _utc_now()),
             )
+            profile_row = conn.execute(
+                "SELECT id FROM execution_profile_state WHERE id = 1"
+            ).fetchone()
+            if not profile_row:
+                conn.execute(
+                    """
+                    INSERT INTO execution_profile_state
+                    (id, profile, unsafe_enabled_at, unsafe_expires_at, enabled_by_user_id, unlock_code_hash, unlock_started_at, last_changed_at)
+                    VALUES (1, ?, NULL, NULL, '', '', NULL, ?)
+                    """,
+                    ("safe", _utc_now()),
+                )
             self._set_schema_version(conn, SCHEMA_VERSION)
 
     def _set_schema_version(self, conn: sqlite3.Connection, version: int) -> None:
@@ -1770,6 +1810,131 @@ class SqliteRunStore:
                     "cost_usd_estimate": float(r["cost_usd_estimate"]) if r["cost_usd_estimate"] is not None else None,
                     "created_at": r["created_at"],
                     "meta": meta,
+                }
+            )
+        return out
+
+    # ------------------------------------------------------------------
+    # Execution profile state / audit
+    # ------------------------------------------------------------------
+
+    def get_execution_profile_state(self) -> dict:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM execution_profile_state WHERE id = 1"
+            ).fetchone()
+        if row is None:
+            return {
+                "profile": "safe",
+                "unsafe_enabled_at": "",
+                "unsafe_expires_at": "",
+                "enabled_by_user_id": "",
+                "unlock_code_hash": "",
+                "unlock_started_at": "",
+                "last_changed_at": "",
+            }
+        return {
+            "profile": str(row["profile"] or "safe"),
+            "unsafe_enabled_at": str(row["unsafe_enabled_at"] or ""),
+            "unsafe_expires_at": str(row["unsafe_expires_at"] or ""),
+            "enabled_by_user_id": str(row["enabled_by_user_id"] or ""),
+            "unlock_code_hash": str(row["unlock_code_hash"] or ""),
+            "unlock_started_at": str(row["unlock_started_at"] or ""),
+            "last_changed_at": str(row["last_changed_at"] or ""),
+        }
+
+    def set_execution_profile_state(
+        self,
+        *,
+        profile: str,
+        unsafe_enabled_at: str = "",
+        unsafe_expires_at: str = "",
+        enabled_by_user_id: str = "",
+        unlock_code_hash: str = "",
+        unlock_started_at: str = "",
+    ) -> None:
+        now = _utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO execution_profile_state
+                (id, profile, unsafe_enabled_at, unsafe_expires_at, enabled_by_user_id, unlock_code_hash, unlock_started_at, last_changed_at)
+                VALUES (1, ?, NULLIF(?, ''), NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    profile = excluded.profile,
+                    unsafe_enabled_at = excluded.unsafe_enabled_at,
+                    unsafe_expires_at = excluded.unsafe_expires_at,
+                    enabled_by_user_id = excluded.enabled_by_user_id,
+                    unlock_code_hash = excluded.unlock_code_hash,
+                    unlock_started_at = excluded.unlock_started_at,
+                    last_changed_at = excluded.last_changed_at
+                """,
+                (
+                    str(profile or "safe"),
+                    str(unsafe_enabled_at or ""),
+                    str(unsafe_expires_at or ""),
+                    str(enabled_by_user_id or ""),
+                    str(unlock_code_hash or ""),
+                    str(unlock_started_at or ""),
+                    now,
+                ),
+            )
+
+    def record_execution_profile_audit(
+        self,
+        *,
+        origin: str,
+        changed_by_user_id: str,
+        from_profile: str,
+        to_profile: str,
+        reason: str,
+        details: Optional[Dict[str, object]] = None,
+    ) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO execution_profile_audit
+                (origin, changed_by_user_id, from_profile, to_profile, reason, details_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    str(origin or "unknown"),
+                    str(changed_by_user_id or ""),
+                    str(from_profile or ""),
+                    str(to_profile or ""),
+                    str(reason or ""),
+                    json.dumps(details or {}, ensure_ascii=False),
+                    _utc_now(),
+                ),
+            )
+        return int(cur.lastrowid or 0)
+
+    def list_execution_profile_audit(self, limit: int = 100) -> List[dict]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM execution_profile_audit
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        out: List[dict] = []
+        for row in rows:
+            try:
+                details = json.loads(row["details_json"] or "{}")
+            except Exception:
+                details = {}
+            out.append(
+                {
+                    "id": int(row["id"] or 0),
+                    "origin": str(row["origin"] or ""),
+                    "changed_by_user_id": str(row["changed_by_user_id"] or ""),
+                    "from_profile": str(row["from_profile"] or ""),
+                    "to_profile": str(row["to_profile"] or ""),
+                    "reason": str(row["reason"] or ""),
+                    "details": details,
+                    "created_at": str(row["created_at"] or ""),
                 }
             )
         return out
