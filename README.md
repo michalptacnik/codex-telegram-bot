@@ -228,6 +228,9 @@ Environment variables override `.env`:
 - `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_MAX_TOKENS`, `OPENAI_TIMEOUT_SEC`, `OPENAI_API_BASE` (used by `responses-api`)
 - `ENABLE_PROBE_LOOP` (default: `0`; when `1`, enables probe-loop service wiring in container)
 - `ENABLE_WEB_SEARCH_TOOL` (default: `1`; when `0`, disables `web_search`)
+- `WEB_SEARCH_ENGINE` (default: `google`; options: `google`, `google_cse`, `duckduckgo`)
+- `GOOGLE_SEARCH_API_KEY` (required for Google web search)
+- `GOOGLE_SEARCH_CX` (required for Google Programmable Search Engine)
 - `EMAIL_SEND_REQUIRE_APPROVAL` (default: `1`; when `0`, email tools can send without approval gate)
 - `STATUS_HEARTBEAT_PUSH_ENABLED` (default: `0`; when `1`, posts periodic heartbeat chat messages in addition to status-message updates)
 - `CODEX_EXEC_TIMEOUT_SEC` (default: `900`, bounded by policy profile max timeout)
@@ -247,6 +250,7 @@ Environment variables override `.env`:
 - `TOOL_LOOP_MAX_STEPS` (default: `3`)
 - `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
 - `AUTONOMOUS_PROTOCOL_MAX_DEPTH` (default: `6`; max recursive assistant-emitted protocol hops before forcing stop)
+- `AUTONOMOUS_ACTION_MAX_BATCHES` (default: `15`; max action batches before preliminary pause/continue handoff)
 - `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, enables `send_email_smtp`; auto-enabled when `SMTP_HOST`, `SMTP_USER`, and `SMTP_APP_PASSWORD` are present)
 - Email sends are always approval-gated when the SMTP tool is enabled
 - `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)

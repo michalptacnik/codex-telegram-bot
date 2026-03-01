@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
 
+WEB_SEARCH_ENGINE_ENV = "WEB_SEARCH_ENGINE"
+GOOGLE_SEARCH_API_KEY_ENV = "GOOGLE_SEARCH_API_KEY"
+GOOGLE_SEARCH_CX_ENV = "GOOGLE_SEARCH_CX"
+
 
 def web_search_tool_enabled(env: Dict[str, str] | None = None) -> bool:
     source = env if env is not None else os.environ
@@ -38,6 +42,58 @@ def _duckduckgo_search(query: str, timeout_sec: int) -> Dict[str, Any]:
         blob = resp.read()
     parsed = json.loads(blob.decode("utf-8", errors="replace"))
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _google_search(query: str, timeout_sec: int, k: int) -> List[Dict[str, str]]:
+    api_key = str(os.environ.get(GOOGLE_SEARCH_API_KEY_ENV) or "").strip()
+    cx = str(os.environ.get(GOOGLE_SEARCH_CX_ENV) or "").strip()
+    if not api_key or not cx:
+        raise RuntimeError(
+            f"Google search requires {GOOGLE_SEARCH_API_KEY_ENV} and {GOOGLE_SEARCH_CX_ENV}."
+        )
+    params = {
+        "key": api_key,
+        "cx": cx,
+        "q": query,
+        "num": max(1, min(int(k or 5), 10)),
+        "safe": "off",
+    }
+    url = "https://www.googleapis.com/customsearch/v1?" + urllib.parse.urlencode(params)
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "codex-telegram-bot-web-search/1.0",
+            "Accept": "application/json",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=max(1, timeout_sec)) as resp:
+        blob = resp.read()
+    parsed = json.loads(blob.decode("utf-8", errors="replace"))
+    items = parsed.get("items") if isinstance(parsed, dict) else None
+    if not isinstance(items, list):
+        return []
+    out: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        link = str(item.get("link") or "").strip()
+        if not link:
+            continue
+        key = link.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            {
+                "title": str(item.get("title") or "").strip() or link,
+                "url": link,
+                "snippet": str(item.get("snippet") or "").strip(),
+            }
+        )
+        if len(out) >= k:
+            break
+    return out
 
 
 def _flatten_related_topics(raw: Any) -> List[Dict[str, str]]:
@@ -189,9 +245,15 @@ class WebSearchTool:
     name = "web_search"
     description = "Search the public web and return source URLs with snippets."
 
-    def __init__(self, fetch_fn=_duckduckgo_search, fallback_fn=_duckduckgo_html_search) -> None:
+    def __init__(
+        self,
+        fetch_fn=_duckduckgo_search,
+        fallback_fn=_duckduckgo_html_search,
+        google_fetch_fn=_google_search,
+    ) -> None:
         self._fetch_fn = fetch_fn
         self._fallback_fn = fallback_fn
+        self._google_fetch_fn = google_fetch_fn
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
         if not web_search_tool_enabled():
@@ -215,28 +277,43 @@ class WebSearchTool:
         except Exception:
             timeout_sec = 15
         timeout_sec = max(1, min(timeout_sec, 60))
+        engine = str(
+            request.args.get("engine")
+            or os.environ.get(WEB_SEARCH_ENGINE_ENV)
+            or "google"
+        ).strip().lower()
 
-        try:
-            payload = self._fetch_fn(query, timeout_sec)
-        except Exception as exc:
-            return ToolResult(
-                ok=False,
-                output=(
-                    "Error: web search failed. "
-                    f"{exc}"
-                ),
-            )
+        rows: List[Dict[str, str]] = []
+        source_label = ""
+        errors: List[str] = []
 
-        rows = _normalize_results(payload, k=k)
-        source_label = "DuckDuckGo"
+        if engine in {"google", "google_cse"}:
+            try:
+                rows = self._google_fetch_fn(query, timeout_sec, k)
+                if rows:
+                    source_label = "Google Custom Search"
+            except Exception:
+                errors.append("google search unavailable")
+        if not rows:
+            try:
+                payload = self._fetch_fn(query, timeout_sec)
+                rows = _normalize_results(payload, k=k)
+                if rows:
+                    source_label = "DuckDuckGo"
+            except Exception:
+                errors.append("duckduckgo instant search unavailable")
+                rows = []
         if not rows:
             try:
                 rows = self._fallback_fn(query, timeout_sec, k)
                 if rows:
                     source_label = "DuckDuckGo HTML fallback"
             except Exception:
+                errors.append("duckduckgo html search unavailable")
                 rows = []
         if not rows:
+            if errors:
+                return ToolResult(ok=True, output=f"No web results found for: {query} ({'; '.join(errors)})")
             return ToolResult(ok=True, output=f"No web results found for: {query}")
 
         lines = [f'Web results for "{query}" (source: {source_label}):']

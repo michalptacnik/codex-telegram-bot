@@ -122,6 +122,22 @@ class TestToolRegistry(unittest.TestCase):
 
 
 class TestWebSearchTool(unittest.TestCase):
+    def test_web_search_prefers_google_by_default(self):
+        tool = WebSearchTool(
+            fetch_fn=lambda _q, _t: {"RelatedTopics": []},
+            fallback_fn=lambda _q, _t, _k: [],
+            google_fetch_fn=lambda _q, _t, _k: [
+                {"title": "Google Hit", "url": "https://example.com/google", "snippet": "from google"}
+            ],
+        )
+        res = tool.run(
+            ToolRequest(name="web_search", args={"query": "test query", "k": 3}),
+            ToolContext(workspace_root=Path.cwd()),
+        )
+        self.assertTrue(res.ok)
+        self.assertIn("source: Google Custom Search", res.output)
+        self.assertIn("https://example.com/google", res.output)
+
     def test_web_search_formats_sources(self):
         def _fake_fetch(_query: str, _timeout: int):
             return {
@@ -162,6 +178,24 @@ class TestWebSearchTool(unittest.TestCase):
         self.assertTrue(res.ok)
         self.assertIn("source: DuckDuckGo HTML fallback", res.output)
         self.assertIn("https://www.deepseek.com/", res.output)
+
+    def test_web_search_falls_back_to_duckduckgo_when_google_unavailable(self):
+        tool = WebSearchTool(
+            fetch_fn=lambda _q, _t: {
+                "RelatedTopics": [
+                    {"Text": "Result One - snippet one", "FirstURL": "https://example.com/one"},
+                ]
+            },
+            fallback_fn=lambda _q, _t, _k: [],
+            google_fetch_fn=lambda _q, _t, _k: (_ for _ in ()).throw(RuntimeError("google down")),
+        )
+        res = tool.run(
+            ToolRequest(name="web_search", args={"query": "test query", "k": 3}),
+            ToolContext(workspace_root=Path.cwd()),
+        )
+        self.assertTrue(res.ok)
+        self.assertIn("source: DuckDuckGo", res.output)
+        self.assertIn("https://example.com/one", res.output)
 
     def test_web_search_requires_query(self):
         tool = WebSearchTool(fetch_fn=lambda _q, _t: {})
