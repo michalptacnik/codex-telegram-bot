@@ -1,0 +1,2 @@
+Sentence one has enough words to make the line long and still readable. Sentence two continues the wall so it should be split by formatter. Sentence three keeps going with clear punctuation for deterministic splitting. Sentence four adds extra detail to guarantee threshold crossing for paragraphing behavior. Sentence five closes the block and keeps punctuation stable for tests.
+

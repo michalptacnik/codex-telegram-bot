@@ -1,0 +1,5 @@
+Plan:
+1) Run tests
+2) Commit changes
+Path: src/app.py (check)!
+

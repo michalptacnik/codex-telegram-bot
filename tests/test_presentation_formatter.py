@@ -1,5 +1,6 @@
 import re
 import unittest
+from pathlib import Path
 
 from codex_telegram_bot.presentation.formatter import format_message, format_tool_result
 
@@ -13,6 +14,36 @@ def _canonical(text: str) -> str:
 
 
 class TestPresentationFormatter(unittest.TestCase):
+    def test_fixture_plan_rendering_matches_expected(self):
+        fixture_dir = Path(__file__).resolve().parent / "fixtures" / "presentation"
+        source = (fixture_dir / "ugly_plan_input.txt").read_text(encoding="utf-8")
+        expected_web = (fixture_dir / "ugly_plan_expected_web.txt").read_text(encoding="utf-8").strip()
+        expected_telegram = (fixture_dir / "ugly_plan_expected_telegram.txt").read_text(encoding="utf-8").strip()
+
+        web = format_message(
+            source,
+            channel="web",
+            style={"emoji": "off", "emphasis": "light", "brevity": "short"},
+        )
+        telegram = format_message(
+            source,
+            channel="telegram",
+            style={"emoji": "off", "emphasis": "light", "brevity": "short"},
+        )
+        self.assertEqual(web.formatted_text.strip(), expected_web)
+        self.assertEqual(telegram.formatted_text.strip(), expected_telegram)
+
+    def test_fixture_wall_paragraphing_matches_expected(self):
+        fixture_dir = Path(__file__).resolve().parent / "fixtures" / "presentation"
+        source = (fixture_dir / "ugly_wall_input.txt").read_text(encoding="utf-8")
+        expected = (fixture_dir / "ugly_wall_expected_web.txt").read_text(encoding="utf-8").strip()
+        result = format_message(
+            source,
+            channel="web",
+            style={"emoji": "off", "emphasis": "plain", "brevity": "short"},
+        )
+        self.assertEqual(result.formatted_text.strip(), expected)
+
     def test_telegram_markdownv2_escaping(self):
         source = "Plan:\n1) fix parser\nPath: foo_bar(baz).md #1"
         result = format_message(
