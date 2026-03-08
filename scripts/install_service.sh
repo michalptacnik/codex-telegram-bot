@@ -50,14 +50,35 @@ else
   mkdir -p "$HOME/.config/systemd/user"
 fi
 
-sed \
-  -e "s|{{WORKDIR}}|$WORKDIR|g" \
-  -e "s|{{CONFIG_DIR}}|$CONFIG_DIR|g" \
-  -e "s|{{ENTRYPOINT}}|$ENTRYPOINT|g" \
-  -e "s|{{WANTED_BY}}|$WANTED_BY|g" \
-  "$TEMPLATE" > "$SERVICE_PATH"
+install_template() {
+  local template_file="$1"
+  local service_name="$2"
+  local service_path
 
-echo "Wrote service file: $SERVICE_PATH"
+  if [[ "$MODE" == "system" ]]; then
+    service_path="/etc/systemd/system/${service_name}.service"
+  else
+    service_path="$HOME/.config/systemd/user/${service_name}.service"
+  fi
+
+  sed \
+    -e "s|{{WORKDIR}}|$WORKDIR|g" \
+    -e "s|{{CONFIG_DIR}}|$CONFIG_DIR|g" \
+    -e "s|{{ENTRYPOINT}}|$ENTRYPOINT|g" \
+    -e "s|{{WANTED_BY}}|$WANTED_BY|g" \
+    "$template_file" > "$service_path"
+
+  echo "Wrote service file: $service_path"
+}
+
+# Install main bot service
+install_template "$TEMPLATE" "codex-telegram-bot"
+
+# Install daemon (background agent) service if template exists
+DAEMON_TEMPLATE="$TEMPLATE_DIR/codex-telegram-bot-daemon.service.template"
+if [[ -f "$DAEMON_TEMPLATE" ]]; then
+  install_template "$DAEMON_TEMPLATE" "codex-telegram-bot-daemon"
+fi
 
 if [[ "$SKIP_RELOAD" == "true" ]]; then
   echo "Skipped systemd daemon-reload (--skip-reload)."
@@ -66,6 +87,7 @@ else
   if [[ "$MODE" == "system" ]]; then
     systemctl daemon-reload
     echo "Run: systemctl enable --now codex-telegram-bot"
+    echo "Run: systemctl enable --now codex-telegram-bot-daemon  # optional standalone daemon"
   else
     if ! systemctl --user daemon-reload; then
       echo "Warning: could not reload user systemd manager in this session." >&2
@@ -73,5 +95,6 @@ else
       exit 0
     fi
     echo "Run: systemctl --user enable --now codex-telegram-bot"
+    echo "Run: systemctl --user enable --now codex-telegram-bot-daemon  # optional standalone daemon"
   fi
 fi

@@ -2004,4 +2004,6 @@ def build_application(
 
         job_queue.run_repeating(_cron_tick_callback, interval=60, first=10, name="cron_tick")
 
+    # Store agent_service reference for CronHeartbeatAgent wiring
+    app.bot_data["_proactive_sender"] = _telegram_proactive_sender
     return app

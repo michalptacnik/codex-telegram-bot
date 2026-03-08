@@ -21,6 +21,7 @@ This is the active parity matrix for the OpenClaw-style runtime goals.
 | Markdown memory | Daily markdown memory + retrieval tools | Done | `tools/memory.py`, `services/session_memory_files.py` |
 | Gateway/control plane | Admin UI + sessions/runs APIs + health/audit | Done | `control_center/app.py` |
 | Docker sandbox execution | Run tool commands in Docker sandbox | Partial | Opt-in runner via `EXECUTION_BACKEND=docker` |
+| Always-alive agent daemon | Cron-driven heartbeat + system watchers + proactive delivery | Done | `services/cron_agent.py` + `--daemon` CLI + systemd |
 | Signed trust model for skill packs | Signature verification pipeline | Planned | Not yet implemented |
 
 ## Gateway and Docker Clarification
