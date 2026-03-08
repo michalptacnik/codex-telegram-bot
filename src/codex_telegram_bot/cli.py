@@ -91,6 +91,50 @@ def _print_config(config_dir: Path) -> None:
         print(f"Allowlist count: {len(allowlist)}")
 
 
+def _build_cron_agent(config_dir: Path, agent_service=None):
+    """Build a CronHeartbeatAgent with environment-driven configuration."""
+    from codex_telegram_bot.services.cron_agent import CronHeartbeatAgent, CronAgentConfig
+
+    workspace_root = Path(
+        (os.environ.get("EXECUTION_WORKSPACE_ROOT") or "").strip() or str(Path.cwd())
+    ).expanduser().resolve()
+
+    health_file_raw = (os.environ.get("CRON_AGENT_HEALTH_FILE") or "").strip()
+    health_file = Path(health_file_raw).expanduser().resolve() if health_file_raw else None
+
+    cfg = CronAgentConfig(
+        workspace_root=workspace_root,
+        health_file=health_file,
+    )
+
+    delivery_fn = None
+    if agent_service is not None:
+        # Build a delivery function that fans out to all active sessions
+        async def _deliver_to_all_sessions(payload: dict) -> dict:
+            """Deliver proactive messages to all registered transports via ProactiveMessenger."""
+            messenger = getattr(agent_service, "_proactive_messenger", None)
+            if messenger is None:
+                return {"attempted": [], "delivered": [], "failed": {}}
+            # Get active sessions to determine chat_ids
+            sessions = agent_service.list_recent_sessions(limit=20)
+            results = []
+            seen_chats = set()
+            for session in sessions:
+                chat_id = getattr(session, "chat_id", 0)
+                if not chat_id or chat_id in seen_chats:
+                    continue
+                seen_chats.add(chat_id)
+                enriched = dict(payload)
+                enriched["chat_id"] = chat_id
+                result = await messenger.deliver(enriched)
+                results.append(result)
+            return {"sessions_notified": len(seen_chats), "results": results}
+
+        delivery_fn = _deliver_to_all_sessions
+
+    return CronHeartbeatAgent(config=cfg, delivery_fn=delivery_fn)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Codex Telegram CLI bot")
     parser.add_argument(
@@ -106,6 +150,11 @@ def main() -> None:
         "--control-center",
         action="store_true",
         help="Run local Control Center web UI instead of Telegram polling mode",
+    )
+    parser.add_argument(
+        "--daemon",
+        action="store_true",
+        help="Run only the background agent daemon (heartbeat, cron, watchers) without Telegram",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Control Center bind host")
     parser.add_argument("--port", type=int, default=8765, help="Control Center bind port")
@@ -153,6 +202,20 @@ def main() -> None:
     state_db_path = config.config_dir / "state.db"
     agent_service = build_agent_service(state_db_path=state_db_path, config_dir=config.config_dir)
 
+    # --daemon: standalone background agent (no Telegram)
+    if args.daemon:
+        cron_agent = _build_cron_agent(config_dir, agent_service=agent_service)
+        print(
+            "  ┌──────────────────────────────────────────────────────────┐\n"
+            "  │  Daemon mode: background agent running                    │\n"
+            "  │  Heartbeat, cron jobs, and system watchers active.        │\n"
+            "  │  Press Ctrl+C to stop.                                    │\n"
+            "  └──────────────────────────────────────────────────────────┘",
+            file=sys.stderr,
+        )
+        asyncio.run(cron_agent.run())
+        return
+
     if args.control_center:
         from codex_telegram_bot.control_center.app import create_app_with_config
         import uvicorn
@@ -167,11 +230,47 @@ def main() -> None:
         callbacks,
         agent_service=agent_service,
     )
-    _run_polling_with_retry(app)
+
+    # Start the CronHeartbeatAgent alongside Telegram polling
+    cron_agent = _build_cron_agent(config_dir, agent_service=agent_service)
+    _run_polling_with_cron_agent(app, cron_agent)
     try:
         asyncio.run(agent_service.shutdown())
     except Exception:
         logging.getLogger(__name__).exception("agent_service.shutdown failed")
+
+
+def _run_polling_with_cron_agent(app, cron_agent) -> None:
+    """Run Telegram polling with the CronHeartbeatAgent as a co-task."""
+    original_post_init = getattr(app, "_post_init_callback", None)
+
+    async def _post_init_with_cron(application) -> None:
+        await cron_agent.start()
+        application.bot_data["cron_agent"] = cron_agent
+
+    async def _post_shutdown_with_cron(application) -> None:
+        agent = application.bot_data.pop("cron_agent", None)
+        if agent is not None:
+            await agent.stop()
+
+    # Register cron agent lifecycle with the Telegram application
+    old_post_init = app.post_init
+    old_post_shutdown = app.post_shutdown
+
+    async def _combined_post_init(application) -> None:
+        if old_post_init:
+            await old_post_init(application)
+        await _post_init_with_cron(application)
+
+    async def _combined_post_shutdown(application) -> None:
+        await _post_shutdown_with_cron(application)
+        if old_post_shutdown:
+            await old_post_shutdown(application)
+
+    app.post_init = _combined_post_init
+    app.post_shutdown = _combined_post_shutdown
+
+    _run_polling_with_retry(app)
 
 
 def _run_polling_with_retry(app) -> None:
