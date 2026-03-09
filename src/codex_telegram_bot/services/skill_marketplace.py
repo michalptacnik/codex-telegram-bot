@@ -13,6 +13,11 @@ from typing import Any, Dict, List, Optional
 from urllib import parse, request
 
 from codex_telegram_bot.services.skill_pack import parse_skill_md
+from codex_telegram_bot.services.skill_signature import (
+    load_trusted_keys,
+    verify_skill_signature,
+    VerificationResult,
+)
 
 
 CATALOG_REFRESH_TTL_HOURS = 6
@@ -94,6 +99,7 @@ class SkillMarketplace:
         )
         self._sources = load_skill_sources()
         self._trusted_publisher_keys = self._read_trusted_publisher_keys()
+        self._trusted_keys = load_trusted_keys()
 
     def sources_list(self) -> List[Dict[str, Any]]:
         out = []
@@ -160,12 +166,16 @@ class SkillMarketplace:
         signed_at = str(frontmatter.get("signed_at") or "").strip()
         signature = str(frontmatter.get("signature") or "").strip()
         public_key_id = str(frontmatter.get("public_key_id") or "").strip()
-        verified = bool(
-            publisher
-            and signature
-            and public_key_id
-            and public_key_id in self._trusted_publisher_keys
+        # Cryptographic signature verification (Ed25519).
+        sig_result = verify_skill_signature(
+            skill_md_text=skill_md.decode("utf-8", errors="replace"),
+            signature_hex=signature,
+            public_key_id=public_key_id,
+            publisher=publisher,
+            trusted_keys=self._trusted_keys,
         )
+        verified = sig_result.verified
+        verification_reason = sig_result.reason
         skill_id = parsed.skill_id
         dest_root = (
             self._workspace_root / ".skills" / "marketplace"
@@ -200,6 +210,7 @@ class SkillMarketplace:
             "signature": signature,
             "public_key_id": public_key_id,
             "verified": verified,
+            "verification_reason": verification_reason,
         }
         (skill_root / ".marketplace.json").write_text(
             json.dumps(metadata, ensure_ascii=True, sort_keys=True, indent=2) + "\n",

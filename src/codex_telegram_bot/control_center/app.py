@@ -243,7 +243,7 @@ def create_app_with_config(
         provider_registry = agent_service.provider_registry()
     base_dir = Path(__file__).resolve().parent
     templates = Jinja2Templates(directory=str(base_dir / "templates"))
-    app = FastAPI(title="Codex Control Center", version="0.2.0")
+    app = FastAPI(title="Codex Control Center", version="0.3.0")
     app.mount("/static", StaticFiles(directory=str(base_dir / "static")), name="static")
     onboarding = OnboardingStore(config_dir=config_dir)
     plugin_manager = PluginLifecycleManager(config_dir=config_dir or (Path.cwd() / ".codex-telegram-bot"))
