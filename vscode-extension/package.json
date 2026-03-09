@@ -1,0 +1,91 @@
+{
+  "name": "codex-control-center",
+  "displayName": "Codex Control Center",
+  "description": "VS Code extension to interact with the Codex Telegram Bot gateway",
+  "version": "0.1.0",
+  "publisher": "codex",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Chat"],
+  "main": "./out/extension.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "configuration": {
+      "title": "Codex Control Center",
+      "properties": {
+        "codex-control-center.gatewayUrl": {
+          "type": "string",
+          "default": "http://localhost:46464",
+          "description": "Base URL of the Codex Control Center gateway"
+        },
+        "codex-control-center.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "LOCAL_API_KEYS token for REST API calls"
+        },
+        "codex-control-center.uiSecret": {
+          "type": "string",
+          "default": "",
+          "description": "CONTROL_CENTER_UI_SECRET for WebSocket authentication"
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "codex-cc.askAgent",
+        "title": "Codex: Ask Agent"
+      },
+      {
+        "command": "codex-cc.sendSelection",
+        "title": "Codex: Send Selection to Agent"
+      },
+      {
+        "command": "codex-cc.reconnect",
+        "title": "Codex: Reconnect to Gateway"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codex-cc-sidebar",
+          "title": "Codex",
+          "icon": "$(hubot)"
+        }
+      ]
+    },
+    "views": {
+      "codex-cc-sidebar": [
+        {
+          "type": "webview",
+          "id": "codex-cc.chatView",
+          "name": "Chat"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codex-cc.sendSelection",
+          "when": "editorHasSelection",
+          "group": "codex"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
