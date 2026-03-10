@@ -17,6 +17,13 @@ class TestStructuralParityHeuristics(unittest.TestCase):
         )
         self.assertIn("web_search", picks)
 
+    def test_probe_defaults_include_browser_tools_for_browser_intent(self):
+        picks = _default_probe_tools_for_prompt(
+            "Open a new tab in chrome and navigate to example.com",
+            available_tool_names=["shell_exec", "browser_status", "browser_open", "browser_navigate"],
+        )
+        self.assertIn("browser_open", picks)
+
     def test_prompt_echo_detection(self):
         prompt = "Search the internet for the 10 best CRM companies and provide sources."
         output = "Search the internet for the 10 best CRM companies and provide sources."

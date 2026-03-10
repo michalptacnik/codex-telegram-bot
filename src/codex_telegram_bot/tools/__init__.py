@@ -1,6 +1,12 @@
 import os
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRegistry, ToolRequest, ToolResult
+from codex_telegram_bot.tools.browser import (
+    BrowserNavigateTool,
+    BrowserOpenTool,
+    BrowserScriptTool,
+    BrowserStatusTool,
+)
 from codex_telegram_bot.tools.email import (
     SendEmailSmtpTool,
     SendEmailTool,
@@ -59,6 +65,7 @@ def build_default_tool_registry(
     provider_registry=None,
     run_store=None,
     mcp_bridge=None,
+    browser_bridge=None,
     process_manager=None,
     access_controller=None,
     proactive_messenger=None,
@@ -124,6 +131,11 @@ def build_default_tool_registry(
                 messenger=proactive_messenger,
             )
         )
+    if browser_bridge is not None:
+        registry.register(BrowserStatusTool(browser_bridge))
+        registry.register(BrowserOpenTool(browser_bridge))
+        registry.register(BrowserNavigateTool(browser_bridge))
+        registry.register(BrowserScriptTool(browser_bridge))
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
@@ -164,6 +176,10 @@ __all__ = [
     "is_email_tool_enabled",
     "ReadFileTool",
     "WriteFileTool",
+    "BrowserStatusTool",
+    "BrowserOpenTool",
+    "BrowserNavigateTool",
+    "BrowserScriptTool",
     "GitStatusTool",
     "GitDiffTool",
     "GitLogTool",

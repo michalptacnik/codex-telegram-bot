@@ -37,6 +37,7 @@ from codex_telegram_bot.services.skill_marketplace import SkillMarketplace
 from codex_telegram_bot.services.skill_pack import SkillPackLoader
 from codex_telegram_bot.services.tool_policy import ToolPolicyEngine
 from codex_telegram_bot.services.toolchain import agent_toolchain_status
+from codex_telegram_bot.services.browser_bridge import BrowserBridge
 from codex_telegram_bot.tools import build_default_tool_registry
 
 
@@ -119,12 +120,18 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
     )
 
     proactive_messenger = ProactiveMessenger()
+    browser_bridge = BrowserBridge(
+        heartbeat_ttl_sec=_read_int_env("BROWSER_EXTENSION_HEARTBEAT_TTL_SEC", 90),
+        command_retention_sec=_read_int_env("BROWSER_EXTENSION_COMMAND_RETENTION_SEC", 900),
+        dispatch_lease_sec=_read_int_env("BROWSER_EXTENSION_DISPATCH_LEASE_SEC", 30),
+    )
 
     # Build tool registry with optional run_store/process manager (db-backed path).
     tool_registry = build_default_tool_registry(
         provider_registry=provider_registry,
         run_store=run_store,
         mcp_bridge=mcp_bridge,
+        browser_bridge=browser_bridge,
         process_manager=process_manager,
         access_controller=access_controller,
         proactive_messenger=proactive_messenger,
@@ -154,6 +161,7 @@ def build_agent_service(state_db_path: Optional[Path] = None, config_dir: Option
         capability_router=capability_router,
         skill_manager=skill_manager,
         mcp_bridge=mcp_bridge,
+        browser_bridge=browser_bridge,
         skill_pack_loader=skill_pack_loader,
         tool_policy_engine=tool_policy_engine,
         process_manager=process_manager,

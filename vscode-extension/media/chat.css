@@ -41,6 +41,57 @@ body {
   background: #ff9800;
 }
 
+/* Context panel */
+#context-panel {
+  padding: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border, #333);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.context-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 6px;
+  align-items: center;
+}
+
+.context-row label {
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+.context-row select,
+.context-row input {
+  min-width: 0;
+  width: 100%;
+  background: var(--vscode-input-background, #3c3c3c);
+  color: var(--vscode-input-foreground, #ccc);
+  border: 1px solid var(--vscode-input-border, #555);
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 11px;
+}
+
+.context-row button {
+  background: var(--vscode-button-secondaryBackground, #3a3d41);
+  color: var(--vscode-button-secondaryForeground, #fff);
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 4px;
+  padding: 3px 8px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.context-row button:hover {
+  background: var(--vscode-button-secondaryHoverBackground, #45494e);
+}
+
+#identity-row {
+  grid-template-columns: auto 1fr auto 1fr auto;
+}
+
 /* Chat log */
 #chat-log {
   flex: 1;

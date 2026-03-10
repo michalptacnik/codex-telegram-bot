@@ -8,6 +8,7 @@ from codex_telegram_bot.events.event_bus import EventBus
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
 from codex_telegram_bot.providers.codex_cli import CodexCliProvider
 from codex_telegram_bot.providers.registry import ProviderRegistry
+from codex_telegram_bot.services.browser_bridge import BrowserBridge
 from codex_telegram_bot.services.agent_service import AgentService
 
 try:
@@ -462,6 +463,133 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
                 os.environ.pop("WHATSAPP_WEBHOOK_TOKEN", None)
             else:
                 os.environ["WHATSAPP_WEBHOOK_TOKEN"] = old_token
+
+    async def test_browser_extension_endpoints_and_status(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db_path = Path(tmp.name) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            provider = CodexCliProvider(runner=_FakeRunner(CommandResult(0, "ok", "")))
+            browser_bridge = BrowserBridge(heartbeat_ttl_sec=60)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                browser_bridge=browser_bridge,
+            )
+            app = create_app(service)
+            client = TestClient(app)
+
+            status_before = client.get("/api/browser/status")
+            self.assertEqual(status_before.status_code, 200)
+            self.assertTrue(status_before.json().get("configured"))
+            self.assertFalse(status_before.json().get("connected"))
+
+            register = client.post(
+                "/api/browser/extension/register",
+                json={
+                    "instance_id": "chrome-client-1",
+                    "label": "AgentHQ Chrome Bridge",
+                    "version": "0.1.0",
+                },
+            )
+            self.assertEqual(register.status_code, 200)
+            self.assertEqual(register.json()["client"]["instance_id"], "chrome-client-1")
+
+            heartbeat = client.post(
+                "/api/browser/extension/heartbeat",
+                json={
+                    "instance_id": "chrome-client-1",
+                    "active_tab_url": "https://example.com/",
+                    "active_tab_title": "Example",
+                },
+            )
+            self.assertEqual(heartbeat.status_code, 200)
+
+            queued = client.post(
+                "/api/browser/command",
+                json={
+                    "command_type": "open_url",
+                    "payload": {"url": "https://example.com", "new_tab": True},
+                    "wait": False,
+                },
+            )
+            self.assertEqual(queued.status_code, 200)
+            self.assertTrue(queued.json()["ok"])
+            command_id = queued.json()["command"]["command_id"]
+
+            poll = client.get(
+                "/api/browser/extension/commands",
+                params={"instance_id": "chrome-client-1", "limit": 5},
+            )
+            self.assertEqual(poll.status_code, 200)
+            items = poll.json()["items"]
+            self.assertEqual(len(items), 1)
+            self.assertEqual(items[0]["command_id"], command_id)
+
+            done = client.post(
+                f"/api/browser/extension/commands/{command_id}/result",
+                json={
+                    "instance_id": "chrome-client-1",
+                    "ok": True,
+                    "output": "Opened tab",
+                    "data": {"tab_id": 11},
+                },
+            )
+            self.assertEqual(done.status_code, 200)
+            self.assertTrue(done.json()["ok"])
+
+            status_after = client.get("/api/browser/status")
+            self.assertEqual(status_after.status_code, 200)
+            self.assertTrue(status_after.json().get("connected"))
+            self.assertEqual(status_after.json().get("active_clients"), 1)
+        finally:
+            tmp.cleanup()
+
+    async def test_browser_command_wait_timeout_returns_pending_payload(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            db_path = Path(tmp.name) / "state.db"
+            store = SqliteRunStore(db_path=db_path)
+            bus = EventBus()
+            provider = CodexCliProvider(runner=_FakeRunner(CommandResult(0, "ok", "")))
+            browser_bridge = BrowserBridge(heartbeat_ttl_sec=60)
+            service = AgentService(
+                provider=provider,
+                run_store=store,
+                event_bus=bus,
+                browser_bridge=browser_bridge,
+            )
+            app = create_app(service)
+            client = TestClient(app)
+
+            register = client.post(
+                "/api/browser/extension/register",
+                json={
+                    "instance_id": "chrome-client-1",
+                    "label": "AgentHQ Chrome Bridge",
+                    "version": "0.1.0",
+                },
+            )
+            self.assertEqual(register.status_code, 200)
+
+            pending = client.post(
+                "/api/browser/command",
+                json={
+                    "command_type": "open_url",
+                    "payload": {"url": "https://example.com", "new_tab": True},
+                    "wait": True,
+                    "timeout_sec": 1,
+                },
+            )
+            self.assertEqual(pending.status_code, 200)
+            body = pending.json()
+            self.assertFalse(body.get("ok"))
+            self.assertTrue(body.get("pending"))
+            self.assertEqual(str((body.get("command") or {}).get("status") or ""), "queued")
+        finally:
+            tmp.cleanup()
 
     async def test_agents_page_uses_registry_provider_options(self):
         tmp = tempfile.TemporaryDirectory()

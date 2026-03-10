@@ -178,6 +178,19 @@ Run Control Center web UI (local dashboard):
 codex-telegram-bot --control-center --host 127.0.0.1 --port 8765
 ```
 
+Build a launchable macOS app bundle (starts bot + Control Center and opens `/chat`):
+
+```bash
+./scripts/build_macos_app.sh
+open ~/Applications/AgentHQ.app
+```
+
+Stop AgentHQ processes started for the local workspace config:
+
+```bash
+./scripts/stop_macos_app.sh
+```
+
 First-run onboarding wizard:
 
 - Open `http://127.0.0.1:8765/onboarding`
@@ -451,6 +464,8 @@ export EXECUTION_BACKEND=docker
 - `GET /settings`
 - `GET /health`
 - `GET /api/metrics`
+- `GET /api/browser/status`
+- `POST /api/browser/command`
 - `GET /api/onboarding/status`
 - `GET /api/onboarding/readiness` (first-run checks: workspace, codex CLI, telegram token)
 - `GET /api/runs?limit=20`
@@ -480,6 +495,15 @@ export EXECUTION_BACKEND=docker
 - `POST /api/handoffs`
 - `POST /agents` (create/update)
 - `POST /agents/{agent_id}/delete`
+
+Chrome extension bridge endpoints:
+
+- `POST /api/browser/extension/register`
+- `POST /api/browser/extension/heartbeat`
+- `GET /api/browser/extension/commands?instance_id=...`
+- `POST /api/browser/extension/commands/{command_id}/result`
+
+Chrome extension (unpacked) lives in [`chrome-extension/`](chrome-extension/README.md) and exposes active/inactive GUI state in popup while connected to Control Center.
 
 ## Parity Evaluation Harness
 

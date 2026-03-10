@@ -55,6 +55,9 @@
     <h3 class="mono">Attachments</h3>
     <div id="attachments-list" class="dim"></div>
     <hr />
+    <h3 class="mono">Chrome Bridge</h3>
+    <div id="browser-status" class="dim">loading...</div>
+    <hr />
     <h3 class="mono">Heartbeat</h3>
     <div id="heartbeat-status" class="dim"></div>
     <hr />
@@ -103,6 +106,7 @@
   const costUsd = document.getElementById("cost-usd");
   const costUpdated = document.getElementById("cost-updated");
   const attachmentsList = document.getElementById("attachments-list");
+  const browserStatus = document.getElementById("browser-status");
   const heartbeatStatus = document.getElementById("heartbeat-status");
   const soulMeta = document.getElementById("soul-meta");
   const soulText = document.getElementById("soul-text");
@@ -242,6 +246,37 @@
     chatLog.scrollTop = chatLog.scrollHeight;
   }
 
+  async function refreshBrowserStatus() {
+    if (!browserStatus) return;
+    try {
+      const resp = await fetch("/api/browser/status");
+      if (!resp.ok) {
+        browserStatus.textContent = "Unavailable";
+        return;
+      }
+      const data = await resp.json();
+      if (!data.configured) {
+        browserStatus.textContent = "Bridge disabled";
+        return;
+      }
+      if (!data.connected) {
+        browserStatus.textContent = "Inactive (no connected extension)";
+        return;
+      }
+      const clients = Array.isArray(data.clients) ? data.clients : [];
+      const rows = clients
+        .slice(0, 3)
+        .map((c) => {
+          const state = c.active ? "active" : "inactive";
+          const tab = c.active_tab_url ? ` | tab=${c.active_tab_url}` : "";
+          return `${c.label || "Chrome"} (${state})${tab}`;
+        });
+      browserStatus.textContent = rows.length ? rows.join(" | ") : "Active";
+    } catch (_err) {
+      browserStatus.textContent = "Error reading bridge status";
+    }
+  }
+
   async function refreshCostSummary(sessionId) {
     if (!sessionId) return;
     const resp = await fetch(`/api/sessions/${sessionId}/detail`);
@@ -344,6 +379,7 @@
       soulHistory.appendChild(ul);
     }
     await refreshCostSummary(sessionId);
+    await refreshBrowserStatus();
   }
 
   const socket = new WebSocket(wsUrl());
@@ -353,6 +389,7 @@
       socket.send(JSON.stringify({ type: "subscribe", session_id: activeSessionId }));
       loadSessionHistory(activeSessionId);
     }
+    refreshBrowserStatus();
   };
   socket.onclose = () => {
     wsState.textContent = "disconnected";
@@ -394,6 +431,7 @@
     if (payload.type === "done") {
       currentAssistant = null;
       await refreshCostSummary(payload.session_id || activeSessionId);
+      await refreshBrowserStatus();
       return;
     }
     if (payload.type === "error") {
@@ -460,6 +498,10 @@
     soulStyleDiff.textContent = body.diff || "";
     window.alert(`Style update approval requested: ${String(body.approval_id || "").slice(0, 8)}`);
   });
+
+  setInterval(() => {
+    refreshBrowserStatus();
+  }, 5000);
 })();
 </script>
 {% endblock %}

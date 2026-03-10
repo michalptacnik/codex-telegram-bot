@@ -127,4 +127,30 @@ export interface RunsResponse {
   limit: number;
 }
 
+export interface AgentInfo {
+  agent_id: string;
+  name: string;
+  provider: string;
+  policy_profile: string;
+  max_concurrency: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SessionInfo {
+  session_id: string;
+  chat_id: number;
+  user_id: number;
+  status: string;
+  current_agent_id: string;
+  summary?: string;
+  last_run_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export type AgentsResponse = AgentInfo[];
+export type SessionsResponse = SessionInfo[];
+
 export type ConnectionState = "connected" | "connecting" | "disconnected";

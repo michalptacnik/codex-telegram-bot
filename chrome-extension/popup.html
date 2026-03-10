@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>AgentHQ Chrome Bridge</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="topline">
+        <h1>AgentHQ Bridge</h1>
+        <span id="status-pill" class="status-pill inactive">inactive</span>
+      </div>
+
+      <div class="row switch">
+        <input id="enabled" type="checkbox" />
+        <label for="enabled" style="margin: 0">Bridge enabled</label>
+      </div>
+
+      <div class="row">
+        <label for="base-url">Control Center URL</label>
+        <input id="base-url" type="text" placeholder="http://127.0.0.1:8765" />
+      </div>
+
+      <div class="row">
+        <label for="token">Bridge token (optional)</label>
+        <input id="token" type="password" placeholder="BROWSER_EXTENSION_TOKEN" />
+      </div>
+
+      <div class="row">
+        <label for="instance-id">Instance ID</label>
+        <input id="instance-id" type="text" readonly />
+      </div>
+
+      <div id="meta" class="meta">status: inactive</div>
+      <div id="error" class="error"></div>
+
+      <div class="controls">
+        <button id="save" class="primary" type="button">Save</button>
+        <button id="ping" class="secondary" type="button">Ping now</button>
+      </div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
