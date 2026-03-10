@@ -127,6 +127,8 @@ _COMMAND_HANDLERS = [
     ("cost", "handle_cost"),
     ("help", "handle_help"),
     ("profile", "handle_profile"),
+    ("profiles", "handle_profiles"),
+    ("backend", "handle_backend"),
     ("workspace", "handle_workspace"),
     ("skills", "handle_skills"),
     ("email", "handle_email"),

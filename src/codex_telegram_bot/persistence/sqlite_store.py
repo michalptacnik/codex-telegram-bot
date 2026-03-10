@@ -37,7 +37,7 @@ from codex_telegram_bot.events.event_bus import RunEvent
 from codex_telegram_bot.util import redact_with_audit
 
 logger = logging.getLogger(__name__)
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 class SqliteRunStore:
@@ -694,6 +694,15 @@ class SqliteRunStore:
                     """,
                     ("safe", _utc_now()),
                 )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS chat_profiles (
+                    chat_id INTEGER PRIMARY KEY,
+                    profile_name TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             self._set_schema_version(conn, SCHEMA_VERSION)
 
     def _set_schema_version(self, conn: sqlite3.Connection, version: int) -> None:
@@ -3145,6 +3154,35 @@ class SqliteRunStore:
                 (mission_id,),
             ).fetchone()
         return _row_to_summary(row) if row else None
+
+    # ------------------------------------------------------------------
+    # Chat profiles (per-chat backend profile selection)
+    # ------------------------------------------------------------------
+
+    def get_chat_profile(self, chat_id: int) -> Optional[str]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT profile_name FROM chat_profiles WHERE chat_id = ?",
+                (chat_id,),
+            ).fetchone()
+        return str(row["profile_name"]) if row else None
+
+    def set_chat_profile(self, chat_id: int, profile_name: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_profiles (chat_id, profile_name, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    profile_name = excluded.profile_name,
+                    updated_at = excluded.updated_at
+                """,
+                (chat_id, profile_name, _utc_now()),
+            )
+
+    def clear_chat_profile(self, chat_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM chat_profiles WHERE chat_id = ?", (chat_id,))
 
 
 def _row_to_memory_entry(row: sqlite3.Row) -> MemoryEntry:
