@@ -1,11 +1,12 @@
 {
   "manifest_version": 3,
   "name": "AgentHQ Chrome Bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Bridge between AgentHQ and this Chrome session with visible active/inactive status.",
   "permissions": [
     "tabs",
     "scripting",
+    "debugger",
     "storage",
     "alarms"
   ],

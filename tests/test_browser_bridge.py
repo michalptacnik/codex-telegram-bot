@@ -6,7 +6,12 @@ from pathlib import Path
 
 from codex_telegram_bot.services.browser_bridge import BrowserBridge
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
-from codex_telegram_bot.tools.browser import BrowserOpenTool, BrowserScriptTool, BrowserStatusTool
+from codex_telegram_bot.tools.browser import (
+    BrowserExtractTool,
+    BrowserOpenTool,
+    BrowserScriptTool,
+    BrowserStatusTool,
+)
 
 
 class TestBrowserBridge(unittest.TestCase):
@@ -199,3 +204,40 @@ class TestBrowserTools(unittest.TestCase):
         payload = json.loads(res.output)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["command"]["command_type"], "run_script")
+
+    def test_browser_extract_queues_script_command(self):
+        bridge = BrowserBridge(heartbeat_ttl_sec=60)
+        bridge.register_client(instance_id="client-1", label="Chrome")
+        tool = BrowserExtractTool(bridge=bridge)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            res = tool.run(
+                ToolRequest(
+                    name="browser_extract",
+                    args={
+                        "wait": False,
+                        "client_id": "client-1",
+                        "max_chars": 4000,
+                        "include_links": True,
+                    },
+                ),
+                ToolContext(workspace_root=Path(tmp)),
+            )
+        self.assertTrue(res.ok, msg=res.output)
+        payload = json.loads(res.output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"]["command_type"], "run_script")
+
+    def test_browser_script_reports_outdated_extension_message(self):
+        class _UnsupportedBridge:
+            def enqueue_command(self, **kwargs):
+                return {"ok": False, "error": "Unsupported command type: run_script"}
+
+        tool = BrowserScriptTool(bridge=_UnsupportedBridge())
+        with tempfile.TemporaryDirectory() as tmp:
+            res = tool.run(
+                ToolRequest(name="browser_script", args={"script": "return 1;", "wait": True}),
+                ToolContext(workspace_root=Path(tmp)),
+            )
+        self.assertFalse(res.ok)
+        self.assertIn("outdated", res.output.lower())

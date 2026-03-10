@@ -377,6 +377,26 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["script"],
         },
     },
+    "browser_extract": {
+        "name": "browser_extract",
+        "description": "Extract readable page content from the active browser tab.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "max_chars": {"type": "integer", "description": "Maximum extracted text characters (default 12000)"},
+                "include_links": {"type": "boolean", "description": "Include unique outbound links (default true)"},
+                "max_links": {"type": "integer", "description": "Maximum number of links to include (default 20)"},
+                "include_html": {"type": "boolean", "description": "Include bounded HTML snapshot (default false)"},
+                "html_max_chars": {"type": "integer", "description": "Maximum HTML chars when include_html=true"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "tab_id": {"type": "integer", "description": "Optional target tab id (defaults to active tab)"},
+                "all_frames": {"type": "boolean", "description": "Run extraction in all frames (default false)"},
+                "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": [],
+        },
+    },
     "send_message": {
         "name": "send_message",
         "description": "Send a proactive message to a target session owner.",

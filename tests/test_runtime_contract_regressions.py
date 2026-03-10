@@ -8,7 +8,13 @@ from pathlib import Path
 
 from codex_telegram_bot.agent_core.agent import Agent
 from codex_telegram_bot.persistence.sqlite_store import SqliteRunStore
-from codex_telegram_bot.runtime_contract import RuntimeError, ToolCall, decode_provider_response, merge_stream_chunks
+from codex_telegram_bot.runtime_contract import (
+    RuntimeError,
+    ToolCall,
+    decode_provider_response,
+    decode_text_response,
+    merge_stream_chunks,
+)
 from codex_telegram_bot.services.agent_scheduler import AgentScheduler
 from codex_telegram_bot.services.agent_service import AgentService
 from codex_telegram_bot.services.message_updater import MessageUpdater
@@ -93,6 +99,19 @@ class TestRuntimeContractRegressions(unittest.IsolatedAsyncioTestCase):
         decoded = decode_provider_response({"stream_chunks": chunks}, allowed_tools={"read_file"})
         self.assertFalse(any(isinstance(e, RuntimeError) for e in decoded))
         self.assertTrue(any(isinstance(e, ToolCall) for e in decoded))
+
+    def test_multiline_tool_directive_in_text_decodes(self):
+        raw = (
+            "!tool {\n"
+            '  "name": "browser_extract",\n'
+            '  "args": {"max_chars": 5000, "include_links": true}\n'
+            "}\n"
+        )
+        decoded = decode_text_response(raw, allowed_tools={"browser_extract"})
+        self.assertEqual(len(decoded), 1)
+        self.assertIsInstance(decoded[0], ToolCall)
+        self.assertEqual(decoded[0].name, "browser_extract")
+        self.assertEqual(decoded[0].args.get("max_chars"), 5000)
 
     def test_workspace_invariant_disables_git_tools_outside_repo(self):
         with tempfile.TemporaryDirectory() as tmp:

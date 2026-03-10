@@ -159,6 +159,13 @@ class TestParseToolDirective:
         assert result is not None
         assert result["name"] == "shell_exec"
 
+    def test_multiline_directive(self):
+        result = _parse_tool_directive(
+            '!tool {\n  "name": "read_file",\n  "args": {"path": "/tmp/x"}\n}'
+        )
+        assert result is not None
+        assert result["name"] == "read_file"
+
 
 # ---------------------------------------------------------------------------
 # _format_tool_results

@@ -367,11 +367,16 @@ class ProbeLoop:
 
 def _parse_tool_directive(text: str) -> Optional[Dict[str, Any]]:
     """Parse ``!tool {"name": "...", "args": {...}}`` from model output."""
-    if not text.startswith("!tool "):
+    raw = str(text or "").strip()
+    if not raw.lower().startswith("!tool"):
         return None
-    body = text[len("!tool "):].strip()
+    body = raw[len("!tool"):].strip()
+    start = body.find("{")
+    if start < 0:
+        return None
     try:
-        obj = json.loads(body)
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(body[start:])
         if isinstance(obj, dict):
             name = str(obj.get("name") or obj.get("tool") or "").strip()
             args = obj.get("args")

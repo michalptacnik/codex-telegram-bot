@@ -14,6 +14,12 @@ _ALLOWED_SCHEMES = {"http", "https"}
 _BROWSER_WAIT_DEFAULT_SEC = 180
 _BROWSER_WAIT_MAX_SEC = 600
 _BROWSER_SCRIPT_MAX_CHARS = 20000
+_BROWSER_EXTRACT_DEFAULT_CHARS = 12000
+_BROWSER_EXTRACT_MAX_CHARS = 50000
+_BROWSER_EXTRACT_DEFAULT_LINKS = 20
+_BROWSER_EXTRACT_MAX_LINKS = 200
+_BROWSER_EXTRACT_DEFAULT_HTML_CHARS = 20000
+_BROWSER_EXTRACT_MAX_HTML_CHARS = 200000
 
 
 class BrowserStatusTool:
@@ -174,6 +180,120 @@ class BrowserScriptTool:
         )
 
 
+class BrowserExtractTool:
+    name = "browser_extract"
+    description = "Extract readable page content from active tab in connected Chrome session."
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        max_chars = _to_int(
+            request.args.get("max_chars"),
+            default=_BROWSER_EXTRACT_DEFAULT_CHARS,
+            min_value=200,
+            max_value=_BROWSER_EXTRACT_MAX_CHARS,
+        )
+        include_links = _to_bool(request.args.get("include_links"), default=True)
+        max_links = _to_int(
+            request.args.get("max_links"),
+            default=_BROWSER_EXTRACT_DEFAULT_LINKS,
+            min_value=0,
+            max_value=_BROWSER_EXTRACT_MAX_LINKS,
+        )
+        include_html = _to_bool(request.args.get("include_html"), default=False)
+        html_max_chars = _to_int(
+            request.args.get("html_max_chars"),
+            default=_BROWSER_EXTRACT_DEFAULT_HTML_CHARS,
+            min_value=1000,
+            max_value=_BROWSER_EXTRACT_MAX_HTML_CHARS,
+        )
+        all_frames = _to_bool(request.args.get("all_frames"), default=False)
+
+        script = _build_extract_script(
+            max_chars=max_chars,
+            include_links=include_links,
+            max_links=max_links,
+            include_html=include_html,
+            html_max_chars=html_max_chars,
+        )
+        if len(script) > _BROWSER_SCRIPT_MAX_CHARS:
+            return ToolResult(
+                ok=False,
+                output=f"generated extract script exceeds max length ({_BROWSER_SCRIPT_MAX_CHARS} chars).",
+            )
+
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        tab_id = _to_int(request.args.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647)
+
+        payload: Dict[str, Any] = {
+            "script": script,
+            "all_frames": bool(all_frames),
+        }
+        if tab_id > 0:
+            payload["tab_id"] = int(tab_id)
+
+        result = _run_browser_command(
+            bridge=self._bridge,
+            command_type="run_script",
+            payload=payload,
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+        if not result.ok:
+            return result
+
+        try:
+            parsed = json.loads(result.output)
+        except Exception:
+            return result
+        if not isinstance(parsed, dict) or bool(parsed.get("pending")):
+            return result
+        command = parsed.get("command")
+        if not isinstance(command, dict):
+            return result
+        data = command.get("data")
+        if not isinstance(data, dict):
+            return result
+        extracted = data.get("result")
+        if not isinstance(extracted, dict):
+            return result
+
+        normalized: Dict[str, Any] = {
+            "ok": True,
+            "url": str(extracted.get("url") or ""),
+            "title": str(extracted.get("title") or ""),
+            "description": str(extracted.get("description") or ""),
+            "text": str(extracted.get("text") or ""),
+            "text_length": _to_int(
+                extracted.get("text_length"),
+                default=len(str(extracted.get("text") or "")),
+                min_value=0,
+                max_value=10_000_000,
+            ),
+            "tab_id": _to_int(data.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647),
+        }
+        if include_links:
+            normalized["links"] = _normalize_string_list(extracted.get("links"), limit=max_links)
+        if include_html:
+            normalized["html"] = str(extracted.get("html") or "")
+        command_id = str(command.get("command_id") or "").strip()
+        if command_id:
+            normalized["command_id"] = command_id
+        source = str(parsed.get("source") or "").strip()
+        if source:
+            normalized["source"] = source
+        return ToolResult(ok=True, output=json.dumps(normalized, ensure_ascii=True))
+
+
 def _run_browser_command(
     *,
     bridge: Any,
@@ -214,7 +334,10 @@ def _run_browser_command(
             return ToolResult(ok=True, output=json.dumps(_promote_pending_to_success(result), ensure_ascii=True))
 
     if not result.get("ok"):
-        return ToolResult(ok=False, output=str(result.get("error") or "Failed to queue browser command."))
+        return ToolResult(
+            ok=False,
+            output=_normalize_browser_error(str(result.get("error") or "Failed to queue browser command.")),
+        )
 
     return ToolResult(ok=True, output=json.dumps(result, ensure_ascii=True))
 
@@ -284,6 +407,93 @@ def _to_int(value: Any, default: int, min_value: int, max_value: int) -> int:
     return max(min_value, min(parsed, max_value))
 
 
+def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    for item in value:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if text in out:
+            continue
+        out.append(text)
+        if len(out) >= max(0, int(limit)):
+            break
+    return out
+
+
+def _build_extract_script(
+    *,
+    max_chars: int,
+    include_links: bool,
+    max_links: int,
+    include_html: bool,
+    html_max_chars: int,
+) -> str:
+    opts = json.dumps(
+        {
+            "max_chars": int(max_chars),
+            "include_links": bool(include_links),
+            "max_links": int(max_links),
+            "include_html": bool(include_html),
+            "html_max_chars": int(html_max_chars),
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    return (
+        f"const opts = {opts};\n"
+        "const normalize = (value) => String(value || \"\")\n"
+        "  .replace(/\\r/g, \"\\n\")\n"
+        "  .replace(/[ \\t]+\\n/g, \"\\n\")\n"
+        "  .replace(/\\n{3,}/g, \"\\n\\n\")\n"
+        "  .replace(/[ \\t]{2,}/g, \" \")\n"
+        "  .trim();\n"
+        "const meta = (name, attr) => {\n"
+        "  const key = String(attr || \"name\").toLowerCase() === \"property\" ? \"property\" : \"name\";\n"
+        "  const node = document.querySelector(`meta[${key}=\"${name}\"]`);\n"
+        "  return node && node.content ? String(node.content).trim() : \"\";\n"
+        "};\n"
+        "const root = document.querySelector(\"article,main,[role='main'],#content,.content,.post,.article\") || document.body;\n"
+        "const clone = root ? root.cloneNode(true) : document.body.cloneNode(true);\n"
+        "for (const selector of [\"script\",\"style\",\"noscript\",\"template\",\"svg\",\"canvas\",\"iframe\",\"form\",\"button\"]) {\n"
+        "  clone.querySelectorAll(selector).forEach((node) => node.remove());\n"
+        "}\n"
+        "const rawText = normalize(clone.innerText || clone.textContent || \"\");\n"
+        "const text = rawText.slice(0, Math.max(200, Number(opts.max_chars || 0)));\n"
+        "let links = [];\n"
+        "if (opts.include_links) {\n"
+        "  const seen = new Set();\n"
+        "  for (const node of clone.querySelectorAll(\"a[href]\")) {\n"
+        "    if (links.length >= Math.max(0, Number(opts.max_links || 0))) break;\n"
+        "    const hrefRaw = node.getAttribute(\"href\");\n"
+        "    if (!hrefRaw) continue;\n"
+        "    try {\n"
+        "      const href = new URL(hrefRaw, location.href).href;\n"
+        "      if (!/^https?:/i.test(href) || seen.has(href)) continue;\n"
+        "      seen.add(href);\n"
+        "      links.push(href);\n"
+        "    } catch (_err) {}\n"
+        "  }\n"
+        "}\n"
+        "let html = \"\";\n"
+        "if (opts.include_html) {\n"
+        "  html = String(document.documentElement ? document.documentElement.outerHTML : \"\")\n"
+        "    .slice(0, Math.max(1000, Number(opts.html_max_chars || 0)));\n"
+        "}\n"
+        "return {\n"
+        "  url: String(location.href || \"\"),\n"
+        "  title: String(document.title || \"\"),\n"
+        "  description: meta(\"description\") || meta(\"og:description\", \"property\"),\n"
+        "  text,\n"
+        "  text_length: rawText.length,\n"
+        "  links,\n"
+        "  html,\n"
+        "};"
+    )
+
+
 def _normalize_url(*, raw_url: str, query: str) -> str:
     candidate = str(raw_url or "").strip()
     if not candidate and query:
@@ -335,6 +545,18 @@ def _should_try_remote(result: Dict[str, Any]) -> bool:
         or "no active chrome extension client" in err
         or "timed out waiting for extension command result" in err
     )
+
+
+def _normalize_browser_error(message: str) -> str:
+    text = str(message or "").strip()
+    low = text.lower()
+    if "unsupported command type: run_script" in low:
+        return (
+            "Connected Chrome extension is outdated and cannot execute scripts "
+            "(missing command type 'run_script'). Reload/reinstall the extension "
+            "from ./chrome-extension and retry."
+        )
+    return text or "Failed to queue browser command."
 
 
 def _remote_fallback_enabled() -> bool:

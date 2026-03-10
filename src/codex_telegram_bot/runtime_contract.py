@@ -33,6 +33,7 @@ class RuntimeError:
 RuntimeEvent = Union[AssistantText, ToolCall, ToolResult, RuntimeError]
 
 _PROTOCOL_RE = re.compile(r"(?is)(^|\n)\s*!(exec|tool|loop)\b")
+_TOOL_DIRECTIVE_RE = re.compile(r"(?is)(^|\n)\s*!tool\b")
 
 
 def has_protocol_bytes(raw: str) -> bool:
@@ -138,22 +139,50 @@ def to_telegram_text(events: Sequence[RuntimeEvent], *, safe_fallback: str) -> s
 
 
 def _parse_tool_directive(raw: str, *, allowed_tools: Set[str]) -> ToolCall | None:
-    line = raw.splitlines()[0].strip()
-    if not line.lower().startswith("!tool "):
+    text = str(raw or "")
+    match = _TOOL_DIRECTIVE_RE.search(text)
+    if match is None:
         return None
-    body = line[len("!tool ") :].strip()
-    try:
-        payload = json.loads(body)
-    except Exception:
-        return None
-    if not isinstance(payload, dict):
+    payload = _decode_json_object_after_tool(text[match.end() :])
+    if payload is None:
         return None
     name = str(payload.get("name") or payload.get("tool") or "").strip().lower()
     if not name or name not in allowed_tools:
         return None
-    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    args: Dict[str, Any] = {}
+    if isinstance(payload.get("args"), dict):
+        args = dict(payload.get("args") or {})
+    elif isinstance(payload.get("input"), dict):
+        args = dict(payload.get("input") or {})
+    elif isinstance(payload.get("arguments"), dict):
+        args = dict(payload.get("arguments") or {})
+    elif isinstance(payload.get("arguments"), str):
+        try:
+            parsed_arguments = json.loads(str(payload.get("arguments") or ""))
+            if isinstance(parsed_arguments, dict):
+                args = dict(parsed_arguments)
+        except Exception:
+            args = {}
     call_id = str(payload.get("call_id") or payload.get("id") or f"toolcall-{name}")
     return ToolCall(name=name, args=dict(args), call_id=call_id)
+
+
+def _decode_json_object_after_tool(text: str) -> Dict[str, Any] | None:
+    payload = str(text or "").strip()
+    if not payload:
+        return None
+    start = payload.find("{")
+    if start < 0:
+        return None
+    candidate = payload[start:]
+    try:
+        decoder = json.JSONDecoder()
+        obj, _ = decoder.raw_decode(candidate)
+    except Exception:
+        return None
+    if isinstance(obj, dict):
+        return obj
+    return None
 
 
 def merge_stream_chunks(chunks: Sequence[Dict[str, Any]], *, allowed_tools: Iterable[str]) -> List[RuntimeEvent]:

@@ -410,6 +410,123 @@ function toSerializable(value) {
   }
 }
 
+function asResultText(value) {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch (_err) {
+    return String(value);
+  }
+}
+
+function shouldUseDebuggerFallback(errorText) {
+  const text = String(errorText || "").toLowerCase();
+  return (
+    text.includes("content security policy")
+    || text.includes("unsafe-eval")
+    || text.includes("evaluating a string as javascript violates")
+  );
+}
+
+function _debuggerAttach(tabId) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.attach({ tabId }, "1.3", () => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(String(err.message || err)));
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+function _debuggerDetach(tabId) {
+  return new Promise((resolve) => {
+    chrome.debugger.detach({ tabId }, () => {
+      resolve();
+    });
+  });
+}
+
+function _debuggerSendCommand(tabId, method, params) {
+  return new Promise((resolve, reject) => {
+    chrome.debugger.sendCommand({ tabId }, method, params || {}, (result) => {
+      const err = chrome.runtime.lastError;
+      if (err) {
+        reject(new Error(String(err.message || err)));
+        return;
+      }
+      resolve(result || {});
+    });
+  });
+}
+
+async function executeScriptViaDebugger(tabId, script) {
+  let attached = false;
+  try {
+    await _debuggerAttach(tabId);
+    attached = true;
+    await _debuggerSendCommand(tabId, "Runtime.enable", {});
+    const wrappedExpression = `(async () => {\n${String(script || "")}\n})()`;
+    const evalResult = await _debuggerSendCommand(
+      tabId,
+      "Runtime.evaluate",
+      {
+        expression: wrappedExpression,
+        awaitPromise: true,
+        returnByValue: true
+      }
+    );
+    const exception = evalResult && evalResult.exceptionDetails ? evalResult.exceptionDetails : null;
+    if (exception) {
+      const exceptionObj = exception.exception || {};
+      const detail = String(exceptionObj.description || exceptionObj.value || exception.text || "script exception");
+      return {
+        ok: false,
+        output: `Script failed on tab ${tabId}: ${detail}`,
+        data: { tab_id: tabId, error: detail, engine: "debugger" }
+      };
+    }
+    const resultObj = evalResult && evalResult.result ? evalResult.result : {};
+    let value = null;
+    if (Object.prototype.hasOwnProperty.call(resultObj, "value")) {
+      value = resultObj.value;
+    } else if (Object.prototype.hasOwnProperty.call(resultObj, "description")) {
+      value = resultObj.description;
+    } else {
+      value = null;
+    }
+    return {
+      ok: true,
+      output: `Script executed on tab ${tabId}`,
+      data: {
+        tab_id: tabId,
+        result: toSerializable(value),
+        result_text: clipText(asResultText(value), SCRIPT_RESULT_MAX_CHARS),
+        engine: "debugger"
+      }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return {
+      ok: false,
+      output: `Script failed on tab ${tabId}: ${msg}`,
+      data: { tab_id: tabId, error: msg, engine: "debugger" }
+    };
+  } finally {
+    if (attached) {
+      try {
+        await _debuggerDetach(tabId);
+      } catch (_err) {
+        // Ignore detach failures.
+      }
+    }
+  }
+}
+
 async function resolveTargetTabId(payload) {
   const explicit = Number(payload.tab_id || payload.tabId || 0);
   if (Number.isInteger(explicit) && explicit > 0) {
@@ -433,54 +550,75 @@ async function executeScript(payload) {
   }
   const allFrames = payload && payload.all_frames === true;
 
-  const injections = await chrome.scripting.executeScript({
-    target: { tabId, allFrames },
-    func: async (source) => {
-      const asText = (value) => {
-        if (value === undefined) return "undefined";
-        if (value === null) return "null";
-        if (typeof value === "string") return value;
+  try {
+    const injections = await chrome.scripting.executeScript({
+      target: { tabId, allFrames },
+      func: async (source) => {
+        const asText = (value) => {
+          if (value === undefined) return "undefined";
+          if (value === null) return "null";
+          if (typeof value === "string") return value;
+          try {
+            return JSON.stringify(value);
+          } catch (_err) {
+            return String(value);
+          }
+        };
         try {
-          return JSON.stringify(value);
-        } catch (_err) {
-          return String(value);
+          const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+          const fn = new AsyncFunction(source);
+          const value = await fn();
+          return { ok: true, value: value, value_text: asText(value) };
+        } catch (err) {
+          const msg = err && err.message ? String(err.message) : String(err);
+          return { ok: false, error: msg };
+        }
+      },
+      args: [script]
+    });
+
+    const first = Array.isArray(injections) && injections.length ? injections[0] : null;
+    const result = first && first.result ? first.result : { ok: false, error: "No execution result" };
+    if (result.ok) {
+      return {
+        ok: true,
+        output: `Script executed on tab ${tabId}`,
+        data: {
+          tab_id: tabId,
+          result: toSerializable(result.value),
+          result_text: clipText(String(result.value_text || ""), SCRIPT_RESULT_MAX_CHARS),
+          engine: "scripting"
         }
       };
-      try {
-        const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
-        const fn = new AsyncFunction(source);
-        const value = await fn();
-        return { ok: true, value: value, value_text: asText(value) };
-      } catch (err) {
-        const msg = err && err.message ? String(err.message) : String(err);
-        return { ok: false, error: msg };
-      }
-    },
-    args: [script]
-  });
-
-  const first = Array.isArray(injections) && injections.length ? injections[0] : null;
-  const result = first && first.result ? first.result : { ok: false, error: "No execution result" };
-  if (!result.ok) {
-    return {
-      ok: false,
-      output: `Script failed on tab ${tabId}: ${result.error || "unknown"}`,
-      data: {
-        tab_id: tabId,
-        error: String(result.error || "unknown")
-      }
-    };
+    }
+    const primaryError = String(result.error || "unknown");
+    if (!shouldUseDebuggerFallback(primaryError)) {
+      return {
+        ok: false,
+        output: `Script failed on tab ${tabId}: ${primaryError}`,
+        data: {
+          tab_id: tabId,
+          error: primaryError,
+          engine: "scripting"
+        }
+      };
+    }
+  } catch (err) {
+    const primaryError = String(err && err.message ? err.message : err);
+    if (!shouldUseDebuggerFallback(primaryError)) {
+      return {
+        ok: false,
+        output: `Script failed on tab ${tabId}: ${primaryError}`,
+        data: {
+          tab_id: tabId,
+          error: primaryError,
+          engine: "scripting"
+        }
+      };
+    }
   }
 
-  return {
-    ok: true,
-    output: `Script executed on tab ${tabId}`,
-    data: {
-      tab_id: tabId,
-      result: toSerializable(result.value),
-      result_text: clipText(String(result.value_text || ""), SCRIPT_RESULT_MAX_CHARS)
-    }
-  };
+  return await executeScriptViaDebugger(tabId, script);
 }
 
 async function executeCommand(command) {

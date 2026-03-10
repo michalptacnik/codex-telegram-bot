@@ -9,7 +9,7 @@ Group aliases:
   sessions    — sessions_list, sessions_history, sessions_send, sessions_spawn, session_status
   memory      — memory_get, memory_search, memory_index_get, memory_pointer_open, memory_page_list, memory_append_daily, memory_index_update, task_create, task_list, task_done
   web         — web_search, web_fetch, mcp_search, mcp_call
-  browser     — browser_status, browser_open, browser_navigate, browser_script
+  browser     — browser_status, browser_open, browser_navigate, browser_script, browser_extract
   git         — git_status, git_diff, git_log, git_add, git_commit
   skills      — skills_market_sources_list, skills_market_search, skills_market_install, skills_market_enable, skills_market_disable, skills_market_remove
 
@@ -57,7 +57,7 @@ TOOL_GROUPS: Dict[str, List[str]] = {
         "soul_apply_patch",
     ],
     "web": ["web_search", "web_fetch", "mcp_search", "mcp_call"],
-    "browser": ["browser_status", "browser_open", "browser_navigate", "browser_script"],
+    "browser": ["browser_status", "browser_open", "browser_navigate", "browser_script", "browser_extract"],
     "git": ["git_status", "git_diff", "git_log", "git_add", "git_commit"],
     "skills": [
         "skills_market_sources_list",

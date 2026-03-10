@@ -1434,6 +1434,49 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Created and verified", out)
             await service.shutdown()
 
+    async def test_need_tools_multiline_tool_directive_executes(self):
+        class _Provider:
+            def __init__(self):
+                self.calls = 0
+
+            async def generate(self, messages, stream=False, correlation_id="", policy_profile="balanced"):
+                self.calls += 1
+                if self.calls == 1:
+                    return 'NEED_TOOLS {"tools":["write_file"],"goal":"Create file","max_steps":2}'
+                if self.calls == 2:
+                    return (
+                        "!tool {\n"
+                        '  "name": "write_file",\n'
+                        '  "args": {"path": "multi.txt", "content": "hello\\n"}\n'
+                        "}"
+                    )
+                return "Done. Created multi.txt."
+
+            async def version(self):
+                return "v1"
+
+            async def health(self):
+                return {"status": "ok"}
+
+            def capabilities(self):
+                return {"provider": "fake"}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspaces = Path(tmp) / "ws"
+            service = AgentService(provider=_Provider(), session_workspaces_root=workspaces)
+            out = await service.run_prompt_with_tool_loop(
+                prompt="Create file multi.txt with hello",
+                chat_id=2,
+                user_id=2,
+                session_id="sess-multiline-tool",
+                agent_id="default",
+            )
+            file_path = service.session_workspace("sess-multiline-tool") / "multi.txt"
+            self.assertTrue(file_path.exists())
+            self.assertEqual(file_path.read_text(encoding="utf-8"), "hello\n")
+            self.assertIn("Created multi.txt", out)
+            await service.shutdown()
+
     async def test_model_emitted_step_with_pipe_executes_via_shell_wrapper(self):
         class _Provider:
             def __init__(self):

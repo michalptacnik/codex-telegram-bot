@@ -365,6 +365,22 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "timeout_sec": "int (optional, default=180)",
         },
     },
+    "browser_extract": {
+        "name": "browser_extract",
+        "protocol": "!tool",
+        "args": {
+            "max_chars": "int (optional, default=12000)",
+            "include_links": "bool (optional, default=true)",
+            "max_links": "int (optional, default=20)",
+            "include_html": "bool (optional, default=false)",
+            "html_max_chars": "int (optional, default=20000)",
+            "client_id": "string (optional)",
+            "tab_id": "int (optional, defaults to active tab)",
+            "all_frames": "bool (optional, default=false)",
+            "wait": "bool (optional, default=true)",
+            "timeout_sec": "int (optional, default=180)",
+        },
+    },
     "send_message": {
         "name": "send_message",
         "protocol": "!tool",
@@ -4650,7 +4666,7 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
 
     browser_markers = ("browser", "chrome", "tab", "website", "site", "open ")
     if any(marker in low for marker in browser_markers):
-        for name in ("browser_status", "browser_open", "browser_navigate", "browser_script"):
+        for name in ("browser_status", "browser_open", "browser_navigate", "browser_script", "browser_extract"):
             _add_tool(name)
 
     for name in ("git_status", "git_diff"):
@@ -5015,10 +5031,7 @@ def _parse_tool_directive(
     payload = (body or "").strip()
     if not payload:
         return None
-    try:
-        obj = json.loads(payload)
-    except Exception:
-        obj = None
+    obj = _decode_tool_payload_json(payload)
     if isinstance(obj, dict):
         tool_name = str(obj.get("name") or obj.get("tool") or "").strip().lower()
         args = obj.get("args")
@@ -5059,6 +5072,8 @@ def _parse_tool_directive(
     tool_name = str(tokens[0] or "").strip().lower()
     if not tool_name:
         return None
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]*", tool_name):
+        return None
 
     args: Dict[str, Any] = {}
     positional: List[str] = []
@@ -5096,6 +5111,26 @@ def _parse_tool_directive(
             args["paths"] = positional
 
     return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=args)
+
+
+def _decode_tool_payload_json(payload: str) -> Optional[Dict[str, Any]]:
+    raw = str(payload or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        start = raw.find("{")
+        if start < 0:
+            return None
+        try:
+            decoder = json.JSONDecoder()
+            parsed, _ = decoder.raw_decode(raw[start:])
+        except Exception:
+            return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
 
 
 def _extract_inline_protocol_suffix(line: str) -> str:
@@ -5210,16 +5245,36 @@ def _extract_loop_actions(prompt: str, preferred_tools: Optional[Sequence[str]] 
         tool_match = re.match(r"(?is)^!?tool\s+(.+)$", line)
         if tool_match:
             body = tool_match.group(1).strip()
+            consumed = index + 1
             parsed = _parse_tool_directive(
                 body,
                 preferred_tool_name=preferred_tool_name,
                 preferred_tools=normalized_preferred,
             )
+            if (not parsed) and body.startswith("{"):
+                multiline = body
+                extra_lines = 0
+                while consumed < len(raw_lines) and extra_lines < 12:
+                    multiline = multiline + "\n" + raw_lines[consumed]
+                    consumed += 1
+                    extra_lines += 1
+                    parsed = _parse_tool_directive(
+                        multiline,
+                        preferred_tool_name=preferred_tool_name,
+                        preferred_tools=normalized_preferred,
+                    )
+                    if parsed:
+                        break
+                    if multiline.count("{") <= multiline.count("}") and raw_lines[consumed - 1].strip().endswith("}"):
+                        break
             if parsed:
                 actions.append(parsed)
             else:
-                keep_lines.append(raw)
-            index += 1
+                if consumed > index + 1:
+                    keep_lines.extend(raw_lines[index:consumed])
+                else:
+                    keep_lines.append(raw)
+            index = consumed
             continue
         unknown_bang = re.match(r"(?is)^!([A-Za-z_][A-Za-z0-9_-]*)\s*(.*)$", line)
         if unknown_bang:
