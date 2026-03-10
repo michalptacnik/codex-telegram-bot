@@ -1143,3 +1143,13 @@ class TestToolRegistryIntegration:
         from codex_telegram_bot.tools import build_default_tool_registry
         registry = build_default_tool_registry()
         assert registry.get("mcp_search") is None
+
+    def test_browser_tools_registered_with_bridge(self):
+        from codex_telegram_bot.services.browser_bridge import BrowserBridge
+        from codex_telegram_bot.tools import build_default_tool_registry
+
+        bridge = BrowserBridge()
+        registry = build_default_tool_registry(browser_bridge=bridge)
+        assert registry.get("browser_status") is not None
+        assert registry.get("browser_open") is not None
+        assert registry.get("browser_navigate") is not None

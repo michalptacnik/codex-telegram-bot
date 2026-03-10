@@ -1,0 +1,438 @@
+from __future__ import annotations
+
+import json
+import os
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any, Dict
+
+from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
+
+
+_ALLOWED_SCHEMES = {"http", "https"}
+_BROWSER_WAIT_DEFAULT_SEC = 180
+_BROWSER_WAIT_MAX_SEC = 600
+_BROWSER_SCRIPT_MAX_CHARS = 20000
+
+
+class BrowserStatusTool:
+    name = "browser_status"
+    description = "Show status of connected Chrome extension browser clients."
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        local_payload: Dict[str, Any] = {}
+        if self._bridge is not None:
+            local_payload = dict(self._bridge.status())
+            if bool(local_payload.get("connected")):
+                local_payload["source"] = "local"
+                return ToolResult(ok=True, output=json.dumps(local_payload, ensure_ascii=True))
+
+        remote = _remote_bridge_status()
+        if remote.get("ok"):
+            payload = dict(remote.get("payload") or {})
+            payload["source"] = "remote"
+            return ToolResult(ok=True, output=json.dumps(payload, ensure_ascii=True))
+
+        if local_payload:
+            local_payload["source"] = "local"
+            return ToolResult(ok=True, output=json.dumps(local_payload, ensure_ascii=True))
+        return ToolResult(ok=False, output=str(remote.get("error") or "Browser bridge is not configured."))
+
+
+class BrowserOpenTool:
+    name = "browser_open"
+    description = "Open a URL in the connected Chrome session."
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        raw_url = str(request.args.get("url", "") or "").strip()
+        query = str(request.args.get("query", "") or "").strip()
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        new_tab = _to_bool(request.args.get("new_tab"), default=True)
+        active = _to_bool(request.args.get("active"), default=True)
+
+        url = _normalize_url(raw_url=raw_url, query=query)
+        if not url:
+            return ToolResult(ok=False, output="url or query is required.")
+
+        if not _is_allowed_url(url):
+            return ToolResult(ok=False, output="Only public http(s) URLs are allowed.")
+
+        return _run_browser_command(
+            bridge=self._bridge,
+            command_type="open_url",
+            payload={
+                "url": url,
+                "new_tab": bool(new_tab),
+                "active": bool(active),
+            },
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+
+
+class BrowserNavigateTool:
+    name = "browser_navigate"
+    description = "Navigate current tab in connected Chrome session."
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        raw_url = str(request.args.get("url", "") or "").strip()
+        query = str(request.args.get("query", "") or "").strip()
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        active = _to_bool(request.args.get("active"), default=True)
+
+        url = _normalize_url(raw_url=raw_url, query=query)
+        if not url:
+            return ToolResult(ok=False, output="url or query is required.")
+        if not _is_allowed_url(url):
+            return ToolResult(ok=False, output="Only public http(s) URLs are allowed.")
+
+        return _run_browser_command(
+            bridge=self._bridge,
+            command_type="navigate_url",
+            payload={
+                "url": url,
+                "active": bool(active),
+            },
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+
+
+class BrowserScriptTool:
+    name = "browser_script"
+    description = "Execute JavaScript in the active tab of connected Chrome session."
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        script = str(
+            request.args.get("script")
+            or request.args.get("js")
+            or request.args.get("code")
+            or ""
+        ).strip()
+        if not script:
+            return ToolResult(ok=False, output="script is required.")
+        if len(script) > _BROWSER_SCRIPT_MAX_CHARS:
+            return ToolResult(
+                ok=False,
+                output=f"script exceeds max length ({_BROWSER_SCRIPT_MAX_CHARS} chars).",
+            )
+
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        tab_id = _to_int(request.args.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647)
+        all_frames = _to_bool(request.args.get("all_frames"), default=False)
+
+        payload: Dict[str, Any] = {
+            "script": script,
+            "all_frames": bool(all_frames),
+        }
+        if tab_id > 0:
+            payload["tab_id"] = int(tab_id)
+
+        return _run_browser_command(
+            bridge=self._bridge,
+            command_type="run_script",
+            payload=payload,
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+
+
+def _run_browser_command(
+    *,
+    bridge: Any,
+    command_type: str,
+    payload: Dict[str, Any],
+    client_id: str,
+    wait: bool,
+    timeout_sec: int,
+) -> ToolResult:
+    result: Dict[str, Any] = {"ok": False, "error": "Browser bridge is not configured."}
+    if bridge is not None:
+        result = dict(
+            bridge.enqueue_command(
+                command_type=command_type,
+                payload=dict(payload or {}),
+                client_id=client_id,
+                wait=wait,
+                timeout_sec=timeout_sec,
+            )
+        )
+    result = _unwrap_remote_payload(result)
+
+    if _is_pending_result(result):
+        return ToolResult(ok=True, output=json.dumps(_promote_pending_to_success(result), ensure_ascii=True))
+
+    if (not result.get("ok")) and _should_try_remote(result):
+        remote_wait = bool(wait) and _remote_wait_enabled()
+        result = _unwrap_remote_payload(
+            _remote_enqueue_command(
+                command_type=command_type,
+                payload=dict(payload or {}),
+                client_id=client_id,
+                wait=remote_wait,
+                timeout_sec=timeout_sec,
+            )
+        )
+        if _is_pending_result(result):
+            return ToolResult(ok=True, output=json.dumps(_promote_pending_to_success(result), ensure_ascii=True))
+
+    if not result.get("ok"):
+        return ToolResult(ok=False, output=str(result.get("error") or "Failed to queue browser command."))
+
+    return ToolResult(ok=True, output=json.dumps(result, ensure_ascii=True))
+
+
+def _unwrap_remote_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"ok": False, "error": "Invalid bridge response."}
+    payload = result.get("payload")
+    if bool(result.get("ok")) and isinstance(payload, dict):
+        merged = dict(payload)
+        merged.setdefault("ok", True)
+        merged.setdefault("source", "remote")
+        return merged
+    return dict(result)
+
+
+def _is_pending_result(result: Dict[str, Any]) -> bool:
+    if not isinstance(result, dict):
+        return False
+    if bool(result.get("ok")):
+        return False
+    if bool(result.get("pending")) and isinstance(result.get("command"), dict):
+        return True
+    command = result.get("command")
+    if not isinstance(command, dict):
+        return False
+    status = str(command.get("status") or "").strip().lower()
+    return status in {"queued", "dispatched"}
+
+
+def _promote_pending_to_success(result: Dict[str, Any]) -> Dict[str, Any]:
+    command = result.get("command") if isinstance(result, dict) else None
+    status = ""
+    if isinstance(command, dict):
+        status = str(command.get("status") or "").strip().lower()
+    warning = str(result.get("error") or "").strip()
+    if not warning:
+        if status == "queued":
+            warning = "Command queued; waiting for extension poll."
+        else:
+            warning = "Command dispatched; waiting for extension result."
+    promoted = dict(result)
+    promoted["ok"] = True
+    promoted["pending"] = True
+    promoted["warning"] = warning
+    return promoted
+
+
+def _to_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _to_int(value: Any, default: int, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(min_value, min(parsed, max_value))
+
+
+def _normalize_url(*, raw_url: str, query: str) -> str:
+    candidate = str(raw_url or "").strip()
+    if not candidate and query:
+        encoded = urllib.parse.quote_plus(query)
+        candidate = f"https://duckduckgo.com/?q={encoded}"
+    if not candidate:
+        return ""
+    parsed = urllib.parse.urlparse(candidate)
+    if not parsed.scheme:
+        # Allow bare hostnames, defaulting to https.
+        candidate = f"https://{candidate}"
+    return candidate
+
+
+def _normalize_client_id(value: Any) -> str:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return ""
+    if candidate.lower() in {"0", "none", "null", "auto", "default", "any"}:
+        return ""
+    return candidate
+
+
+def _is_allowed_url(url: str) -> bool:
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme.lower() not in _ALLOWED_SCHEMES:
+        return False
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        return False
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return False
+    return True
+
+
+def _should_try_remote(result: Dict[str, Any]) -> bool:
+    if _is_pending_result(result):
+        return False
+    if not _remote_fallback_enabled():
+        return False
+    err = str(result.get("error") or "").lower()
+    if not err:
+        return False
+    return (
+        "not configured" in err
+        or "no active chrome extension client" in err
+        or "timed out waiting for extension command result" in err
+    )
+
+
+def _remote_fallback_enabled() -> bool:
+    raw = str(os.environ.get("BROWSER_BRIDGE_REMOTE_FALLBACK", "1") or "").strip().lower()
+    return raw not in {"0", "false", "off", "no"}
+
+
+def _remote_wait_enabled() -> bool:
+    raw = str(os.environ.get("BROWSER_BRIDGE_REMOTE_WAIT", "0") or "").strip().lower()
+    return raw in {"1", "true", "on", "yes"}
+
+
+def _remote_base_url() -> str:
+    raw = str(os.environ.get("BROWSER_BRIDGE_URL", "http://127.0.0.1:8765") or "").strip()
+    return raw.rstrip("/")
+
+
+def _remote_api_key() -> str:
+    return str(os.environ.get("BROWSER_BRIDGE_API_KEY", "") or "").strip()
+
+
+def _remote_bridge_status() -> Dict[str, Any]:
+    return _remote_json_call(path="/api/browser/status", method="GET", payload=None)
+
+
+def _remote_enqueue_command(
+    *,
+    command_type: str,
+    payload: Dict[str, Any],
+    client_id: str,
+    wait: bool,
+    timeout_sec: int,
+) -> Dict[str, Any]:
+    body = {
+        "command_type": str(command_type or "").strip(),
+        "payload": dict(payload or {}),
+        "client_id": str(client_id or "").strip(),
+        "wait": bool(wait),
+        "timeout_sec": int(timeout_sec),
+    }
+    req_timeout = 10
+    if bool(wait):
+        req_timeout = max(10, min(int(timeout_sec) + 30, 900))
+    return _remote_json_call(
+        path="/api/browser/command",
+        method="POST",
+        payload=body,
+        request_timeout_sec=req_timeout,
+    )
+
+
+def _remote_json_call(
+    path: str,
+    method: str,
+    payload: Dict[str, Any] | None,
+    *,
+    request_timeout_sec: int = 8,
+) -> Dict[str, Any]:
+    base = _remote_base_url()
+    if not base:
+        return {"ok": False, "error": "Remote browser bridge URL is not configured."}
+    url = f"{base}{path}"
+    headers = {"content-type": "application/json"}
+    api_key = _remote_api_key()
+    if api_key:
+        headers["x-local-api-key"] = api_key
+    data = None
+    if payload is not None:
+        data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    req = urllib.request.Request(url=url, method=method, data=data, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=max(3, int(request_timeout_sec))) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw) if raw.strip() else {}
+            except Exception:
+                body = {"raw": raw}
+            return {"ok": True, "payload": body}
+    except urllib.error.HTTPError as exc:
+        detail = str(exc)
+        try:
+            raw = exc.read().decode("utf-8", errors="replace")
+        except Exception:
+            raw = ""
+        if raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    msg = str(parsed.get("detail") or parsed.get("error") or "").strip()
+                    if msg:
+                        detail = msg
+                    else:
+                        detail = raw.strip()
+                else:
+                    detail = raw.strip()
+            except Exception:
+                detail = raw.strip()
+        return {"ok": False, "error": f"Remote browser bridge call failed: {detail}"}
+    except Exception as exc:
+        text = str(exc)
+        return {"ok": False, "error": f"Remote browser bridge call failed: {text}"}

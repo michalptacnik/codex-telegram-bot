@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "AgentHQ Chrome Bridge",
+  "version": "0.1.0",
+  "description": "Bridge between AgentHQ and this Chrome session with visible active/inactive status.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "AgentHQ Bridge",
+    "default_popup": "popup.html"
+  }
+}

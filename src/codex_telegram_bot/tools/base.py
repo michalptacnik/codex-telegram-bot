@@ -319,6 +319,64 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["url"],
         },
     },
+    "browser_status": {
+        "name": "browser_status",
+        "description": "Return status of connected Chrome extension clients.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    "browser_open": {
+        "name": "browser_open",
+        "description": "Open a public URL in the connected Chrome browser session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Public HTTP(S) URL to open"},
+                "query": {"type": "string", "description": "Optional search query (used when url omitted)"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "new_tab": {"type": "boolean", "description": "Open in a new tab (default true)"},
+                "active": {"type": "boolean", "description": "Focus opened tab/window (default true)"},
+                "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": [],
+        },
+    },
+    "browser_navigate": {
+        "name": "browser_navigate",
+        "description": "Navigate the currently active tab in the connected Chrome session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "Public HTTP(S) URL to navigate to"},
+                "query": {"type": "string", "description": "Optional search query (used when url omitted)"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "active": {"type": "boolean", "description": "Focus tab after navigation (default true)"},
+                "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": [],
+        },
+    },
+    "browser_script": {
+        "name": "browser_script",
+        "description": "Execute JavaScript in active tab of connected Chrome session.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "script": {"type": "string", "description": "JavaScript source to execute"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "tab_id": {"type": "integer", "description": "Optional target tab id (defaults to active tab)"},
+                "all_frames": {"type": "boolean", "description": "Run in all frames (default false)"},
+                "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": ["script"],
+        },
+    },
     "send_message": {
         "name": "send_message",
         "description": "Send a proactive message to a target session owner.",

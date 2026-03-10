@@ -3,12 +3,23 @@ import * as http from "http";
 import * as https from "https";
 import WebSocket from "ws";
 import type {
+  AgentInfo,
+  SessionInfo,
   ConnectionState,
   InboundMessage,
   PromptResponse,
   JobStatusResponse,
   RunsResponse,
 } from "./types";
+
+export interface GatewayClientConfig {
+  baseUrl: string;
+  apiKey: string;
+  uiSecret: string;
+  defaultChatId: number;
+  defaultUserId: number;
+  defaultAgentId: string;
+}
 
 export class GatewayClient extends EventEmitter {
   private baseUrl: string;
@@ -21,12 +32,18 @@ export class GatewayClient extends EventEmitter {
   private _state: ConnectionState = "disconnected";
   private shouldReconnect = true;
   private activeSessionId = "";
+  private defaultChatId = 1;
+  private defaultUserId = 1;
+  private defaultAgentId = "default";
 
-  constructor(baseUrl: string, apiKey: string, uiSecret: string) {
+  constructor(config: GatewayClientConfig) {
     super();
-    this.baseUrl = baseUrl.replace(/\/+$/, "");
-    this.apiKey = apiKey;
-    this.uiSecret = uiSecret;
+    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.apiKey = config.apiKey;
+    this.uiSecret = config.uiSecret;
+    this.defaultChatId = sanitizePositiveInt(config.defaultChatId, 1);
+    this.defaultUserId = sanitizePositiveInt(config.defaultUserId, 1);
+    this.defaultAgentId = String(config.defaultAgentId || "default").trim() || "default";
   }
 
   get state(): ConnectionState {
@@ -35,6 +52,39 @@ export class GatewayClient extends EventEmitter {
 
   get sessionId(): string {
     return this.activeSessionId;
+  }
+
+  get chatId(): number {
+    return this.defaultChatId;
+  }
+
+  get userId(): number {
+    return this.defaultUserId;
+  }
+
+  get agentId(): string {
+    return this.defaultAgentId;
+  }
+
+  reconfigure(config: GatewayClientConfig): void {
+    this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.apiKey = config.apiKey;
+    this.uiSecret = config.uiSecret;
+    this.defaultChatId = sanitizePositiveInt(config.defaultChatId, this.defaultChatId);
+    this.defaultUserId = sanitizePositiveInt(config.defaultUserId, this.defaultUserId);
+    this.defaultAgentId = String(config.defaultAgentId || this.defaultAgentId).trim() || "default";
+  }
+
+  setIdentity(chatId: number, userId: number): void {
+    this.defaultChatId = sanitizePositiveInt(chatId, this.defaultChatId);
+    this.defaultUserId = sanitizePositiveInt(userId, this.defaultUserId);
+  }
+
+  setDefaultAgent(agentId: string): void {
+    const normalized = String(agentId || "").trim();
+    if (normalized) {
+      this.defaultAgentId = normalized;
+    }
   }
 
   // --- REST helpers ---
@@ -101,6 +151,23 @@ export class GatewayClient extends EventEmitter {
 
   async cancelJob(jobId: string): Promise<unknown> {
     return this.request("POST", `/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`);
+  }
+
+  async listAgents(): Promise<AgentInfo[]> {
+    const raw = await this.request("GET", "/api/agents");
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw as AgentInfo[];
+  }
+
+  async listSessions(limit = 100): Promise<SessionInfo[]> {
+    const clamped = Math.max(1, Math.min(Number(limit) || 100, 200));
+    const raw = await this.request("GET", `/api/sessions?limit=${clamped}`);
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+    return raw as SessionInfo[];
   }
 
   // --- WebSocket ---
@@ -173,13 +240,20 @@ export class GatewayClient extends EventEmitter {
     if (opts?.session_id || this.activeSessionId) {
       payload.session_id = opts?.session_id || this.activeSessionId;
     }
-    if (opts?.chat_id) { payload.chat_id = opts.chat_id; }
-    if (opts?.user_id) { payload.user_id = opts.user_id; }
-    if (opts?.agent_id) { payload.agent_id = opts.agent_id; }
+    const chatId = sanitizePositiveInt(opts?.chat_id, this.defaultChatId);
+    const userId = sanitizePositiveInt(opts?.user_id, this.defaultUserId);
+    const agentId = String(opts?.agent_id || this.defaultAgentId || "default").trim() || "default";
+    if (chatId > 0) {
+      payload.chat_id = chatId;
+    }
+    if (userId > 0) {
+      payload.user_id = userId;
+    }
+    payload.agent_id = agentId;
     // Default chat_id/user_id for new sessions
-    if (!payload.session_id && !payload.chat_id) {
-      payload.chat_id = 1;
-      payload.user_id = 1;
+    if (!payload.session_id && (!payload.chat_id || !payload.user_id)) {
+      payload.chat_id = this.defaultChatId;
+      payload.user_id = this.defaultUserId;
     }
     this.send(payload);
   }
@@ -246,4 +320,12 @@ export class GatewayClient extends EventEmitter {
       this.reconnectTimer = null;
     }
   }
+}
+
+function sanitizePositiveInt(value: number | undefined, fallback: number): number {
+  const candidate = Number(value);
+  if (Number.isFinite(candidate) && candidate > 0) {
+    return Math.floor(candidate);
+  }
+  return fallback > 0 ? fallback : 1;
 }

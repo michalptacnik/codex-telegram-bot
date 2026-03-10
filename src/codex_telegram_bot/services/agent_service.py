@@ -323,6 +323,48 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "user_agent": "string (optional)",
         },
     },
+    "browser_status": {
+        "name": "browser_status",
+        "protocol": "!tool",
+        "args": {},
+    },
+    "browser_open": {
+        "name": "browser_open",
+        "protocol": "!tool",
+        "args": {
+            "url": "string (optional, required if query missing)",
+            "query": "string (optional, used when url missing)",
+            "client_id": "string (optional)",
+            "new_tab": "bool (optional, default=true)",
+            "active": "bool (optional, default=true)",
+            "wait": "bool (optional, default=true)",
+            "timeout_sec": "int (optional, default=180)",
+        },
+    },
+    "browser_navigate": {
+        "name": "browser_navigate",
+        "protocol": "!tool",
+        "args": {
+            "url": "string (optional, required if query missing)",
+            "query": "string (optional, used when url missing)",
+            "client_id": "string (optional)",
+            "active": "bool (optional, default=true)",
+            "wait": "bool (optional, default=true)",
+            "timeout_sec": "int (optional, default=180)",
+        },
+    },
+    "browser_script": {
+        "name": "browser_script",
+        "protocol": "!tool",
+        "args": {
+            "script": "string (required)",
+            "client_id": "string (optional)",
+            "tab_id": "int (optional, defaults to active tab)",
+            "all_frames": "bool (optional, default=false)",
+            "wait": "bool (optional, default=true)",
+            "timeout_sec": "int (optional, default=180)",
+        },
+    },
     "send_message": {
         "name": "send_message",
         "protocol": "!tool",
@@ -496,6 +538,7 @@ class AgentService:
         skill_manager: Optional[Any] = None,
         # OpenClaw parity services (Issue #100 epic)
         mcp_bridge: Optional[Any] = None,
+        browser_bridge: Optional[Any] = None,
         skill_pack_loader: Optional[Any] = None,
         tool_policy_engine: Optional[Any] = None,
         process_manager: Optional[ProcessManager] = None,
@@ -523,7 +566,10 @@ class AgentService:
         self._session_workspace_roots: Dict[str, str] = {}
         self._runtime_registry_snapshots: Dict[str, ToolRegistrySnapshot] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
-        self._tool_registry = tool_registry or build_default_tool_registry(provider_registry=provider_registry)
+        self._tool_registry = tool_registry or build_default_tool_registry(
+            provider_registry=provider_registry,
+            browser_bridge=browser_bridge,
+        )
         self._capability_registry = capability_registry
         self._probe_loop = probe_loop
         # Parity services (optional — degrade gracefully when not provided)
@@ -534,6 +580,7 @@ class AgentService:
         self._skill_manager = skill_manager
         # OpenClaw parity services (Issue #100 epic)
         self._mcp_bridge = mcp_bridge
+        self._browser_bridge = browser_bridge
         self._skill_pack_loader = skill_pack_loader
         self._tool_policy_engine = tool_policy_engine
         self._process_manager = process_manager or ProcessManager(run_store=run_store)
@@ -1479,6 +1526,10 @@ class AgentService:
     @property
     def process_manager(self) -> Optional[ProcessManager]:
         return self._process_manager
+
+    @property
+    def browser_bridge(self) -> Optional[Any]:
+        return self._browser_bridge
 
     def register_proactive_transport(
         self,
@@ -2977,11 +3028,24 @@ class AgentService:
         runner_name = self._execution_runner.__class__.__name__
         backend = "docker" if "docker" in runner_name.lower() else "local"
         profile_state = self.execution_profile_state()
+        browser_connected = False
+        browser_active_clients = 0
+        if self._browser_bridge is not None:
+            try:
+                browser_status = self._browser_bridge.status()
+                browser_connected = bool(browser_status.get("connected"))
+                browser_active_clients = int(browser_status.get("active_clients") or 0)
+            except Exception:
+                browser_connected = False
+                browser_active_clients = 0
         return {
             "execution_backend": backend,
             "execution_runner": runner_name,
             "probe_loop_enabled": bool(self._probe_loop is not None),
             "mcp_bridge_enabled": bool(self._mcp_bridge is not None),
+            "browser_bridge_enabled": bool(self._browser_bridge is not None),
+            "browser_bridge_connected": browser_connected,
+            "browser_bridge_active_clients": browser_active_clients,
             "skill_packs_enabled": bool(self._skill_pack_loader is not None),
             "skill_marketplace_enabled": bool(self._skill_marketplace is not None),
             "tool_policy_enabled": bool(self._tool_policy_engine is not None),
@@ -3413,7 +3477,9 @@ class AgentService:
             if callable(arun):
                 result = await arun(req, context)
             else:
-                result = tool.run(req, context)
+                # Run sync tools off the event loop so long-running calls
+                # (for example browser bridge wait=true) do not block API/WebSocket I/O.
+                result = await asyncio.to_thread(tool.run, req, context)
         except Exception as exc:
             return ToolResult(ok=False, output=f"{action_id} tool={tool_name} error=tool_exception {exc}")
         status = "ok" if result.ok else "error"
@@ -3646,8 +3712,8 @@ class AgentService:
             tool_names = _default_probe_tools_for_prompt(prompt, self._tool_registry.names())
         if not tool_names:
             tool_names = ["exec"]
-        tool_lines = _render_tool_schema_lines(tool_names[:6])
-        capability_lines = self._build_capability_context_for_tools(tool_names[:6], max_capabilities=4)
+        tool_lines = _render_tool_schema_lines(tool_names)
+        capability_lines = self._build_capability_context_for_tools(tool_names, max_capabilities=4)
         guidance = [
             "You are in autonomous execution mode.",
             "The previous response described intent but did not execute.",
@@ -4574,9 +4640,21 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
     low = (prompt or "").lower()
     available = set(_normalize_tool_names(list(available_tool_names)))
     picks: List[str] = ["exec"]
-    for name in ["shell_exec", "read_file", "write_file", "ssh_detect", "git_status", "git_diff"]:
+
+    def _add_tool(name: str) -> None:
         if name in available and name not in picks:
             picks.append(name)
+
+    for name in ("shell_exec", "read_file", "write_file", "ssh_detect"):
+        _add_tool(name)
+
+    browser_markers = ("browser", "chrome", "tab", "website", "site", "open ")
+    if any(marker in low for marker in browser_markers):
+        for name in ("browser_status", "browser_open", "browser_navigate", "browser_script"):
+            _add_tool(name)
+
+    for name in ("git_status", "git_diff"):
+        _add_tool(name)
     if "email" in low or "mail" in low:
         if "send_email_smtp" in available and "send_email_smtp" not in picks:
             picks.append("send_email_smtp")
@@ -4587,9 +4665,8 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
     web_markers = ("search", "internet", "web", "latest", "recent", "news", "lookup", "look up")
     if any(marker in low for marker in web_markers):
         for name in ("web_search", "mcp_search"):
-            if name in available and name not in picks:
-                picks.append(name)
-    return picks[:6]
+            _add_tool(name)
+    return picks[:8]
 
 
 def _render_tool_schema_lines(selected_tools: Sequence[str]) -> List[str]:

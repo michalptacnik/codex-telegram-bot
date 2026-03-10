@@ -1,12 +1,13 @@
 import asyncio
 from dataclasses import asdict
+import json
 import os
 import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Set
 from xml.sax.saxutils import escape as xml_escape
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import RedirectResponse
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
@@ -97,6 +98,37 @@ class SoulStyleRequest(BaseModel):
     brevity: str
     reason: str = "style update requested from control center"
     admin_user_id: int = 0
+
+
+class BrowserExtensionRegisterRequest(BaseModel):
+    instance_id: str
+    label: str = ""
+    version: str = ""
+    platform: str = ""
+    user_agent: str = ""
+    active_tab_url: str = ""
+    active_tab_title: str = ""
+
+
+class BrowserExtensionHeartbeatRequest(BaseModel):
+    instance_id: str
+    active_tab_url: str = ""
+    active_tab_title: str = ""
+
+
+class BrowserExtensionCommandResultRequest(BaseModel):
+    instance_id: str
+    ok: bool = True
+    output: str = ""
+    data: Dict[str, Any] = Field(default_factory=dict)
+
+
+class BrowserCommandRequest(BaseModel):
+    command_type: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    client_id: str = ""
+    wait: bool = True
+    timeout_sec: int = 180
 
 
 def _chunk_text(text: str, chunk_size: int = 220) -> List[str]:
@@ -252,6 +284,8 @@ def create_app_with_config(
     local_api_version = "v1"
     local_api_keys = _parse_local_api_keys(os.environ.get("LOCAL_API_KEYS", ""))
     local_api_enabled = bool(local_api_keys)
+    browser_bridge = agent_service.browser_bridge
+    browser_extension_token = (os.environ.get("BROWSER_EXTENSION_TOKEN") or "").strip()
 
     def _resolve_api_token(request: Request) -> str:
         bearer = (request.headers.get("authorization") or "").strip()
@@ -271,6 +305,18 @@ def create_app_with_config(
         if "admin:*" in scopes or required_scope in scopes:
             return token
         raise HTTPException(status_code=403, detail=f"Missing scope: {required_scope}")
+
+    def _require_browser_extension_auth(request: Request) -> None:
+        if not browser_extension_token:
+            return
+        supplied = (
+            (request.headers.get("x-browser-extension-token") or "").strip()
+            or (request.query_params.get("token") or "").strip()
+        )
+        if not supplied:
+            raise HTTPException(status_code=401, detail="Missing browser extension token.")
+        if not secrets.compare_digest(supplied, browser_extension_token):
+            raise HTTPException(status_code=401, detail="Invalid browser extension token.")
 
     # ------------------------------------------------------------------
     # UI auth helpers (CONTROL_CENTER_UI_SECRET)
@@ -710,6 +756,117 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     async def api_runtime_capabilities(request: Request) -> Dict[str, Any]:
         _opt_api_scope(request)
         return agent_service.runtime_capabilities()
+
+    @app.get("/api/browser/status")
+    async def api_browser_status(request: Request) -> Dict[str, Any]:
+        _opt_api_scope(request)
+        if browser_bridge is None:
+            return {
+                "connected": False,
+                "active_clients": 0,
+                "total_clients": 0,
+                "heartbeat_ttl_sec": 0,
+                "clients": [],
+                "configured": False,
+            }
+        payload = dict(browser_bridge.status())
+        payload["configured"] = True
+        return payload
+
+    @app.post("/api/browser/command")
+    async def api_browser_command(request: Request, body: BrowserCommandRequest) -> Dict[str, Any]:
+        _opt_api_scope(request, write_scope="api:write")
+        if browser_bridge is None:
+            raise HTTPException(status_code=503, detail="Browser bridge not configured.")
+        result = await asyncio.to_thread(
+            browser_bridge.enqueue_command,
+            command_type=body.command_type,
+            payload=dict(body.payload or {}),
+            client_id=str(body.client_id or "").strip(),
+            wait=bool(body.wait),
+            timeout_sec=max(1, min(int(body.timeout_sec or 180), 600)),
+        )
+        if not result.get("ok"):
+            command = result.get("command")
+            status = ""
+            if isinstance(command, dict):
+                status = str(command.get("status") or "").strip().lower()
+            pending = bool(result.get("pending")) or status in {"queued", "dispatched"}
+            if pending:
+                return result
+            raise HTTPException(status_code=400, detail=str(result.get("error") or "Browser command failed."))
+        return result
+
+    @app.post("/api/browser/extension/register")
+    async def api_browser_extension_register(
+        request: Request,
+        body: BrowserExtensionRegisterRequest,
+    ) -> Dict[str, Any]:
+        _require_browser_extension_auth(request)
+        if browser_bridge is None:
+            raise HTTPException(status_code=503, detail="Browser bridge not configured.")
+        payload = browser_bridge.register_client(
+            instance_id=body.instance_id,
+            label=body.label,
+            version=body.version,
+            platform=body.platform,
+            user_agent=body.user_agent,
+            active_tab_url=body.active_tab_url,
+            active_tab_title=body.active_tab_title,
+        )
+        return {"ok": True, "client": payload}
+
+    @app.post("/api/browser/extension/heartbeat")
+    async def api_browser_extension_heartbeat(
+        request: Request,
+        body: BrowserExtensionHeartbeatRequest,
+    ) -> Dict[str, Any]:
+        _require_browser_extension_auth(request)
+        if browser_bridge is None:
+            raise HTTPException(status_code=503, detail="Browser bridge not configured.")
+        try:
+            client = browser_bridge.heartbeat(
+                instance_id=body.instance_id,
+                active_tab_url=body.active_tab_url,
+                active_tab_title=body.active_tab_title,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"ok": True, "client": client}
+
+    @app.get("/api/browser/extension/commands")
+    async def api_browser_extension_commands(
+        request: Request,
+        instance_id: str = "",
+        limit: int = 5,
+    ) -> Dict[str, Any]:
+        _require_browser_extension_auth(request)
+        if browser_bridge is None:
+            raise HTTPException(status_code=503, detail="Browser bridge not configured.")
+        if not str(instance_id or "").strip():
+            raise HTTPException(status_code=400, detail="instance_id is required.")
+        items = browser_bridge.poll_commands(instance_id=instance_id, limit=limit)
+        return {"ok": True, "items": items}
+
+    @app.post("/api/browser/extension/commands/{command_id}/result")
+    async def api_browser_extension_command_result(
+        request: Request,
+        command_id: str,
+        body: BrowserExtensionCommandResultRequest,
+    ) -> Dict[str, Any]:
+        _require_browser_extension_auth(request)
+        if browser_bridge is None:
+            raise HTTPException(status_code=503, detail="Browser bridge not configured.")
+        result = browser_bridge.complete_command(
+            instance_id=body.instance_id,
+            command_id=command_id,
+            ok=bool(body.ok),
+            output=body.output,
+            data=dict(body.data or {}),
+        )
+        if not result.get("ok"):
+            raise HTTPException(status_code=400, detail=str(result.get("error") or "Failed to set command result."))
+        return result
 
     @app.get("/api/metrics")
     async def api_metrics(request: Request) -> Dict[str, int]:
@@ -1761,26 +1918,46 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         await websocket.accept()
         subscribed_sessions: Set[str] = set()
         current_session_id = ""
+        websocket_alive = True
+
+        async def _ws_send(payload: Dict[str, Any]) -> bool:
+            nonlocal websocket_alive
+            if not websocket_alive:
+                return False
+            try:
+                await websocket.send_json(payload)
+                return True
+            except WebSocketDisconnect:
+                websocket_alive = False
+                return False
+            except RuntimeError as exc:
+                if "close message has been sent" in str(exc).strip().lower():
+                    websocket_alive = False
+                    return False
+                raise
         try:
             while True:
                 inbound = await websocket.receive_json()
                 if not isinstance(inbound, dict):
-                    await websocket.send_json({"type": "error", "detail": "Invalid payload."})
+                    if not await _ws_send({"type": "error", "detail": "Invalid payload."}):
+                        break
                     continue
                 msg_type = str(inbound.get("type") or "").strip().lower()
                 if msg_type == "ping":
-                    await websocket.send_json({"type": "pong"})
+                    if not await _ws_send({"type": "pong"}):
+                        break
                     continue
                 if msg_type == "subscribe":
                     requested_session = str(inbound.get("session_id") or "").strip()
                     session = agent_service.get_session(requested_session)
                     if session is None:
-                        await websocket.send_json({"type": "error", "detail": "Session not found."})
+                        if not await _ws_send({"type": "error", "detail": "Session not found."}):
+                            break
                         continue
                     await _chat_subscribe(session.session_id, websocket)
                     subscribed_sessions.add(session.session_id)
                     current_session_id = session.session_id
-                    await websocket.send_json(
+                    if not await _ws_send(
                         {
                             "type": "session",
                             "session_id": session.session_id,
@@ -1788,19 +1965,22 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                             "user_id": int(session.user_id),
                             "cost_summary": agent_service.session_cost_summary(session.session_id),
                         }
-                    )
+                    ):
+                        break
                     continue
                 if msg_type in {"approve", "deny"}:
                     approval_id = str(inbound.get("approval_id") or "").strip()
                     if not approval_id:
-                        await websocket.send_json({"type": "error", "detail": "approval_id is required."})
+                        if not await _ws_send({"type": "error", "detail": "approval_id is required."}):
+                            break
                         continue
                     resolved_session_id = str(inbound.get("session_id") or current_session_id or "").strip()
                     session = agent_service.get_session(resolved_session_id) if resolved_session_id else None
                     chat_id = int(inbound.get("chat_id") or (session.chat_id if session else 0) or 0)
                     user_id = int(inbound.get("user_id") or (session.user_id if session else 0) or 0)
                     if chat_id == 0 or user_id == 0:
-                        await websocket.send_json({"type": "error", "detail": "chat_id and user_id are required."})
+                        if not await _ws_send({"type": "error", "detail": "chat_id and user_id are required."}):
+                            break
                         continue
                     if msg_type == "approve":
                         output = await agent_service.approve_tool_action(
@@ -1817,7 +1997,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                     failed = str(output).strip().lower().startswith("error:")
                     status = "error" if failed else "result"
                     rendered = format_tool_result(ok=not failed, output=str(output), max_chars=360)
-                    await websocket.send_json(
+                    if not await _ws_send(
                         {
                             "type": "tool_event",
                             "name": "approval",
@@ -1830,27 +2010,32 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                                 "user_id": user_id,
                             },
                         }
-                    )
+                    ):
+                        break
                     continue
                 if msg_type != "user_message":
-                    await websocket.send_json({"type": "error", "detail": "Unsupported message type."})
+                    if not await _ws_send({"type": "error", "detail": "Unsupported message type."}):
+                        break
                     continue
 
                 text = str(inbound.get("text") or "").strip()
                 if not text:
-                    await websocket.send_json({"type": "error", "detail": "text is required."})
+                    if not await _ws_send({"type": "error", "detail": "text is required."}):
+                        break
                     continue
                 session, err = _resolve_ws_session(inbound, current_session_id=current_session_id)
                 if err:
-                    await websocket.send_json({"type": "error", "detail": err})
+                    if not await _ws_send({"type": "error", "detail": err}):
+                        break
                     continue
                 if session is None:
-                    await websocket.send_json({"type": "error", "detail": "Failed to resolve session."})
+                    if not await _ws_send({"type": "error", "detail": "Failed to resolve session."}):
+                        break
                     continue
                 current_session_id = session.session_id
                 await _chat_subscribe(session.session_id, websocket)
                 subscribed_sessions.add(session.session_id)
-                await websocket.send_json(
+                if not await _ws_send(
                     {
                         "type": "session",
                         "session_id": session.session_id,
@@ -1858,7 +2043,8 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                         "user_id": int(session.user_id),
                         "cost_summary": agent_service.session_cost_summary(session.session_id),
                     }
-                )
+                ):
+                    break
 
                 async def _progress(update_payload: Dict[str, Any]) -> None:
                     if not isinstance(update_payload, dict):
@@ -1869,7 +2055,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                         user_id=int(session.user_id),
                     )
                     if event is not None:
-                        await websocket.send_json(
+                        await _ws_send(
                             {
                                 **event,
                                 "session_id": session.session_id,
@@ -1886,7 +2072,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                         progress_callback=_progress,
                     )
                 except Exception as exc:
-                    await websocket.send_json(
+                    if not await _ws_send(
                         {
                             "type": "tool_event",
                             "name": "runtime",
@@ -1894,8 +2080,10 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                             "session_id": session.session_id,
                             "detail": {"message": str(exc)[:300]},
                         }
-                    )
-                    await websocket.send_json({"type": "done", "session_id": session.session_id})
+                    ):
+                        break
+                    if not await _ws_send({"type": "done", "session_id": session.session_id}):
+                        break
                     continue
 
                 formatted = format_message(turn.text or "", channel="web", style=_session_style(session.session_id))
@@ -1903,21 +2091,25 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 if not chunks:
                     chunks = ["(no output)"]
                 for chunk in chunks:
-                    await websocket.send_json(
+                    if not await _ws_send(
                         {
                             "type": "assistant_chunk",
                             "session_id": session.session_id,
                             "text": chunk,
                         }
-                    )
-                await websocket.send_json(
+                    ):
+                        break
+                if not websocket_alive:
+                    break
+                if not await _ws_send(
                     {
                         "type": "done",
                         "session_id": session.session_id,
                         "kind": turn.kind,
                         "cost_summary": agent_service.session_cost_summary(session.session_id),
                     }
-                )
+                ):
+                    break
         except WebSocketDisconnect:
             pass
         finally:

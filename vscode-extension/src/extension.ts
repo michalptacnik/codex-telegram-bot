@@ -6,12 +6,24 @@ import type { ConnectionState } from "./types";
 let client: GatewayClient;
 let statusBarItem: vscode.StatusBarItem;
 
-function readConfig(): { gatewayUrl: string; apiKey: string; uiSecret: string } {
+interface ExtensionConfig {
+  gatewayUrl: string;
+  apiKey: string;
+  uiSecret: string;
+  defaultChatId: number;
+  defaultUserId: number;
+  defaultAgentId: string;
+}
+
+function readConfig(): ExtensionConfig {
   const cfg = vscode.workspace.getConfiguration("codex-control-center");
   return {
-    gatewayUrl: cfg.get<string>("gatewayUrl") || "http://localhost:46464",
+    gatewayUrl: cfg.get<string>("gatewayUrl") || "http://127.0.0.1:8765",
     apiKey: cfg.get<string>("apiKey") || "",
     uiSecret: cfg.get<string>("uiSecret") || "",
+    defaultChatId: cfg.get<number>("defaultChatId") || 1,
+    defaultUserId: cfg.get<number>("defaultUserId") || 1,
+    defaultAgentId: cfg.get<string>("defaultAgentId") || "default",
   };
 }
 
@@ -36,7 +48,14 @@ export function activate(context: vscode.ExtensionContext): void {
   const config = readConfig();
 
   // Create gateway client
-  client = new GatewayClient(config.gatewayUrl, config.apiKey, config.uiSecret);
+  client = new GatewayClient({
+    baseUrl: config.gatewayUrl,
+    apiKey: config.apiKey,
+    uiSecret: config.uiSecret,
+    defaultChatId: config.defaultChatId,
+    defaultUserId: config.defaultUserId,
+    defaultAgentId: config.defaultAgentId,
+  });
 
   // Status bar
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
@@ -92,9 +111,16 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("codex-cc.reconnect", () => {
       const cfg = readConfig();
       client.disconnect();
-      client = new GatewayClient(cfg.gatewayUrl, cfg.apiKey, cfg.uiSecret);
-      client.on("stateChange", updateStatusBar);
+      client.reconfigure({
+        baseUrl: cfg.gatewayUrl,
+        apiKey: cfg.apiKey,
+        uiSecret: cfg.uiSecret,
+        defaultChatId: cfg.defaultChatId,
+        defaultUserId: cfg.defaultUserId,
+        defaultAgentId: cfg.defaultAgentId,
+      });
       client.connect();
+      chatProvider.refreshContext();
       vscode.window.showInformationMessage("Reconnecting to Codex gateway...");
     }),
   );

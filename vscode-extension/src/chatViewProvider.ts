@@ -1,7 +1,8 @@
 import * as vscode from "vscode";
-import * as path from "path";
 import type { GatewayClient } from "./gatewayClient";
 import type {
+  AgentInfo,
+  SessionInfo,
   SessionResponse,
   AssistantChunkResponse,
   ToolEventResponse,
@@ -16,6 +17,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private client: GatewayClient;
   private extensionUri: vscode.Uri;
+  private agents: AgentInfo[] = [];
+  private sessions: SessionInfo[] = [];
 
   constructor(extensionUri: vscode.Uri, client: GatewayClient) {
     this.extensionUri = extensionUri;
@@ -39,35 +42,124 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     webviewView.webview.html = this.getHtml(webviewView.webview, mediaUri);
 
     webviewView.webview.onDidReceiveMessage((msg) => {
-      switch (msg.command) {
-        case "sendMessage":
-          this.client.sendMessage(msg.text);
-          break;
-        case "approve":
-          this.client.approve(msg.approvalId, msg.sessionId, msg.chatId, msg.userId);
-          break;
-        case "deny":
-          this.client.deny(msg.approvalId, msg.sessionId, msg.chatId, msg.userId);
-          break;
-      }
+      void this.handleWebviewMessage(msg);
     });
 
     // Push current state
     this.postMessage({ type: "connectionState", state: this.client.state });
+    this.postContext();
+    void this.refreshContext();
   }
 
   /** Send a message from the extension side (e.g. from the sendSelection command). */
   sendFromExtension(text: string): void {
-    this.client.sendMessage(text);
+    this.client.sendMessage(text, { agent_id: this.client.agentId });
     this.postMessage({ type: "userEcho", text });
+  }
+
+  async refreshContext(): Promise<void> {
+    try {
+      const [agents, sessions] = await Promise.all([
+        this.client.listAgents(),
+        this.client.listSessions(100),
+      ]);
+      this.agents = Array.isArray(agents) ? agents : [];
+      this.sessions = Array.isArray(sessions) ? sessions : [];
+    } catch (error) {
+      this.postMessage({
+        type: "contextError",
+        detail: (error as Error)?.message || "Failed to load context.",
+      });
+    }
+    this.postContext();
+  }
+
+  private async handleWebviewMessage(msg: unknown): Promise<void> {
+    if (!msg || typeof msg !== "object") {
+      return;
+    }
+    const payload = msg as Record<string, unknown>;
+    const command = String(payload.command || "").trim();
+    if (!command) {
+      return;
+    }
+
+    switch (command) {
+      case "ready":
+        this.postContext();
+        await this.refreshContext();
+        return;
+      case "refreshContext":
+        await this.refreshContext();
+        return;
+      case "setAgent": {
+        const agentId = String(payload.agentId || "").trim();
+        if (agentId) {
+          this.client.setDefaultAgent(agentId);
+          this.postContext();
+        }
+        return;
+      }
+      case "setIdentity": {
+        const chatId = sanitizePositiveInt(payload.chatId, this.client.chatId);
+        const userId = sanitizePositiveInt(payload.userId, this.client.userId);
+        this.client.setIdentity(chatId, userId);
+        this.postContext();
+        return;
+      }
+      case "selectSession": {
+        const sessionId = String(payload.sessionId || "").trim();
+        if (sessionId) {
+          this.client.subscribe(sessionId);
+          this.postContext();
+        }
+        return;
+      }
+      case "sendMessage": {
+        const text = String(payload.text || "").trim();
+        if (!text) {
+          return;
+        }
+        this.client.sendMessage(text, {
+          session_id: String(payload.sessionId || "").trim() || undefined,
+          chat_id: sanitizePositiveInt(payload.chatId, this.client.chatId),
+          user_id: sanitizePositiveInt(payload.userId, this.client.userId),
+          agent_id: String(payload.agentId || this.client.agentId).trim() || this.client.agentId,
+        });
+        return;
+      }
+      case "approve":
+        this.client.approve(
+          String(payload.approvalId || ""),
+          String(payload.sessionId || "") || undefined,
+          sanitizePositiveInt(payload.chatId, this.client.chatId),
+          sanitizePositiveInt(payload.userId, this.client.userId),
+        );
+        return;
+      case "deny":
+        this.client.deny(
+          String(payload.approvalId || ""),
+          String(payload.sessionId || "") || undefined,
+          sanitizePositiveInt(payload.chatId, this.client.chatId),
+          sanitizePositiveInt(payload.userId, this.client.userId),
+        );
+        return;
+      default:
+        return;
+    }
   }
 
   private bindClientEvents(): void {
     this.client.on("stateChange", (state: ConnectionState) => {
       this.postMessage({ type: "connectionState", state });
+      if (state === "connected") {
+        void this.refreshContext();
+      }
     });
     this.client.on("session", (msg: SessionResponse) => {
+      this.client.setIdentity(msg.chat_id, msg.user_id);
       this.postMessage(msg);
+      this.postContext();
     });
     this.client.on("assistant_chunk", (msg: AssistantChunkResponse) => {
       this.postMessage(msg);
@@ -80,6 +172,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
     this.client.on("error", (msg: ErrorResponse) => {
       this.postMessage(msg);
+    });
+  }
+
+  private postContext(): void {
+    this.postMessage({
+      type: "context",
+      chatId: this.client.chatId,
+      userId: this.client.userId,
+      agentId: this.client.agentId,
+      sessionId: this.client.sessionId,
+      sessions: this.sessions,
+      agents: this.agents,
     });
   }
 
@@ -106,6 +210,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <span id="conn-dot"></span>
     <span id="conn-label">Disconnected</span>
   </div>
+  <section id="context-panel">
+    <div class="context-row">
+      <label for="agent-select">Agent</label>
+      <select id="agent-select"></select>
+      <button id="refresh-btn" type="button" title="Refresh sessions and agents">Refresh</button>
+    </div>
+    <div class="context-row">
+      <label for="session-select">Session</label>
+      <select id="session-select"></select>
+    </div>
+    <div class="context-row" id="identity-row">
+      <label for="chat-id">Chat</label>
+      <input id="chat-id" type="number" min="1" step="1" />
+      <label for="user-id">User</label>
+      <input id="user-id" type="number" min="1" step="1" />
+      <button id="identity-btn" type="button" title="Apply chat/user IDs">Apply</button>
+    </div>
+  </section>
   <div id="chat-log"></div>
   <form id="chat-form">
     <textarea id="chat-input" rows="2" placeholder="Ask the agent..."></textarea>
@@ -124,4 +246,12 @@ function getNonce(): string {
     result += chars.charAt(Math.floor(Math.random() * chars.length));
   }
   return result;
+}
+
+function sanitizePositiveInt(value: unknown, fallback: number): number {
+  const n = Number(value);
+  if (Number.isFinite(n) && n > 0) {
+    return Math.floor(n);
+  }
+  return fallback > 0 ? fallback : 1;
 }

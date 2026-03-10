@@ -1,0 +1,131 @@
+:root {
+  color-scheme: light;
+  --bg: #0f172a;
+  --panel: #111827;
+  --text: #e5e7eb;
+  --muted: #94a3b8;
+  --line: #334155;
+  --ok: #22c55e;
+  --off: #ef4444;
+  --btn: #0ea5e9;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 340px;
+  font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  background: radial-gradient(circle at top, #1e293b 0%, #0b1222 65%);
+  color: var(--text);
+}
+
+.wrap {
+  padding: 14px;
+}
+
+h1 {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.row {
+  margin: 8px 0;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+input[type="text"],
+input[type="password"] {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px;
+  background: rgba(15, 23, 42, 0.9);
+  color: var(--text);
+}
+
+.topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.status-pill {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.status-pill.active {
+  color: #052e16;
+  background: var(--ok);
+  border-color: transparent;
+}
+
+.status-pill.inactive {
+  color: #fff;
+  background: var(--off);
+  border-color: transparent;
+}
+
+.meta {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+button.primary {
+  background: var(--btn);
+  color: #042f2e;
+}
+
+button.secondary {
+  background: #1f2937;
+  color: var(--text);
+  border: 1px solid var(--line);
+}
+
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.switch input {
+  margin: 0;
+}
+
+.error {
+  color: #fca5a5;
+  font-size: 11px;
+  min-height: 14px;
+}
