@@ -1153,4 +1153,6 @@ class TestToolRegistryIntegration:
         assert registry.get("browser_status") is not None
         assert registry.get("browser_open") is not None
         assert registry.get("browser_navigate") is not None
+        assert registry.get("browser_script") is not None
+        assert registry.get("browser_action") is not None
         assert registry.get("browser_extract") is not None

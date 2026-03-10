@@ -5,7 +5,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict
+from typing import Any, Dict, List, Tuple
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
 
@@ -20,6 +20,11 @@ _BROWSER_EXTRACT_DEFAULT_LINKS = 20
 _BROWSER_EXTRACT_MAX_LINKS = 200
 _BROWSER_EXTRACT_DEFAULT_HTML_CHARS = 20000
 _BROWSER_EXTRACT_MAX_HTML_CHARS = 200000
+_BROWSER_ACTION_MAX_STEPS = 20
+_BROWSER_ACTION_DEFAULT_STEP_TIMEOUT_MS = 15000
+_BROWSER_ACTION_MAX_STEP_TIMEOUT_MS = 120000
+_BROWSER_ACTION_MAX_SELECTOR_CHARS = 1000
+_BROWSER_ACTION_MAX_TEXT_CHARS = 4000
 
 
 class BrowserStatusTool:
@@ -294,6 +299,103 @@ class BrowserExtractTool:
         return ToolResult(ok=True, output=json.dumps(normalized, ensure_ascii=True))
 
 
+class BrowserActionTool:
+    name = "browser_action"
+    description = (
+        "Execute high-level browser actions in active tab "
+        "(click/type/press/wait_for/scroll/focus/submit/select/extract)."
+    )
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        plan, plan_error = _build_browser_action_plan(dict(request.args or {}))
+        if plan_error:
+            return ToolResult(ok=False, output=plan_error)
+        if not plan:
+            return ToolResult(ok=False, output="action or steps is required.")
+
+        script = _build_browser_action_script(plan)
+        if len(script) > _BROWSER_SCRIPT_MAX_CHARS:
+            return ToolResult(
+                ok=False,
+                output=f"generated action script exceeds max length ({_BROWSER_SCRIPT_MAX_CHARS} chars).",
+            )
+
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        tab_id = _to_int(request.args.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647)
+        all_frames = _to_bool(request.args.get("all_frames"), default=False)
+
+        payload: Dict[str, Any] = {
+            "script": script,
+            "all_frames": bool(all_frames),
+        }
+        if tab_id > 0:
+            payload["tab_id"] = int(tab_id)
+
+        result = _run_browser_command(
+            bridge=self._bridge,
+            command_type="run_script",
+            payload=payload,
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+        if not result.ok:
+            return result
+
+        try:
+            parsed = json.loads(result.output)
+        except Exception:
+            return result
+        if not isinstance(parsed, dict) or bool(parsed.get("pending")):
+            return result
+        command = parsed.get("command")
+        if not isinstance(command, dict):
+            return result
+        data = command.get("data")
+        if not isinstance(data, dict):
+            return result
+        action_result = data.get("result")
+        if not isinstance(action_result, dict):
+            return result
+
+        normalized: Dict[str, Any] = {
+            "ok": bool(action_result.get("ok", True)),
+            "url": str(action_result.get("url") or ""),
+            "title": str(action_result.get("title") or ""),
+            "tab_id": _to_int(data.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647),
+            "steps": action_result.get("steps") if isinstance(action_result.get("steps"), list) else [],
+        }
+        if "error" in action_result:
+            normalized["error"] = str(action_result.get("error") or "")
+        if "step_index" in action_result:
+            normalized["step_index"] = _to_int(
+                action_result.get("step_index"),
+                default=0,
+                min_value=0,
+                max_value=_BROWSER_ACTION_MAX_STEPS,
+            )
+        if "step_action" in action_result:
+            normalized["step_action"] = str(action_result.get("step_action") or "")
+        command_id = str(command.get("command_id") or "").strip()
+        if command_id:
+            normalized["command_id"] = command_id
+        source = str(parsed.get("source") or "").strip()
+        if source:
+            normalized["source"] = source
+        ok = bool(normalized.get("ok"))
+        return ToolResult(ok=ok, output=json.dumps(normalized, ensure_ascii=True))
+
+
 def _run_browser_command(
     *,
     bridge: Any,
@@ -491,6 +593,251 @@ def _build_extract_script(
         "  links,\n"
         "  html,\n"
         "};"
+    )
+
+
+def _build_browser_action_plan(args: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
+    payload = dict(args or {})
+    default_timeout_ms = _to_int(
+        payload.get("step_timeout_ms") or payload.get("timeout_ms"),
+        default=_BROWSER_ACTION_DEFAULT_STEP_TIMEOUT_MS,
+        min_value=100,
+        max_value=_BROWSER_ACTION_MAX_STEP_TIMEOUT_MS,
+    )
+
+    raw_steps = payload.get("steps")
+    if isinstance(raw_steps, dict):
+        raw_steps = [raw_steps]
+    if isinstance(raw_steps, list) and raw_steps:
+        if len(raw_steps) > _BROWSER_ACTION_MAX_STEPS:
+            return [], f"steps exceeds max length ({_BROWSER_ACTION_MAX_STEPS})."
+        plan: List[Dict[str, Any]] = []
+        for idx, item in enumerate(raw_steps):
+            if not isinstance(item, dict):
+                return [], f"steps[{idx}] must be an object."
+            normalized, err = _normalize_browser_action_step(item, default_timeout_ms=default_timeout_ms)
+            if err:
+                return [], f"steps[{idx}] {err}"
+            plan.append(normalized)
+        return plan, ""
+
+    # Single-action mode: top-level args define one step.
+    single = dict(payload)
+    for key in (
+        "steps",
+        "client_id",
+        "wait",
+        "timeout_sec",
+        "tab_id",
+        "all_frames",
+        "step_timeout_ms",
+        "timeout_ms",
+    ):
+        single.pop(key, None)
+    normalized, err = _normalize_browser_action_step(single, default_timeout_ms=default_timeout_ms)
+    if err:
+        return [], err
+    return [normalized], ""
+
+
+def _normalize_browser_action_step(step: Dict[str, Any], *, default_timeout_ms: int) -> Tuple[Dict[str, Any], str]:
+    alias = {
+        "input": "type",
+        "fill": "type",
+        "key": "press",
+        "keypress": "press",
+        "wait": "wait_for",
+        "waitfor": "wait_for",
+    }
+    action_raw = str(step.get("action") or step.get("op") or "").strip().lower()
+    if not action_raw:
+        return {}, "action is required."
+    action = alias.get(action_raw, action_raw)
+    allowed = {"click", "type", "press", "wait_for", "scroll", "focus", "submit", "select", "extract"}
+    if action not in allowed:
+        return {}, f"unsupported action '{action_raw}'."
+
+    timeout_ms = _to_int(
+        step.get("timeout_ms") or step.get("timeoutMs"),
+        default=default_timeout_ms,
+        min_value=100,
+        max_value=_BROWSER_ACTION_MAX_STEP_TIMEOUT_MS,
+    )
+    selector = _clip_string(step.get("selector"), _BROWSER_ACTION_MAX_SELECTOR_CHARS)
+    text_contains = _clip_string(
+        step.get("text_contains") or step.get("contains_text") or step.get("contains"),
+        500,
+    )
+    text_not_contains = _clip_string(step.get("text_not_contains") or step.get("not_contains"), 500)
+    index = _to_int(step.get("index"), default=0, min_value=0, max_value=50)
+    scroll = _to_bool(step.get("scroll"), default=True)
+
+    out: Dict[str, Any] = {"action": action, "timeout_ms": timeout_ms}
+    if selector:
+        out["selector"] = selector
+    if text_contains:
+        out["text_contains"] = text_contains
+    if text_not_contains:
+        out["text_not_contains"] = text_not_contains
+    if index > 0:
+        out["index"] = index
+    if not scroll:
+        out["scroll"] = False
+
+    if action in {"click", "type", "focus", "submit", "select"} and (not selector and not text_contains):
+        return {}, f"action '{action}' requires selector or text_contains."
+
+    if action == "type":
+        text = _clip_string(step.get("text") if "text" in step else step.get("value"), _BROWSER_ACTION_MAX_TEXT_CHARS)
+        if text is None:
+            text = ""
+        out["text"] = text
+        out["clear"] = _to_bool(step.get("clear"), default=True)
+        if _to_bool(step.get("submit"), default=False):
+            out["submit"] = True
+
+    if action == "press":
+        key = _clip_string(step.get("key"), 32) or "Enter"
+        out["key"] = key
+
+    if action == "wait_for":
+        sleep_ms = _to_int(
+            step.get("sleep_ms") or step.get("sleepMs"),
+            default=0,
+            min_value=0,
+            max_value=_BROWSER_ACTION_MAX_STEP_TIMEOUT_MS,
+        )
+        if sleep_ms <= 0:
+            seconds = _to_int(
+                step.get("seconds") or step.get("sleep_sec"),
+                default=0,
+                min_value=0,
+                max_value=600,
+            )
+            sleep_ms = int(seconds * 1000)
+        if sleep_ms > 0:
+            out["sleep_ms"] = sleep_ms
+        present = _to_bool(step.get("present"), default=True)
+        if not present:
+            out["present"] = False
+        if (not selector) and (not text_contains) and (not text_not_contains) and sleep_ms <= 0:
+            return {}, "wait_for requires selector/text_contains/text_not_contains or sleep duration."
+
+    if action == "scroll":
+        y = _to_int(step.get("y") or step.get("by"), default=700, min_value=-10000, max_value=10000)
+        out["y"] = y
+        if _to_bool(step.get("smooth"), default=False):
+            out["smooth"] = True
+
+    if action == "select":
+        option_value = _clip_string(step.get("option_value"), 300)
+        option_text = _clip_string(step.get("option_text") or step.get("text"), 300)
+        if not option_value and not option_text:
+            return {}, "select requires option_value or option_text."
+        if option_value:
+            out["option_value"] = option_value
+        if option_text:
+            out["option_text"] = option_text
+
+    if action == "extract":
+        max_chars = _to_int(
+            step.get("max_chars"),
+            default=4000,
+            min_value=200,
+            max_value=_BROWSER_EXTRACT_MAX_CHARS,
+        )
+        include_links = _to_bool(step.get("include_links"), default=False)
+        max_links = _to_int(
+            step.get("max_links"),
+            default=10,
+            min_value=0,
+            max_value=_BROWSER_EXTRACT_MAX_LINKS,
+        )
+        out["max_chars"] = max_chars
+        if include_links:
+            out["include_links"] = True
+            out["max_links"] = max_links
+
+    return out, ""
+
+
+def _clip_string(value: Any, max_len: int) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if len(text) <= max(1, int(max_len)):
+        return text
+    return text[: max(1, int(max_len))]
+
+
+def _build_browser_action_script(plan: List[Dict[str, Any]]) -> str:
+    steps_json = json.dumps(plan, ensure_ascii=True, separators=(",", ":"))
+    return (
+        f"const plan={steps_json};\n"
+        "const now=()=>Date.now();\n"
+        "const sleep=(ms)=>new Promise((r)=>setTimeout(r,Math.max(0,Number(ms)||0)));\n"
+        "const txt=(v,m)=>String(v==null?\"\":v).slice(0,m||4000);\n"
+        "const bodyText=()=>txt((document.body&&document.body.innerText)||\"\",120000);\n"
+        "const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,Number(v)||0));\n"
+        "const elText=(el)=>txt((el&&(el.innerText||el.textContent||el.value||\"\"))||\"\",2000);\n"
+        "const query=(step)=>{let nodes=[];const sels=[];if(step.selector)sels.push(String(step.selector));"
+        "if(!sels.length&&step.text_contains)sels.push(\"button,a,[role='button'],input,textarea,article,div,span\");"
+        "for(const sel of sels){try{nodes=nodes.concat(Array.from(document.querySelectorAll(sel)));}catch(_e){}}"
+        "if(step.text_contains){const needle=String(step.text_contains).toLowerCase();"
+        "nodes=nodes.filter((n)=>elText(n).toLowerCase().includes(needle));}"
+        "if(step.text_not_contains){const noNeedle=String(step.text_not_contains).toLowerCase();"
+        "nodes=nodes.filter((n)=>!elText(n).toLowerCase().includes(noNeedle));}"
+        "if(!nodes.length)return null;const idx=clamp(step.index,0,Math.max(0,nodes.length-1));"
+        "return nodes[idx]||nodes[0]||null;};\n"
+        "const waitEl=async(step,timeoutMs)=>{const start=now();for(;;){const el=query(step);if(el)return el;"
+        "if(now()-start>=timeoutMs)throw new Error(`Target not found for action ${String(step.action||\"\")}`);"
+        "await sleep(120);}};\n"
+        "const setValue=(el,value)=>{const p=Object.getPrototypeOf(el);"
+        "const d=p?Object.getOwnPropertyDescriptor(p,'value'):null;"
+        "if(d&&typeof d.set==='function'){d.set.call(el,value);}else{el.value=value;}"
+        "el.dispatchEvent(new Event('input',{bubbles:true}));"
+        "el.dispatchEvent(new Event('change',{bubbles:true}));};\n"
+        "const keyDispatch=(el,key)=>{const target=el||document.activeElement||document.body;"
+        "if(target&&target.focus)target.focus();const k=String(key||'Enter');"
+        "for(const t of ['keydown','keypress','keyup']){target.dispatchEvent(new KeyboardEvent(t,{key:k,code:k,bubbles:true,cancelable:true}));}};\n"
+        "const waitCond=async(step,timeoutMs)=>{if(step.sleep_ms&&Number(step.sleep_ms)>0){await sleep(Number(step.sleep_ms));return true;}"
+        "const start=now();const wantPresent=step.present!==false;for(;;){let ok=true;"
+        "if(step.selector||step.text_contains){ok=!!query(step);}if(step.text_not_contains){ok=ok&&!bodyText().toLowerCase().includes(String(step.text_not_contains).toLowerCase());}"
+        "if((ok&&wantPresent)||(!ok&&!wantPresent))return true;"
+        "if(now()-start>=timeoutMs)throw new Error('wait_for timeout');await sleep(150);}};\n"
+        "const extract=(step)=>{const maxChars=clamp(step.max_chars||4000,200,50000);"
+        "const text=bodyText();const out={url:String(location.href||''),title:String(document.title||''),text:text.slice(0,maxChars),text_length:text.length};"
+        "if(step.include_links){const maxLinks=clamp(step.max_links||10,0,200);const links=[];const seen=new Set();"
+        "for(const a of Array.from(document.querySelectorAll('a[href]'))){if(links.length>=maxLinks)break;"
+        "const href=String(a.href||'').trim();if(!href||!/^https?:/i.test(href)||seen.has(href))continue;seen.add(href);links.push(href);}out.links=links;}return out;};\n"
+        "const steps=[];for(let i=0;i<plan.length;i++){const step=plan[i]||{};const action=String(step.action||'').toLowerCase();"
+        "const timeoutMs=clamp(step.timeout_ms||15000,100,120000);try{"
+        "if(action==='click'){const el=await waitEl(step,timeoutMs);if(step.scroll!==false&&el.scrollIntoView)el.scrollIntoView({block:'center',inline:'center'});"
+        "if(typeof el.click==='function'){el.click();}else{throw new Error('Target not clickable');}"
+        "steps.push({index:i,action,ok:true,target:elText(el)});continue;}"
+        "if(action==='type'){const el=await waitEl(step,timeoutMs);if(step.scroll!==false&&el.scrollIntoView)el.scrollIntoView({block:'center',inline:'center'});"
+        "if(!('value' in el))throw new Error('Target does not support typing');if(el.focus)el.focus();"
+        "const base=step.clear===false?String(el.value||''):'';const next=base+String(step.text||'');setValue(el,next);if(step.submit)keyDispatch(el,'Enter');"
+        "steps.push({index:i,action,ok:true,chars:next.length});continue;}"
+        "if(action==='press'){let el=null;if(step.selector||step.text_contains)el=await waitEl(step,timeoutMs);keyDispatch(el,String(step.key||'Enter'));"
+        "steps.push({index:i,action,ok:true,key:String(step.key||'Enter')});continue;}"
+        "if(action==='wait_for'){await waitCond(step,timeoutMs);steps.push({index:i,action,ok:true});continue;}"
+        "if(action==='scroll'){if(step.selector||step.text_contains){const el=await waitEl(step,timeoutMs);if(el.scrollIntoView)el.scrollIntoView({block:'center',inline:'center'});}"
+        "else{window.scrollBy({top:Number(step.y||700),left:0,behavior:step.smooth?'smooth':'auto'});if(step.smooth)await sleep(300);}steps.push({index:i,action,ok:true});continue;}"
+        "if(action==='focus'){const el=await waitEl(step,timeoutMs);if(el.focus)el.focus();else throw new Error('Target not focusable');steps.push({index:i,action,ok:true,target:elText(el)});continue;}"
+        "if(action==='submit'){const el=await waitEl(step,timeoutMs);if(el.form&&typeof el.form.requestSubmit==='function'){el.form.requestSubmit();}"
+        "else if(el.form&&typeof el.form.submit==='function'){el.form.submit();}else{keyDispatch(el,'Enter');}"
+        "steps.push({index:i,action,ok:true});continue;}"
+        "if(action==='select'){const el=await waitEl(step,timeoutMs);if(String(el.tagName||'').toLowerCase()!=='select')throw new Error('Target is not <select>');"
+        "const options=Array.from(el.options||[]);let chosen=null;if(step.option_value)chosen=options.find((o)=>String(o.value)===String(step.option_value));"
+        "if(!chosen&&step.option_text){const needle=String(step.option_text).toLowerCase();chosen=options.find((o)=>String(o.text||'').toLowerCase().includes(needle));}"
+        "if(!chosen)throw new Error('No matching option');setValue(el,String(chosen.value));steps.push({index:i,action,ok:true,value:String(chosen.value)});continue;}"
+        "if(action==='extract'){steps.push({index:i,action,ok:true,...extract(step)});continue;}"
+        "throw new Error(`Unsupported action ${action}`);}catch(err){"
+        "return {ok:false,error:String(err&&err.message?err.message:err),step_index:i,step_action:action,steps,url:String(location.href||''),title:String(document.title||'')};}}\n"
+        "return {ok:true,steps,url:String(location.href||''),title:String(document.title||'')};"
     )
 
 

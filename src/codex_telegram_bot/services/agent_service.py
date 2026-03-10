@@ -367,6 +367,22 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "timeout_sec": "int (optional, default=180)",
         },
     },
+    "browser_action": {
+        "name": "browser_action",
+        "protocol": "!tool",
+        "args": {
+            "action": "string (optional for single-step mode: click|type|press|wait_for|scroll|focus|submit|select|extract)",
+            "steps": "list[object] (optional multi-step mode)",
+            "selector": "string (optional CSS selector for target element)",
+            "text": "string (optional text payload, usually for type)",
+            "key": "string (optional key for press)",
+            "client_id": "string (optional)",
+            "tab_id": "int (optional, defaults to active tab)",
+            "all_frames": "bool (optional, default=false)",
+            "wait": "bool (optional, default=true)",
+            "timeout_sec": "int (optional, default=180)",
+        },
+    },
     "browser_extract": {
         "name": "browser_extract",
         "protocol": "!tool",
@@ -2331,6 +2347,24 @@ class AgentService:
                         goal=(cleaned_prompt or prompt).strip(),
                         max_steps=self._tool_loop_max_steps,
                     )
+            guarded_probe = _apply_probe_intent_guardrails(
+                prompt=(cleaned_prompt or prompt),
+                probe=probe,
+                available_tool_names=available_tool_names,
+            )
+            if guarded_probe != probe:
+                log_json(
+                    logger,
+                    "probe.guardrail.applied",
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    session_id=session_id,
+                    previous_mode=probe.mode or "",
+                    previous_tools=list(probe.tools or []),
+                    guarded_mode=guarded_probe.mode or "",
+                    guarded_tools=list(guarded_probe.tools or []),
+                )
+                probe = guarded_probe
             log_json(
                 logger,
                 "probe.decision",
@@ -2389,6 +2423,22 @@ class AgentService:
                     goal=probe.goal,
                     selected_tools=probe.tools,
                     agent_id=agent_id,
+                    required_tool_name=(
+                        "browser_action"
+                        if (
+                            _prompt_requires_browser_actuation(cleaned_prompt or prompt)
+                            and ("browser_action" in _normalize_tool_names(probe.tools))
+                        )
+                        else ("browser_script" if _prompt_requires_browser_actuation(cleaned_prompt or prompt) else "")
+                    ),
+                    required_tool_arg_name=(
+                        "__browser_action_contract__"
+                        if (
+                            _prompt_requires_browser_actuation(cleaned_prompt or prompt)
+                            and ("browser_action" in _normalize_tool_names(probe.tools))
+                        )
+                        else ("script" if _prompt_requires_browser_actuation(cleaned_prompt or prompt) else "")
+                    ),
                 )
                 log_json(
                     logger,
@@ -3390,6 +3440,9 @@ class AgentService:
                         args["path"] = path
                 if name.startswith("git_") and not self._workspace_is_git_repo(workspace_root):
                     return [], "Error: git tools are disabled because WORKSPACE_ROOT is not a git repository."
+                browser_arg_error = _browser_tool_args_error(name, args)
+                if browser_arg_error:
+                    return [], f"Error: {browser_arg_error}"
                 normalized.append(
                     LoopAction(
                         kind="tool",
@@ -3751,6 +3804,13 @@ class AgentService:
             (model_output or "").strip(),
             "Selected tool APIs:",
         ]
+        normalized_tools = set(_normalize_tool_names(tool_names))
+        if "browser_action" in normalized_tools:
+            guidance.append("If using browser_action, include args.action or a non-empty args.steps list.")
+        if "browser_script" in normalized_tools:
+            guidance.append("If using browser_script, args MUST include non-empty `script` JavaScript.")
+        if "browser_open" in normalized_tools or "browser_navigate" in normalized_tools:
+            guidance.append("If using browser_open/browser_navigate, include `url` or `query`.")
         guidance.extend(tool_lines)
         if capability_lines:
             guidance.extend(capability_lines)
@@ -3773,12 +3833,22 @@ class AgentService:
         goal: str,
         selected_tools: Sequence[str],
         agent_id: str,
+        required_tool_name: str = "",
+        required_tool_arg_name: str = "",
     ) -> tuple[str, bool, bool]:
         text = (output or "").strip()
         if not text:
             return "", False, False
         text, auto_transpiled = _transpile_need_tools_output(text, selected_tools=selected_tools)
         actions, _, _ = _extract_loop_actions(text, preferred_tools=selected_tools)
+        required = str(required_tool_name or "").strip().lower()
+        required_arg = str(required_tool_arg_name or "").strip()
+        if actions and required and (not _actions_include_tool(actions, required)):
+            actions = []
+        if actions and required and required_arg and (
+            not _actions_include_tool_with_nonempty_arg(actions, required, required_arg)
+        ):
+            actions = []
         if actions:
             return text, True, auto_transpiled
         if _is_blocking_question(text):
@@ -3796,6 +3866,12 @@ class AgentService:
         if corrected:
             corrected, corrected_transpiled = _transpile_need_tools_output(corrected, selected_tools=selected_tools)
             actions, _, _ = _extract_loop_actions(corrected, preferred_tools=selected_tools)
+            if actions and required and (not _actions_include_tool(actions, required)):
+                actions = []
+            if actions and required and required_arg and (
+                not _actions_include_tool_with_nonempty_arg(actions, required, required_arg)
+            ):
+                actions = []
             if actions:
                 return corrected, True, (auto_transpiled or corrected_transpiled)
             if _is_blocking_question(corrected):
@@ -4228,6 +4304,13 @@ class AgentService:
             f"Step budget: {max(1, min(max_steps, self._tool_loop_max_steps))}",
             "Selected tool APIs:",
         ]
+        selected = set(_normalize_tool_names(list(selected_tools)))
+        if "browser_action" in selected:
+            lines.append("Tool contract: browser_action must include args.action or non-empty args.steps.")
+        if "browser_script" in selected:
+            lines.append("Tool contract: browser_script args MUST include non-empty `script` JavaScript.")
+        if "browser_open" in selected or "browser_navigate" in selected:
+            lines.append("Tool contract: browser_open/browser_navigate require `url` or `query`.")
         if tool_lines:
             lines.extend(tool_lines)
         if capability_lines:
@@ -4640,6 +4723,15 @@ def _prompt_expects_action(prompt: str) -> bool:
         "lookup ",
         "implement",
         "do ",
+        "comment",
+        "reply",
+        "post ",
+        "publish",
+        "submit",
+        "click",
+        "fill",
+        "type ",
+        "press ",
     ]
     info_markers = [
         "what is",
@@ -4654,6 +4746,237 @@ def _prompt_expects_action(prompt: str) -> bool:
     return any(m in low for m in action_markers)
 
 
+def _prompt_targets_browser_surface(prompt: str) -> bool:
+    low = (prompt or "").strip().lower()
+    if not low:
+        return False
+    markers = (
+        "browser",
+        "chrome",
+        "tab",
+        "website",
+        "site",
+        "page",
+        "x.com",
+        "twitter",
+        "tweet",
+        "reddit",
+        "linkedin",
+        "facebook",
+        "instagram",
+    )
+    return any(marker in low for marker in markers)
+
+
+def _prompt_requests_web_research(prompt: str) -> bool:
+    low = (prompt or "").strip().lower()
+    if not low:
+        return False
+    markers = (
+        "search",
+        "internet",
+        "web",
+        "latest",
+        "recent",
+        "news",
+        "lookup",
+        "look up",
+    )
+    return any(marker in low for marker in markers)
+
+
+def _prompt_requires_browser_actuation(prompt: str) -> bool:
+    low = (prompt or "").strip().lower()
+    if not low:
+        return False
+    if not _prompt_expects_action(low):
+        return False
+    has_browser_surface = _prompt_targets_browser_surface(low)
+    if not has_browser_surface:
+        implicit_context_markers = (
+            "that post",
+            "this post",
+            "that tweet",
+            "this tweet",
+            "on that post",
+            "on this post",
+            "in this tab",
+            "on this tab",
+        )
+        implicit_social_markers = (
+            "comment",
+            "reply",
+            "tweet",
+            "post ",
+        )
+        has_implicit_social_context = any(marker in low for marker in implicit_context_markers) and any(
+            marker in low for marker in implicit_social_markers
+        )
+        if not has_implicit_social_context:
+            return False
+    # Pure navigation asks should not force DOM actuation.
+    navigation_only_markers = (
+        "open ",
+        "navigate",
+        "go to ",
+        "visit ",
+    )
+    actuation_markers = (
+        "comment",
+        "reply",
+        "post ",
+        "publish",
+        "submit",
+        "click",
+        "fill",
+        "type ",
+        "press ",
+        "send",
+        "like",
+        "follow",
+        "retweet",
+        "quote",
+    )
+    has_actuation = any(marker in low for marker in actuation_markers)
+    has_navigation = any(marker in low for marker in navigation_only_markers)
+    if has_actuation:
+        draft_markers = ("draft", "suggest", "sample", "example")
+        if any(marker in low for marker in draft_markers) and not any(
+            marker in low for marker in ("post", "submit", "publish", "click")
+        ):
+            return False
+        return True
+    if has_navigation:
+        return False
+    # Implicit execution on current tab/post should still be treated as actuation.
+    implicit_markers = ("this tab", "current tab", "that post", "already open")
+    return any(marker in low for marker in implicit_markers)
+
+
+def _browser_guardrail_tools_for_prompt(prompt: str, available_tool_names: Sequence[str]) -> List[str]:
+    available = set(_normalize_tool_names(list(available_tool_names)))
+    picks: List[str] = []
+
+    def _add(name: str) -> None:
+        if name in available and name not in picks:
+            picks.append(name)
+
+    requires_actuation = _prompt_requires_browser_actuation(prompt)
+    if requires_actuation:
+        for name in ("browser_status", "browser_action", "browser_extract", "browser_script"):
+            _add(name)
+    else:
+        for name in ("browser_status", "browser_extract", "browser_action", "browser_script"):
+            _add(name)
+    low = (prompt or "").strip().lower()
+    explicit_nav_markers = ("open ", "navigate", "go to ", "visit ", "http://", "https://", "www.")
+    if any(marker in low for marker in explicit_nav_markers):
+        for name in ("browser_open", "browser_navigate"):
+            _add(name)
+    return picks
+
+
+def _apply_probe_intent_guardrails(
+    prompt: str,
+    probe: ProbeDecision,
+    available_tool_names: Sequence[str],
+) -> ProbeDecision:
+    if not _prompt_requires_browser_actuation(prompt):
+        return probe
+    forced_tools = _browser_guardrail_tools_for_prompt(prompt, available_tool_names)
+    if not forced_tools:
+        return probe
+    available = set(_normalize_tool_names(list(available_tool_names)))
+    selected = [name for name in _normalize_tool_names(list(probe.tools or [])) if name in available]
+    if not _prompt_requests_web_research(prompt):
+        selected = [name for name in selected if name not in {"web_search", "mcp_search", "web_fetch"}]
+    for name in forced_tools:
+        if name not in selected:
+            selected.append(name)
+    goal = (probe.goal or prompt or "").strip()
+    max_steps = max(2, int(probe.max_steps or 1))
+    return ProbeDecision(
+        mode=PROBE_NEED_TOOLS,
+        reply="",
+        tools=selected or forced_tools,
+        goal=goal,
+        max_steps=max_steps,
+    )
+
+
+def _actions_include_tool(actions: Sequence[LoopAction], tool_name: str) -> bool:
+    want = str(tool_name or "").strip().lower()
+    if not want:
+        return False
+    for action in actions or []:
+        if action.kind != "tool":
+            continue
+        if str(action.tool_name or "").strip().lower() == want:
+            return True
+    return False
+
+
+def _has_nonempty_tool_arg(args: Dict[str, Any], arg_name: str) -> bool:
+    if not isinstance(args, dict):
+        return False
+    key = str(arg_name or "").strip()
+    if not key:
+        return False
+    if key not in args:
+        return False
+    value = args.get(key)
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, (list, tuple, dict, set)):
+        return len(value) > 0
+    return True
+
+
+def _actions_include_tool_with_nonempty_arg(
+    actions: Sequence[LoopAction],
+    tool_name: str,
+    arg_name: str,
+) -> bool:
+    want_tool = str(tool_name or "").strip().lower()
+    want_arg = str(arg_name or "").strip()
+    if not want_tool or not want_arg:
+        return False
+    for action in actions or []:
+        if action.kind != "tool":
+            continue
+        if str(action.tool_name or "").strip().lower() != want_tool:
+            continue
+        payload = dict(action.tool_args or {})
+        if want_arg == "__browser_action_contract__":
+            if not _browser_tool_args_error(want_tool, payload):
+                return True
+            continue
+        if _has_nonempty_tool_arg(dict(action.tool_args or {}), want_arg):
+            return True
+    return False
+
+
+def _browser_tool_args_error(tool_name: str, args: Dict[str, Any]) -> str:
+    name = str(tool_name or "").strip().lower()
+    payload = dict(args or {})
+    if name == "browser_action":
+        has_action = _has_nonempty_tool_arg(payload, "action")
+        has_steps = isinstance(payload.get("steps"), list) and len(payload.get("steps") or []) > 0
+        if not has_action and not has_steps:
+            return "browser_action requires args.action or non-empty args.steps."
+    if name == "browser_script":
+        if not _has_nonempty_tool_arg(payload, "script"):
+            return "browser_script requires non-empty args.script."
+    if name in {"browser_open", "browser_navigate"}:
+        has_url = _has_nonempty_tool_arg(payload, "url")
+        has_query = _has_nonempty_tool_arg(payload, "query")
+        if not has_url and not has_query:
+            return f"{name} requires either args.url or args.query."
+    return ""
+
+
 def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[str]) -> List[str]:
     low = (prompt or "").lower()
     available = set(_normalize_tool_names(list(available_tool_names)))
@@ -4666,23 +4989,28 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
     for name in ("shell_exec", "read_file", "write_file", "ssh_detect"):
         _add_tool(name)
 
-    browser_markers = ("browser", "chrome", "tab", "website", "site", "open ")
-    social_browser_markers = (
-        "x.com",
-        "twitter",
-        "tweet",
-        "reply",
-        "comment",
-        "post ",
-        "linkedin",
-        "reddit",
-        "facebook",
-        "instagram",
-    )
-    if any(marker in low for marker in browser_markers) or any(marker in low for marker in social_browser_markers):
-        # Prefer non-navigation browser tools first; only navigate when explicitly needed.
-        for name in ("browser_status", "browser_extract", "browser_script", "browser_open", "browser_navigate"):
-            _add_tool(name)
+    if _prompt_requires_browser_actuation(prompt) or _prompt_targets_browser_surface(prompt):
+        if _prompt_requires_browser_actuation(prompt):
+            for name in (
+                "browser_status",
+                "browser_action",
+                "browser_script",
+                "browser_extract",
+                "browser_open",
+                "browser_navigate",
+            ):
+                _add_tool(name)
+        else:
+            # Prefer non-navigation browser tools first; only navigate when explicitly needed.
+            for name in (
+                "browser_status",
+                "browser_extract",
+                "browser_action",
+                "browser_script",
+                "browser_open",
+                "browser_navigate",
+            ):
+                _add_tool(name)
 
     for name in ("git_status", "git_diff"):
         _add_tool(name)
@@ -4693,8 +5021,7 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
             picks.append("send_email")
     if "provider" in low and "provider_status" in available and "provider_status" not in picks:
         picks.append("provider_status")
-    web_markers = ("search", "internet", "web", "latest", "recent", "news", "lookup", "look up")
-    if any(marker in low for marker in web_markers):
+    if _prompt_requests_web_research(prompt):
         for name in ("web_search", "mcp_search"):
             _add_tool(name)
     return picks[:8]

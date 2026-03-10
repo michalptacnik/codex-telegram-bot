@@ -2,6 +2,7 @@ import os
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRegistry, ToolRequest, ToolResult
 from codex_telegram_bot.tools.browser import (
+    BrowserActionTool,
     BrowserExtractTool,
     BrowserNavigateTool,
     BrowserOpenTool,
@@ -137,6 +138,7 @@ def build_default_tool_registry(
         registry.register(BrowserOpenTool(browser_bridge))
         registry.register(BrowserNavigateTool(browser_bridge))
         registry.register(BrowserScriptTool(browser_bridge))
+        registry.register(BrowserActionTool(browser_bridge))
         registry.register(BrowserExtractTool(browser_bridge))
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
@@ -182,6 +184,7 @@ __all__ = [
     "BrowserOpenTool",
     "BrowserNavigateTool",
     "BrowserScriptTool",
+    "BrowserActionTool",
     "BrowserExtractTool",
     "GitStatusTool",
     "GitDiffTool",

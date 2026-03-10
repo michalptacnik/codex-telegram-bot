@@ -377,6 +377,33 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "required": ["script"],
         },
     },
+    "browser_action": {
+        "name": "browser_action",
+        "description": "Execute high-level browser actions in active tab without writing raw JavaScript.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "Single action: click|type|press|wait_for|scroll|focus|submit|select|extract",
+                },
+                "steps": {
+                    "type": "array",
+                    "description": "Optional multi-step action list (each item contains action + args)",
+                    "items": {"type": "object"},
+                },
+                "selector": {"type": "string", "description": "CSS selector for target element"},
+                "text": {"type": "string", "description": "Text payload for type action"},
+                "key": {"type": "string", "description": "Keyboard key for press action"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "tab_id": {"type": "integer", "description": "Optional target tab id (defaults to active tab)"},
+                "all_frames": {"type": "boolean", "description": "Run in all frames (default false)"},
+                "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": [],
+        },
+    },
     "browser_extract": {
         "name": "browser_extract",
         "description": "Extract readable page content from the active browser tab.",

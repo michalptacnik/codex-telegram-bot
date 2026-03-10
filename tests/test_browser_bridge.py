@@ -7,6 +7,7 @@ from pathlib import Path
 from codex_telegram_bot.services.browser_bridge import BrowserBridge
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest
 from codex_telegram_bot.tools.browser import (
+    BrowserActionTool,
     BrowserExtractTool,
     BrowserOpenTool,
     BrowserScriptTool,
@@ -227,6 +228,78 @@ class TestBrowserTools(unittest.TestCase):
         payload = json.loads(res.output)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["command"]["command_type"], "run_script")
+
+    def test_browser_action_queues_script_command(self):
+        bridge = BrowserBridge(heartbeat_ttl_sec=60)
+        bridge.register_client(instance_id="client-1", label="Chrome")
+        tool = BrowserActionTool(bridge=bridge)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            res = tool.run(
+                ToolRequest(
+                    name="browser_action",
+                    args={
+                        "steps": [{"action": "click", "selector": "body"}],
+                        "wait": False,
+                        "client_id": "client-1",
+                    },
+                ),
+                ToolContext(workspace_root=Path(tmp)),
+            )
+        self.assertTrue(res.ok, msg=res.output)
+        payload = json.loads(res.output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["command"]["command_type"], "run_script")
+        self.assertIn("const plan=", payload["command"]["payload"]["script"])
+
+    def test_browser_action_requires_action_or_steps(self):
+        bridge = BrowserBridge(heartbeat_ttl_sec=60)
+        bridge.register_client(instance_id="client-1", label="Chrome")
+        tool = BrowserActionTool(bridge=bridge)
+        with tempfile.TemporaryDirectory() as tmp:
+            res = tool.run(
+                ToolRequest(name="browser_action", args={"wait": False}),
+                ToolContext(workspace_root=Path(tmp)),
+            )
+        self.assertFalse(res.ok)
+        self.assertIn("action is required", res.output.lower())
+
+    def test_browser_action_normalizes_completed_result(self):
+        class _CompletedBridge:
+            def enqueue_command(self, **kwargs):
+                return {
+                    "ok": True,
+                    "command": {
+                        "command_id": "cmd-1",
+                        "status": "completed",
+                        "command_type": "run_script",
+                        "data": {
+                            "tab_id": 7,
+                            "result": {
+                                "ok": True,
+                                "url": "https://example.com",
+                                "title": "Example",
+                                "steps": [{"index": 0, "action": "click", "ok": True}],
+                            },
+                        },
+                    },
+                }
+
+        tool = BrowserActionTool(bridge=_CompletedBridge())
+        with tempfile.TemporaryDirectory() as tmp:
+            res = tool.run(
+                ToolRequest(
+                    name="browser_action",
+                    args={"action": "click", "selector": "body", "wait": True},
+                ),
+                ToolContext(workspace_root=Path(tmp)),
+            )
+        self.assertTrue(res.ok, msg=res.output)
+        payload = json.loads(res.output)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["tab_id"], 7)
+        self.assertEqual(payload["title"], "Example")
+        self.assertEqual(payload["command_id"], "cmd-1")
 
     def test_browser_script_reports_outdated_extension_message(self):
         class _UnsupportedBridge:
