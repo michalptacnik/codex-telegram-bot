@@ -69,13 +69,22 @@ def main() -> int:
         print("FAIL: no active Chrome extension client is connected.")
         return 2
 
+    clients = status_body.get("clients") if isinstance(status_body.get("clients"), list) else []
+    active_tab_url = ""
+    if clients and isinstance(clients[0], dict):
+        active_tab_url = str(clients[0].get("active_tab_url") or "").strip()
+    smoke_url = str(args.open_url)
+    if active_tab_url.lower().startswith(("http://", "https://")):
+        smoke_url = active_tab_url
+
     open_resp = _http_json(
         base_url=args.base_url,
         path="/api/browser/command",
         method="POST",
         payload={
             "command_type": "open_url",
-            "payload": {"url": str(args.open_url), "new_tab": True, "active": True},
+            # Run smoke in a background tab to avoid hijacking user's active tab.
+            "payload": {"url": smoke_url, "new_tab": True, "active": False},
             "wait": True,
             "timeout_sec": int(args.timeout_sec),
         },
@@ -86,13 +95,28 @@ def main() -> int:
         print("FAIL: open_url command failed.")
         return 3
 
+    tab_id = 0
+    try:
+        open_body = open_resp.get("body") if isinstance(open_resp.get("body"), dict) else {}
+        open_command = open_body.get("command") if isinstance(open_body.get("command"), dict) else {}
+        open_data = open_command.get("data") if isinstance(open_command.get("data"), dict) else {}
+        tab_id = int(open_data.get("tab_id") or 0)
+    except Exception:
+        tab_id = 0
+
+    run_payload: Dict[str, Any] = {
+        "script": "return { title: document.title, url: location.href };",
+    }
+    if tab_id > 0:
+        run_payload["tab_id"] = int(tab_id)
+
     run_script = _http_json(
         base_url=args.base_url,
         path="/api/browser/command",
         method="POST",
         payload={
             "command_type": "run_script",
-            "payload": {"script": "return { title: document.title, url: location.href };"},
+            "payload": run_payload,
             "wait": True,
             "timeout_sec": int(args.timeout_sec),
         },

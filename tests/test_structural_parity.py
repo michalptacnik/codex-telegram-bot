@@ -24,6 +24,22 @@ class TestStructuralParityHeuristics(unittest.TestCase):
         )
         self.assertIn("browser_open", picks)
 
+    def test_probe_defaults_prefer_non_navigation_tools_for_social_intent(self):
+        picks = _default_probe_tools_for_prompt(
+            "Find a post on x.com and draft a reply comment in my style",
+            available_tool_names=[
+                "shell_exec",
+                "browser_status",
+                "browser_open",
+                "browser_navigate",
+                "browser_script",
+                "browser_extract",
+            ],
+        )
+        self.assertIn("browser_extract", picks)
+        self.assertIn("browser_open", picks)
+        self.assertLess(picks.index("browser_extract"), picks.index("browser_open"))
+
     def test_prompt_echo_detection(self):
         prompt = "Search the internet for the 10 best CRM companies and provide sources."
         output = "Search the internet for the 10 best CRM companies and provide sources."

@@ -339,6 +339,7 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "active": "bool (optional, default=true)",
             "wait": "bool (optional, default=true)",
             "timeout_sec": "int (optional, default=180)",
+            "note": "Use only when user explicitly asked to open/navigate to a URL.",
         },
     },
     "browser_navigate": {
@@ -351,6 +352,7 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
             "active": "bool (optional, default=true)",
             "wait": "bool (optional, default=true)",
             "timeout_sec": "int (optional, default=180)",
+            "note": "Use only when user explicitly asked to navigate current tab.",
         },
     },
     "browser_script": {
@@ -4665,8 +4667,21 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
         _add_tool(name)
 
     browser_markers = ("browser", "chrome", "tab", "website", "site", "open ")
-    if any(marker in low for marker in browser_markers):
-        for name in ("browser_status", "browser_open", "browser_navigate", "browser_script", "browser_extract"):
+    social_browser_markers = (
+        "x.com",
+        "twitter",
+        "tweet",
+        "reply",
+        "comment",
+        "post ",
+        "linkedin",
+        "reddit",
+        "facebook",
+        "instagram",
+    )
+    if any(marker in low for marker in browser_markers) or any(marker in low for marker in social_browser_markers):
+        # Prefer non-navigation browser tools first; only navigate when explicitly needed.
+        for name in ("browser_status", "browser_extract", "browser_script", "browser_open", "browser_navigate"):
             _add_tool(name)
 
     for name in ("git_status", "git_diff"):

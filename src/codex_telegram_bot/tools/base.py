@@ -330,7 +330,7 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "browser_open": {
         "name": "browser_open",
-        "description": "Open a public URL in the connected Chrome browser session.",
+        "description": "Open a public URL in the connected Chrome browser session. Use only when navigation is explicitly requested.",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -347,7 +347,7 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
     },
     "browser_navigate": {
         "name": "browser_navigate",
-        "description": "Navigate the currently active tab in the connected Chrome session.",
+        "description": "Navigate the currently active tab in the connected Chrome session. Use only when navigation is explicitly requested.",
         "input_schema": {
             "type": "object",
             "properties": {

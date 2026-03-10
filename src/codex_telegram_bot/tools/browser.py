@@ -51,7 +51,7 @@ class BrowserStatusTool:
 
 class BrowserOpenTool:
     name = "browser_open"
-    description = "Open a URL in the connected Chrome session."
+    description = "Open a URL in the connected Chrome session (only when navigation is explicitly required)."
 
     def __init__(self, bridge: Any = None) -> None:
         self._bridge = bridge
@@ -93,7 +93,7 @@ class BrowserOpenTool:
 
 class BrowserNavigateTool:
     name = "browser_navigate"
-    description = "Navigate current tab in connected Chrome session."
+    description = "Navigate current tab in connected Chrome session (only when navigation is explicitly required)."
 
     def __init__(self, bridge: Any = None) -> None:
         self._bridge = bridge
