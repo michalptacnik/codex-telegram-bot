@@ -1013,18 +1013,24 @@ class AgentService:
                     return msg
 
                 action_id = "tool-" + uuid.uuid4().hex[:8]
-                result = await self._execute_registered_tool_action(
-                    action_id=action_id,
-                    tool_name=tool_name,
-                    tool_args=dict(tool_input or {}),
-                    workspace_root=workspace_root,
-                    policy_profile=policy_profile,
-                    extra_tools=dict(snapshot.tools),
-                    allowed_tool_names=snapshot.names(),
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    session_id=session_id,
-                )
+
+                # Pre-validate browser tool args before execution
+                browser_arg_err = _browser_tool_args_error(tool_name, dict(tool_input or {}))
+                if browser_arg_err:
+                    result = ToolResult(ok=False, output=browser_arg_err)
+                else:
+                    result = await self._execute_registered_tool_action(
+                        action_id=action_id,
+                        tool_name=tool_name,
+                        tool_args=dict(tool_input or {}),
+                        workspace_root=workspace_root,
+                        policy_profile=policy_profile,
+                        extra_tools=dict(snapshot.tools),
+                        allowed_tool_names=snapshot.names(),
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
 
                 # Truncate large results
                 result_text = (result.output or "")
@@ -3718,6 +3724,9 @@ class AgentService:
         tool_name, tool_args = parsed
         if tool_name not in snapshot.names():
             return None
+        browser_arg_error = _browser_tool_args_error(tool_name, tool_args)
+        if browser_arg_error:
+            return f"Error: {browser_arg_error}"
         action_id = "tool-" + uuid.uuid4().hex[:8]
         result = await self._execute_registered_tool_action(
             action_id=action_id,
@@ -3805,8 +3814,13 @@ class AgentService:
             "Selected tool APIs:",
         ]
         normalized_tools = set(_normalize_tool_names(tool_names))
+        if "browser_snapshot" in normalized_tools:
+            guidance.append(
+                "CRITICAL: Call browser_snapshot FIRST to see page elements before using browser_action. "
+                "Use ref numbers from the snapshot for reliable element targeting."
+            )
         if "browser_action" in normalized_tools:
-            guidance.append("If using browser_action, include args.action or a non-empty args.steps list.")
+            guidance.append("If using browser_action, include args.action or a non-empty args.steps list. Use ref from browser_snapshot for targeting.")
         if "browser_script" in normalized_tools:
             guidance.append("If using browser_script, args MUST include non-empty `script` JavaScript.")
         if "browser_open" in normalized_tools or "browser_navigate" in normalized_tools:
@@ -4113,7 +4127,7 @@ class AgentService:
         try:
             await callback(payload)
         except Exception:
-            logger.exception("tool loop progress callback failed")
+            logger.debug("tool loop progress callback failed", exc_info=True)
 
     async def _wait_job_with_progress(
         self,
@@ -4305,8 +4319,14 @@ class AgentService:
             "Selected tool APIs:",
         ]
         selected = set(_normalize_tool_names(list(selected_tools)))
+        if "browser_snapshot" in selected:
+            lines.append(
+                "Browser workflow: ALWAYS call browser_snapshot FIRST to see page elements and get "
+                "element refs. Then use ref parameter in browser_action to interact. Cycle: "
+                "navigate → snapshot → read refs → act on ref → snapshot → verify."
+            )
         if "browser_action" in selected:
-            lines.append("Tool contract: browser_action must include args.action or non-empty args.steps.")
+            lines.append("Tool contract: browser_action must include args.action or non-empty args.steps. Use ref from browser_snapshot for reliable targeting.")
         if "browser_script" in selected:
             lines.append("Tool contract: browser_script args MUST include non-empty `script` JavaScript.")
         if "browser_open" in selected or "browser_navigate" in selected:
@@ -4863,10 +4883,10 @@ def _browser_guardrail_tools_for_prompt(prompt: str, available_tool_names: Seque
 
     requires_actuation = _prompt_requires_browser_actuation(prompt)
     if requires_actuation:
-        for name in ("browser_status", "browser_action", "browser_extract", "browser_script"):
+        for name in ("browser_status", "browser_snapshot", "browser_action", "browser_extract", "browser_script"):
             _add(name)
     else:
-        for name in ("browser_status", "browser_extract", "browser_action", "browser_script"):
+        for name in ("browser_status", "browser_snapshot", "browser_extract", "browser_action", "browser_script"):
             _add(name)
     low = (prompt or "").strip().lower()
     explicit_nav_markers = ("open ", "navigate", "go to ", "visit ", "http://", "https://", "www.")
@@ -4993,9 +5013,11 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
         if _prompt_requires_browser_actuation(prompt):
             for name in (
                 "browser_status",
+                "browser_snapshot",
                 "browser_action",
                 "browser_script",
                 "browser_extract",
+                "browser_screenshot",
                 "browser_open",
                 "browser_navigate",
             ):
@@ -5004,9 +5026,11 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
             # Prefer non-navigation browser tools first; only navigate when explicitly needed.
             for name in (
                 "browser_status",
+                "browser_snapshot",
                 "browser_extract",
                 "browser_action",
                 "browser_script",
+                "browser_screenshot",
                 "browser_open",
                 "browser_navigate",
             ):
@@ -5024,7 +5048,7 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
     if _prompt_requests_web_research(prompt):
         for name in ("web_search", "mcp_search"):
             _add_tool(name)
-    return picks[:8]
+    return picks[:12]
 
 
 def _render_tool_schema_lines(selected_tools: Sequence[str]) -> List[str]:

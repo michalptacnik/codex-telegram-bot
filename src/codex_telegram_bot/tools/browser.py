@@ -5,7 +5,7 @@ import os
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from codex_telegram_bot.tools.base import ToolContext, ToolRequest, ToolResult
 
@@ -299,6 +299,158 @@ class BrowserExtractTool:
         return ToolResult(ok=True, output=json.dumps(normalized, ensure_ascii=True))
 
 
+# ---------------------------------------------------------------------------
+# Snapshot — accessibility tree with numeric element refs (OpenClaw parity)
+# ---------------------------------------------------------------------------
+
+_BROWSER_SNAPSHOT_DEFAULT_MAX_ELEMENTS = 200
+_BROWSER_SNAPSHOT_MAX_ELEMENTS = 500
+
+
+def _format_snapshot_for_agent(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert raw snapshot result into compact LLM-readable format."""
+    elements = snapshot.get("elements") or []
+    lines: List[str] = []
+    for el in elements:
+        ref = el.get("ref", 0)
+        tag = str(el.get("tag") or "")
+        role = str(el.get("role") or "")
+        name = str(el.get("name") or "")
+        text = str(el.get("text") or "")[:80]
+        el_type = str(el.get("type") or "")
+        href = str(el.get("href") or "")
+        placeholder = str(el.get("placeholder") or "")
+        parts: List[str] = [f"ref:{ref}"]
+        if role:
+            parts.append(f"[{role}]")
+        parts.append(f"<{tag}>")
+        if name:
+            parts.append(f'"{name}"')
+        elif text:
+            parts.append(f'"{text}"')
+        if el_type:
+            parts.append(f"type={el_type}")
+        if placeholder:
+            parts.append(f"placeholder={placeholder}")
+        if href:
+            parts.append(f"href={href[:80]}")
+        lines.append(" ".join(parts))
+    return {
+        "ok": True,
+        "url": str(snapshot.get("url") or ""),
+        "title": str(snapshot.get("title") or ""),
+        "element_count": len(elements),
+        "total_on_page": int(snapshot.get("total_elements_on_page") or 0),
+        "truncated": bool(snapshot.get("truncated")),
+        "elements": "\n".join(lines),
+    }
+
+
+class BrowserSnapshotTool:
+    name = "browser_snapshot"
+    description = (
+        "Get accessibility tree snapshot of active tab with numeric element refs. "
+        "ALWAYS call before browser_action to see page elements."
+    )
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        max_elements = _to_int(
+            request.args.get("max_elements"),
+            default=_BROWSER_SNAPSHOT_DEFAULT_MAX_ELEMENTS,
+            min_value=10,
+            max_value=_BROWSER_SNAPSHOT_MAX_ELEMENTS,
+        )
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        tab_id = _to_int(request.args.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647)
+
+        payload: Dict[str, Any] = {"max_elements": max_elements}
+        if tab_id > 0:
+            payload["tab_id"] = int(tab_id)
+
+        result = _run_browser_command(
+            bridge=self._bridge,
+            command_type="snapshot",
+            payload=payload,
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+        if not result.ok:
+            return result
+
+        try:
+            parsed = json.loads(result.output)
+        except Exception:
+            return result
+        if not isinstance(parsed, dict) or bool(parsed.get("pending")):
+            return result
+        command = parsed.get("command")
+        if not isinstance(command, dict):
+            return result
+        data = command.get("data")
+        if not isinstance(data, dict):
+            return result
+        snapshot = data.get("result")
+        if not isinstance(snapshot, dict):
+            return result
+
+        # Cache the ref map on the bridge for ref-based browser_action
+        ref_map = snapshot.get("ref_map")
+        if isinstance(ref_map, dict) and self._bridge is not None:
+            try:
+                self._bridge.set_snapshot_ref_map(ref_map)
+            except Exception:
+                pass
+
+        normalized = _format_snapshot_for_agent(snapshot)
+        return ToolResult(ok=True, output=json.dumps(normalized, ensure_ascii=True))
+
+
+class BrowserScreenshotTool:
+    name = "browser_screenshot"
+    description = "Capture a screenshot of the visible browser tab. Returns base64 image data."
+
+    def __init__(self, bridge: Any = None) -> None:
+        self._bridge = bridge
+
+    def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        client_id = _normalize_client_id(request.args.get("client_id", ""))
+        wait = _to_bool(request.args.get("wait"), default=True)
+        timeout_sec = _to_int(
+            request.args.get("timeout_sec"),
+            default=_BROWSER_WAIT_DEFAULT_SEC,
+            min_value=1,
+            max_value=_BROWSER_WAIT_MAX_SEC,
+        )
+        tab_id = _to_int(request.args.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647)
+        fmt = str(request.args.get("format", "png") or "png").strip().lower()
+        if fmt not in {"png", "jpeg"}:
+            fmt = "png"
+
+        payload: Dict[str, Any] = {"format": fmt}
+        if tab_id > 0:
+            payload["tab_id"] = int(tab_id)
+
+        return _run_browser_command(
+            bridge=self._bridge,
+            command_type="screenshot",
+            payload=payload,
+            client_id=client_id,
+            wait=wait,
+            timeout_sec=timeout_sec,
+        )
+
+
 class BrowserActionTool:
     name = "browser_action"
     description = (
@@ -316,7 +468,16 @@ class BrowserActionTool:
         if not plan:
             return ToolResult(ok=False, output="action or steps is required.")
 
-        script = _build_browser_action_script(plan)
+        # Fetch ref map from bridge if any step uses ref-based targeting
+        ref_map: Optional[Dict[str, str]] = None
+        has_refs = any(isinstance(step.get("ref"), int) and step["ref"] > 0 for step in plan)
+        if has_refs and self._bridge is not None:
+            try:
+                ref_map = self._bridge.get_snapshot_ref_map()
+            except Exception:
+                ref_map = None
+
+        script = _build_browser_action_script(plan, ref_map=ref_map)
         if len(script) > _BROWSER_SCRIPT_MAX_CHARS:
             return ToolResult(
                 ok=False,
@@ -672,7 +833,11 @@ def _normalize_browser_action_step(step: Dict[str, Any], *, default_timeout_ms: 
     index = _to_int(step.get("index"), default=0, min_value=0, max_value=50)
     scroll = _to_bool(step.get("scroll"), default=True)
 
+    ref = _to_int(step.get("ref"), default=0, min_value=0, max_value=10000)
+
     out: Dict[str, Any] = {"action": action, "timeout_ms": timeout_ms}
+    if ref > 0:
+        out["ref"] = ref
     if selector:
         out["selector"] = selector
     if text_contains:
@@ -684,8 +849,8 @@ def _normalize_browser_action_step(step: Dict[str, Any], *, default_timeout_ms: 
     if not scroll:
         out["scroll"] = False
 
-    if action in {"click", "type", "focus", "submit", "select"} and (not selector and not text_contains):
-        return {}, f"action '{action}' requires selector or text_contains."
+    if action in {"click", "type", "focus", "submit", "select"} and (not selector and not text_contains and ref <= 0):
+        return {}, f"action '{action}' requires ref, selector, or text_contains."
 
     if action == "type":
         text = _clip_string(step.get("text") if "text" in step else step.get("value"), _BROWSER_ACTION_MAX_TEXT_CHARS)
@@ -772,17 +937,21 @@ def _clip_string(value: Any, max_len: int) -> str:
     return text[: max(1, int(max_len))]
 
 
-def _build_browser_action_script(plan: List[Dict[str, Any]]) -> str:
+def _build_browser_action_script(plan: List[Dict[str, Any]], ref_map: Optional[Dict[str, str]] = None) -> str:
     steps_json = json.dumps(plan, ensure_ascii=True, separators=(",", ":"))
+    ref_map_json = json.dumps(ref_map or {}, ensure_ascii=True, separators=(",", ":"))
     return (
         f"const plan={steps_json};\n"
+        f"const __refMap={ref_map_json};\n"
         "const now=()=>Date.now();\n"
         "const sleep=(ms)=>new Promise((r)=>setTimeout(r,Math.max(0,Number(ms)||0)));\n"
         "const txt=(v,m)=>String(v==null?\"\":v).slice(0,m||4000);\n"
         "const bodyText=()=>txt((document.body&&document.body.innerText)||\"\",120000);\n"
         "const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,Number(v)||0));\n"
         "const elText=(el)=>txt((el&&(el.innerText||el.textContent||el.value||\"\"))||\"\",2000);\n"
-        "const query=(step)=>{let nodes=[];const sels=[];if(step.selector)sels.push(String(step.selector));"
+        "const query=(step)=>{"
+        "if(step.ref){const sel=__refMap[String(step.ref)];if(sel){try{const el=document.querySelector(sel);if(el)return el;}catch(_){}}}"
+        "let nodes=[];const sels=[];if(step.selector)sels.push(String(step.selector));"
         "if(!sels.length&&step.text_contains)sels.push(\"button,a,[role='button'],input,textarea,article,div,span\");"
         "for(const sel of sels){try{nodes=nodes.concat(Array.from(document.querySelectorAll(sel)));}catch(_e){}}"
         "if(step.text_contains){const needle=String(step.text_contains).toLowerCase();"

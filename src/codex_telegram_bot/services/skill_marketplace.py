@@ -118,10 +118,13 @@ class SkillMarketplace:
 
     def search(self, query: str, source: str = "", refresh: bool = False, limit: int = 50) -> List[Dict[str, Any]]:
         normalized_source = str(source or "").strip().lower()
-        if refresh:
-            self.refresh(source_name=normalized_source or None, force=True)
-        elif self._is_cache_stale(normalized_source):
-            self.refresh(source_name=normalized_source or None, force=False)
+        try:
+            if refresh:
+                self.refresh(source_name=normalized_source or None, force=True)
+            elif self._is_cache_stale(normalized_source):
+                self.refresh(source_name=normalized_source or None, force=False)
+        except Exception:
+            pass  # stale-cache refresh failures should not block page load
         if self._store is None:
             return []
         return self._store.list_skill_catalog_entries(
@@ -361,7 +364,10 @@ class SkillMarketplace:
         if not src.repo or not src.path:
             return []
         listing_url = f"https://api.github.com/repos/{src.repo}/contents/{src.path}?ref={src.ref}"
-        listing = json.loads(self._http_get_text(listing_url))
+        try:
+            listing = json.loads(self._http_get_text(listing_url))
+        except Exception:
+            return []
         if not isinstance(listing, list):
             return []
         out: List[Dict[str, Any]] = []

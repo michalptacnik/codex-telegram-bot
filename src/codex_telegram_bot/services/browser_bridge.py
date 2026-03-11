@@ -59,6 +59,19 @@ class BrowserBridge:
         self._queue_by_client: Dict[str, List[str]] = {}
         self._commands: Dict[str, BrowserCommand] = {}
         self._lock = threading.Lock()
+        self._last_snapshot_ref_map: Dict[str, str] = {}
+
+    # ------------------------------------------------------------------
+    # Snapshot ref map — caches ref_id -> CSS selector from last snapshot
+    # ------------------------------------------------------------------
+
+    def set_snapshot_ref_map(self, ref_map: Dict[str, str]) -> None:
+        with self._lock:
+            self._last_snapshot_ref_map = dict(ref_map or {})
+
+    def get_snapshot_ref_map(self) -> Dict[str, str]:
+        with self._lock:
+            return dict(self._last_snapshot_ref_map)
 
     # ------------------------------------------------------------------
     # Client lifecycle

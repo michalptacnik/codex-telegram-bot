@@ -997,6 +997,50 @@ async def handle_profile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         await update.message.reply_text(f"Error: {str(exc)[:220]}")
 
 
+async def handle_profiles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        agent_service = context.bot_data.get("agent_service")
+        state = agent_service.execution_profile_state()
+        lines = [
+            "Execution profiles: `safe`, `power_user`, `unsafe`",
+            f"Current: `{state.get('profile', 'safe')}`",
+            f"UNSAFE active: `{bool(state.get('unsafe_active', False))}`",
+        ]
+        warning = str(agent_service.execution_profile_warning() or "").strip()
+        if warning:
+            lines.append(warning)
+        lines.append("Switch: `/profile safe|power_user|unsafe`")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as exc:
+        logger.exception("Profiles handler error: %s", exc)
+
+
+async def handle_backend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        if not update.message or not update.effective_chat:
+            return
+        user_id = update.message.from_user.id if update.message.from_user else 0
+        allowlist = context.bot_data.get("allowlist")
+        if not is_allowed(user_id, allowlist):
+            return
+        agent_service = context.bot_data.get("agent_service")
+        current = agent_service.default_provider_name()
+        available = agent_service.available_provider_names()
+        lines = [
+            f"Active provider: `{current}`",
+            f"Available: {', '.join(f'`{n}`' for n in available) if available else 'none'}",
+        ]
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    except Exception as exc:
+        logger.exception("Backend handler error: %s", exc)
+
+
 async def handle_workspace(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         if not update.message or not update.effective_chat:

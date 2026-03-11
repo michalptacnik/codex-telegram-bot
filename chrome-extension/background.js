@@ -16,9 +16,10 @@ const STATE_DEFAULTS = {
 const ALARM_NAME = "agenthq-bridge-heartbeat";
 const ALARM_PERIOD_MINUTES_PREFERRED = 0.5;
 const ALARM_PERIOD_MINUTES_FALLBACK = 1;
-const FOLLOWUP_POLL_IDLE_MS = 5000;
-const FOLLOWUP_POLL_BUSY_MS = 1500;
+const FOLLOWUP_POLL_IDLE_MS = 1500;
+const FOLLOWUP_POLL_BUSY_MS = 500;
 const SCRIPT_RESULT_MAX_CHARS = 4000;
+const SNAPSHOT_RESULT_MAX_CHARS = 80000;
 const COMMAND_RESULT_CACHE_TTL_MS = 10 * 60 * 1000;
 const COMMAND_RESULT_CACHE_MAX = 200;
 
@@ -349,44 +350,88 @@ async function postCommandResult(instanceId, commandId, ok, output, data) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Navigation helpers
+// ---------------------------------------------------------------------------
+
+async function waitForTabComplete(tabId, timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || 15000);
+  return new Promise((resolve) => {
+    function listener(updatedTabId, changeInfo) {
+      if (updatedTabId === tabId && changeInfo.status === "complete") {
+        chrome.tabs.onUpdated.removeListener(listener);
+        resolve(true);
+      }
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+    const remaining = Math.max(0, deadline - Date.now());
+    setTimeout(() => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      resolve(false);
+    }, remaining);
+  });
+}
+
 async function openOrNavigate(url, opts) {
   const options = opts || {};
   const active = options.active !== false;
   if (options.new_tab === true) {
     const tab = await chrome.tabs.create({ url, active });
+    const tabId = tab.id || 0;
+    if (tabId) {
+      await waitForTabComplete(tabId, 15000);
+      try {
+        const updated = await chrome.tabs.get(tabId);
+        return {
+          ok: true,
+          output: `Opened new tab ${tabId}`,
+          data: { tab_id: tabId, url: updated.url || url, title: updated.title || "" }
+        };
+      } catch (_e) { /* tab may have closed */ }
+    }
     return {
       ok: true,
-      output: `Opened new tab ${tab.id || ""}`,
-      data: {
-        tab_id: tab.id || 0,
-        url: tab.url || url,
-        title: tab.title || ""
-      }
+      output: `Opened new tab ${tabId}`,
+      data: { tab_id: tabId, url: tab.url || url, title: tab.title || "" }
     };
   }
 
   const current = await getActiveTab();
   if (!current || !current.id) {
     const created = await chrome.tabs.create({ url, active });
+    const cid = created.id || 0;
+    if (cid) {
+      await waitForTabComplete(cid, 15000);
+      try {
+        const updated = await chrome.tabs.get(cid);
+        return {
+          ok: true,
+          output: `Opened tab ${cid}`,
+          data: { tab_id: cid, url: updated.url || url, title: updated.title || "" }
+        };
+      } catch (_e) { /* */ }
+    }
     return {
       ok: true,
-      output: `Opened tab ${created.id || ""}`,
-      data: {
-        tab_id: created.id || 0,
-        url: created.url || url,
-        title: created.title || ""
-      }
+      output: `Opened tab ${cid}`,
+      data: { tab_id: cid, url: created.url || url, title: created.title || "" }
     };
   }
   const updated = await chrome.tabs.update(current.id, { url, active });
+  const uid = updated.id || current.id;
+  await waitForTabComplete(uid, 15000);
+  try {
+    const final = await chrome.tabs.get(uid);
+    return {
+      ok: true,
+      output: `Navigated tab ${uid}`,
+      data: { tab_id: uid, url: final.url || url, title: final.title || "" }
+    };
+  } catch (_e) { /* */ }
   return {
     ok: true,
-    output: `Navigated tab ${updated.id || current.id}`,
-    data: {
-      tab_id: updated.id || current.id,
-      url: updated.url || url,
-      title: updated.title || ""
-    }
+    output: `Navigated tab ${uid}`,
+    data: { tab_id: uid, url: updated.url || url, title: updated.title || "" }
   };
 }
 
@@ -621,6 +666,187 @@ async function executeScript(payload) {
   return await executeScriptViaDebugger(tabId, script);
 }
 
+// ---------------------------------------------------------------------------
+// Snapshot — accessibility tree with numeric element refs
+// ---------------------------------------------------------------------------
+
+async function executeSnapshot(payload) {
+  const tabId = await resolveTargetTabId(payload || {});
+  if (!tabId) {
+    return { ok: false, output: "No target tab available.", data: {} };
+  }
+  const maxElements = Math.min(Math.max(10, Number(payload.max_elements || 200)), 500);
+
+  try {
+    const injections = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: false },
+      func: (budget) => {
+        const INTERACTIVE = new Set([
+          "A","BUTTON","INPUT","TEXTAREA","SELECT","SUMMARY","DETAILS"
+        ]);
+        const STRUCTURAL = new Set([
+          "MAIN","NAV","HEADER","FOOTER","ASIDE","SECTION","ARTICLE","FORM","TABLE",
+          "H1","H2","H3","H4","H5","H6"
+        ]);
+        const ROLE_INTERACTIVE = new Set([
+          "button","link","tab","checkbox","radio","menuitem","option","switch",
+          "combobox","listbox","slider","spinbutton","searchbox","textbox"
+        ]);
+
+        function isVisible(el) {
+          if (!el || !el.getBoundingClientRect) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width === 0 && r.height === 0) return false;
+          const s = window.getComputedStyle(el);
+          if (s.display === "none" || s.visibility === "hidden") return false;
+          return true;
+        }
+
+        function uniqueSelector(el) {
+          if (el.id) return "#" + CSS.escape(el.id);
+          const parts = [];
+          let cur = el;
+          while (cur && cur !== document.body && cur !== document.documentElement) {
+            let seg = cur.tagName.toLowerCase();
+            if (cur.id) { parts.unshift("#" + CSS.escape(cur.id)); break; }
+            const parent = cur.parentElement;
+            if (parent) {
+              const siblings = Array.from(parent.children).filter(c => c.tagName === cur.tagName);
+              if (siblings.length > 1) {
+                seg += ":nth-of-type(" + (siblings.indexOf(cur) + 1) + ")";
+              }
+            }
+            parts.unshift(seg);
+            cur = cur.parentElement;
+          }
+          return parts.join(" > ");
+        }
+
+        function clipStr(s, n) { return s && s.length > n ? s.slice(0, n) : (s || ""); }
+
+        const elements = [];
+        const refMap = {};
+        let refCounter = 0;
+        let totalOnPage = 0;
+
+        const walker = document.createTreeWalker(
+          document.body || document.documentElement,
+          NodeFilter.SHOW_ELEMENT,
+          null
+        );
+        let node = walker.currentNode;
+        while (node) {
+          if (node.nodeType === Node.ELEMENT_NODE) {
+            const tag = node.tagName || "";
+            const role = (node.getAttribute("role") || "").toLowerCase();
+            const ce = node.hasAttribute("contenteditable") && node.getAttribute("contenteditable") !== "false";
+            const isInteractive = INTERACTIVE.has(tag) || ROLE_INTERACTIVE.has(role) || ce;
+            const isStructural = STRUCTURAL.has(tag);
+
+            if ((isInteractive || isStructural) && isVisible(node)) {
+              totalOnPage++;
+              if (elements.length < budget) {
+                refCounter++;
+                const ref = refCounter;
+                const sel = uniqueSelector(node);
+                const entry = { ref: ref, tag: tag.toLowerCase(), role: role };
+                const ariaLabel = node.getAttribute("aria-label") || "";
+                const name = ariaLabel || node.getAttribute("name") || node.getAttribute("title") || "";
+                if (name) entry.name = clipStr(name, 120);
+                const text = clipStr((node.innerText || node.textContent || "").replace(/\s+/g, " ").trim(), 120);
+                if (text && text !== name) entry.text = text;
+                if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") {
+                  const t = node.getAttribute("type") || "";
+                  if (t) entry.type = t;
+                  const ph = node.getAttribute("placeholder") || "";
+                  if (ph) entry.placeholder = clipStr(ph, 80);
+                  if (node.value) entry.value = clipStr(String(node.value), 80);
+                }
+                if (tag === "A") {
+                  const href = node.getAttribute("href") || "";
+                  if (href) entry.href = clipStr(href, 200);
+                }
+                if (node.checked !== undefined) entry.checked = Boolean(node.checked);
+                if (node.selected !== undefined) entry.selected = Boolean(node.selected);
+                entry.selector_path = sel;
+                elements.push(entry);
+                refMap[String(ref)] = sel;
+              }
+            }
+          }
+          node = walker.nextNode();
+        }
+
+        return {
+          url: String(location.href || ""),
+          title: String(document.title || ""),
+          elements: elements,
+          ref_map: refMap,
+          total_elements_on_page: totalOnPage,
+          truncated: totalOnPage > budget
+        };
+      },
+      args: [maxElements]
+    });
+
+    const first = Array.isArray(injections) && injections.length ? injections[0] : null;
+    const result = first && first.result ? first.result : null;
+    if (!result) {
+      return { ok: false, output: "Snapshot returned no result.", data: {} };
+    }
+
+    const output = clipText(JSON.stringify(result), SNAPSHOT_RESULT_MAX_CHARS);
+    return {
+      ok: true,
+      output: `Snapshot captured for tab ${tabId}: ${(result.elements || []).length} elements`,
+      data: {
+        tab_id: tabId,
+        result: result
+      }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return {
+      ok: false,
+      output: `Snapshot failed on tab ${tabId}: ${msg}`,
+      data: { tab_id: tabId, error: msg }
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Screenshot — capture visible tab as base64 image
+// ---------------------------------------------------------------------------
+
+async function executeScreenshot(payload) {
+  const fmt = String(payload.format || "png").toLowerCase();
+  const format = fmt === "jpeg" ? "jpeg" : "png";
+  try {
+    const dataUrl = await chrome.tabs.captureVisibleTab(null, { format: format });
+    const tabId = await resolveTargetTabId(payload || {});
+    return {
+      ok: true,
+      output: `Screenshot captured (${format})`,
+      data: {
+        tab_id: tabId || 0,
+        image_data: dataUrl,
+        format: format
+      }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return {
+      ok: false,
+      output: `Screenshot failed: ${msg}`,
+      data: { error: msg }
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Command dispatch
+// ---------------------------------------------------------------------------
+
 async function executeCommand(command) {
   const type = String(command.command_type || "");
   const payload = command.payload || {};
@@ -646,6 +872,12 @@ async function executeCommand(command) {
   }
   if (type === "run_script") {
     return await executeScript(payload);
+  }
+  if (type === "snapshot") {
+    return await executeSnapshot(payload);
+  }
+  if (type === "screenshot") {
+    return await executeScreenshot(payload);
   }
   return {
     ok: false,

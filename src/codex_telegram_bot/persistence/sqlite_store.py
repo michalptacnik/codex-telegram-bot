@@ -45,13 +45,33 @@ class SqliteRunStore:
         self._db_path = Path(db_path).expanduser().resolve()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info("sqlite_store.init db_path=%s", str(self._db_path))
+        self._persistent_conn: Optional[sqlite3.Connection] = None
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self._db_path))
+        if self._persistent_conn is not None:
+            try:
+                self._persistent_conn.execute("SELECT 1")
+                return self._persistent_conn
+            except Exception:
+                try:
+                    self._persistent_conn.close()
+                except Exception:
+                    pass
+                self._persistent_conn = None
+        conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 2000")
+        self._persistent_conn = conn
         return conn
+
+    def close(self) -> None:
+        if self._persistent_conn is not None:
+            try:
+                self._persistent_conn.close()
+            except Exception:
+                pass
+            self._persistent_conn = None
 
     def _init_schema(self) -> None:
         with self._connect() as conn:

@@ -22,7 +22,12 @@ This is the active parity matrix for the OpenClaw-style runtime goals.
 | Gateway/control plane | Admin UI + sessions/runs APIs + health/audit | Done | `control_center/app.py` |
 | Docker sandbox execution | Run tool commands in Docker sandbox | Partial | Opt-in runner via `EXECUTION_BACKEND=docker` |
 | Always-alive agent daemon | Cron-driven heartbeat + system watchers + proactive delivery | Done | `services/cron_agent.py` + `--daemon` CLI + systemd |
-| Signed trust model for skill packs | Signature verification pipeline | Planned | Not yet implemented |
+| Signed trust model for skill packs | Signature verification pipeline | Done | Ed25519 verification in `skill_signature.py`, wired into marketplace install flow |
+| Browser snapshot | Accessibility tree with numeric refs | Done | `browser_snapshot` tool + extension `snapshot` command |
+| Browser screenshot | Visual page capture | Done | `browser_screenshot` tool + extension `screenshot` command |
+| Ref-based interaction | Act on snapshot refs, not blind CSS | Done | `browser_action` accepts `ref` parameter from snapshot |
+| Fast polling | Reduced extension poll latency | Done | Idle 1.5s / Busy 0.5s (was 5s / 1.5s) |
+| Navigation readiness | Wait for tab load after navigate | Done | `waitForTabComplete` in extension |
 
 ## Gateway and Docker Clarification
 

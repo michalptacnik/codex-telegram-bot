@@ -7,6 +7,8 @@ from codex_telegram_bot.tools.browser import (
     BrowserNavigateTool,
     BrowserOpenTool,
     BrowserScriptTool,
+    BrowserScreenshotTool,
+    BrowserSnapshotTool,
     BrowserStatusTool,
 )
 from codex_telegram_bot.tools.email import (
@@ -140,6 +142,8 @@ def build_default_tool_registry(
         registry.register(BrowserScriptTool(browser_bridge))
         registry.register(BrowserActionTool(browser_bridge))
         registry.register(BrowserExtractTool(browser_bridge))
+        registry.register(BrowserSnapshotTool(browser_bridge))
+        registry.register(BrowserScreenshotTool(browser_bridge))
     # Memory tools (Issue #106)
     registry.register(MemoryGetTool())
     registry.register(MemorySearchTool())
@@ -186,6 +190,8 @@ __all__ = [
     "BrowserScriptTool",
     "BrowserActionTool",
     "BrowserExtractTool",
+    "BrowserSnapshotTool",
+    "BrowserScreenshotTool",
     "GitStatusTool",
     "GitDiffTool",
     "GitLogTool",

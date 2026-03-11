@@ -334,15 +334,15 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Public HTTP(S) URL to open"},
-                "query": {"type": "string", "description": "Optional search query (used when url omitted)"},
+                "url": {"type": "string", "description": "Public HTTP(S) URL to open. Required. For web searches use https://www.google.com/search?q=QUERY"},
+                "query": {"type": "string", "description": "Search query — alternative to url for quick web searches"},
                 "client_id": {"type": "string", "description": "Optional specific extension instance id"},
                 "new_tab": {"type": "boolean", "description": "Open in a new tab (default true)"},
                 "active": {"type": "boolean", "description": "Focus opened tab/window (default true)"},
                 "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
                 "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
             },
-            "required": [],
+            "required": ["url"],
         },
     },
     "browser_navigate": {
@@ -351,14 +351,14 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
         "input_schema": {
             "type": "object",
             "properties": {
-                "url": {"type": "string", "description": "Public HTTP(S) URL to navigate to"},
-                "query": {"type": "string", "description": "Optional search query (used when url omitted)"},
+                "url": {"type": "string", "description": "Public HTTP(S) URL to navigate to. Required. For web searches use https://www.google.com/search?q=QUERY"},
+                "query": {"type": "string", "description": "Search query — alternative to url for quick web searches"},
                 "client_id": {"type": "string", "description": "Optional specific extension instance id"},
                 "active": {"type": "boolean", "description": "Focus tab after navigation (default true)"},
                 "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
                 "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
             },
-            "required": [],
+            "required": ["url"],
         },
     },
     "browser_script": {
@@ -385,13 +385,14 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "description": "Single action: click|type|press|wait_for|scroll|focus|submit|select|extract",
+                    "description": "Single action: click|type|press|wait_for|scroll|focus|submit|select|extract. Required unless steps is provided.",
                 },
                 "steps": {
                     "type": "array",
-                    "description": "Optional multi-step action list (each item contains action + args)",
+                    "description": "Multi-step action list (each item contains action + args). Use instead of action for multi-step sequences.",
                     "items": {"type": "object"},
                 },
+                "ref": {"type": "integer", "description": "Element ref from browser_snapshot. Use instead of selector for reliable targeting."},
                 "selector": {"type": "string", "description": "CSS selector for target element"},
                 "text": {"type": "string", "description": "Text payload for type action"},
                 "key": {"type": "string", "description": "Keyboard key for press action"},
@@ -401,7 +402,7 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
                 "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
             },
-            "required": [],
+            "required": ["action"],
         },
     },
     "browser_extract": {
@@ -419,6 +420,36 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "tab_id": {"type": "integer", "description": "Optional target tab id (defaults to active tab)"},
                 "all_frames": {"type": "boolean", "description": "Run extraction in all frames (default false)"},
                 "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": [],
+        },
+    },
+    "browser_snapshot": {
+        "name": "browser_snapshot",
+        "description": "Get accessibility snapshot of active tab with numbered element refs. "
+                       "ALWAYS call this before browser_action to see page elements. "
+                       "Use the ref numbers in browser_action to interact reliably.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "max_elements": {"type": "integer", "description": "Max elements to return (default 200, max 500)"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "tab_id": {"type": "integer", "description": "Optional target tab id"},
+                "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
+            },
+            "required": [],
+        },
+    },
+    "browser_screenshot": {
+        "name": "browser_screenshot",
+        "description": "Capture screenshot of visible browser tab. Returns base64 image.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "description": "png or jpeg (default png)"},
+                "client_id": {"type": "string", "description": "Optional specific extension instance id"},
+                "tab_id": {"type": "integer", "description": "Optional target tab id"},
                 "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
             },
             "required": [],
