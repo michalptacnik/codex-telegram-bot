@@ -6,6 +6,10 @@ import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Set
 from xml.sax.saxutils import escape as xml_escape
+try:
+    import resource  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - non-POSIX fallback
+    resource = None  # type: ignore[assignment]
 
 from pydantic import BaseModel, Field
 from fastapi import FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -108,12 +112,16 @@ class BrowserExtensionRegisterRequest(BaseModel):
     user_agent: str = ""
     active_tab_url: str = ""
     active_tab_title: str = ""
+    extension_version: str = ""
+    supported_commands: List[str] = Field(default_factory=list)
 
 
 class BrowserExtensionHeartbeatRequest(BaseModel):
     instance_id: str
     active_tab_url: str = ""
     active_tab_title: str = ""
+    extension_version: str = ""
+    supported_commands: List[str] = Field(default_factory=list)
 
 
 class BrowserExtensionCommandResultRequest(BaseModel):
@@ -256,6 +264,34 @@ def _twiml_message(text: str) -> str:
     return f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{safe}</Message></Response>'
 
 
+def _fd_pressure_snapshot() -> Dict[str, int]:
+    soft_limit = 0
+    if resource is not None:
+        try:
+            soft_limit = int(resource.getrlimit(resource.RLIMIT_NOFILE)[0])  # type: ignore[arg-type]
+        except Exception:
+            soft_limit = 0
+    open_count = 0
+    for fd_path in ("/proc/self/fd", "/dev/fd"):
+        try:
+            open_count = len(os.listdir(fd_path))
+        except Exception:
+            continue
+        if open_count > 0:
+            break
+    pct = 0
+    if soft_limit > 0 and open_count > 0:
+        try:
+            pct = int(max(0, min(100, round((open_count / soft_limit) * 100))))
+        except Exception:
+            pct = 0
+    return {
+        "open_count": int(open_count or 0),
+        "soft_limit": int(soft_limit or 0),
+        "usage_pct": int(pct or 0),
+    }
+
+
 def create_app(agent_service: AgentService, provider_registry=None, metrics_collector=None) -> FastAPI:
     return create_app_with_config(
         agent_service=agent_service,
@@ -286,6 +322,23 @@ def create_app_with_config(
     local_api_enabled = bool(local_api_keys)
     browser_bridge = agent_service.browser_bridge
     browser_extension_token = (os.environ.get("BROWSER_EXTENSION_TOKEN") or "").strip()
+    fd_warn_threshold_pct = max(
+        50,
+        min(int((os.environ.get("FD_WARN_THRESHOLD_PCT") or "85").strip() or 85), 99),
+    )
+    browser_status_poll_min_interval_sec = max(
+        1.0,
+        float((os.environ.get("BROWSER_STATUS_POLL_MIN_INTERVAL_SEC") or "1.0").strip() or "1.0"),
+    )
+    browser_status_poll_throttle_sec = max(
+        browser_status_poll_min_interval_sec,
+        float((os.environ.get("BROWSER_STATUS_POLL_THROTTLE_SEC") or "4.0").strip() or "4.0"),
+    )
+    _browser_status_cache: Dict[str, Any] = {"payload": {}, "ts": 0.0}
+
+    def _invalidate_browser_status_cache() -> None:
+        _browser_status_cache["payload"] = {}
+        _browser_status_cache["ts"] = 0.0
 
     def _resolve_api_token(request: Request) -> str:
         bearer = (request.headers.get("authorization") or "").strip()
@@ -760,8 +813,21 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     @app.get("/api/browser/status")
     async def api_browser_status(request: Request) -> Dict[str, Any]:
         _opt_api_scope(request)
+        loop_now = asyncio.get_running_loop().time()
+        fd_snapshot = _fd_pressure_snapshot()
+        pressure = int(fd_snapshot.get("usage_pct") or 0) >= fd_warn_threshold_pct
+        min_interval = browser_status_poll_throttle_sec if pressure else browser_status_poll_min_interval_sec
+        since_last = float(loop_now - float(_browser_status_cache.get("ts") or 0.0))
+        cached_payload = _browser_status_cache.get("payload")
+        if isinstance(cached_payload, dict) and cached_payload and since_last < min_interval:
+            out = dict(cached_payload)
+            out["fd_open_count"] = int(fd_snapshot.get("open_count") or 0)
+            out["fd_soft_limit"] = int(fd_snapshot.get("soft_limit") or 0)
+            out["fd_usage_pct"] = int(fd_snapshot.get("usage_pct") or 0)
+            out["fd_pressure_throttled"] = True
+            return out
         if browser_bridge is None:
-            return {
+            payload = {
                 "connected": False,
                 "active_clients": 0,
                 "total_clients": 0,
@@ -769,8 +835,15 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 "clients": [],
                 "configured": False,
             }
-        payload = dict(browser_bridge.status())
-        payload["configured"] = True
+        else:
+            payload = dict(browser_bridge.status())
+            payload["configured"] = True
+        payload["fd_open_count"] = int(fd_snapshot.get("open_count") or 0)
+        payload["fd_soft_limit"] = int(fd_snapshot.get("soft_limit") or 0)
+        payload["fd_usage_pct"] = int(fd_snapshot.get("usage_pct") or 0)
+        payload["fd_pressure_throttled"] = False
+        _browser_status_cache["payload"] = dict(payload)
+        _browser_status_cache["ts"] = float(loop_now)
         return payload
 
     @app.post("/api/browser/command")
@@ -813,7 +886,10 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             user_agent=body.user_agent,
             active_tab_url=body.active_tab_url,
             active_tab_title=body.active_tab_title,
+            extension_version=body.extension_version,
+            supported_commands=list(body.supported_commands or []),
         )
+        _invalidate_browser_status_cache()
         return {"ok": True, "client": payload}
 
     @app.post("/api/browser/extension/heartbeat")
@@ -829,9 +905,12 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
                 instance_id=body.instance_id,
                 active_tab_url=body.active_tab_url,
                 active_tab_title=body.active_tab_title,
+                extension_version=body.extension_version,
+                supported_commands=list(body.supported_commands or []),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        _invalidate_browser_status_cache()
         return {"ok": True, "client": client}
 
     @app.get("/api/browser/extension/commands")
@@ -866,6 +945,7 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
         )
         if not result.get("ok"):
             raise HTTPException(status_code=400, detail=str(result.get("error") or "Failed to set command result."))
+        _invalidate_browser_status_cache()
         return result
 
     @app.get("/api/metrics")
@@ -1506,33 +1586,50 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     async def onboarding_page(request: Request):
         if (redir := _ui_auth_redirect(request)) is not None:
             return redir
-        onboarding.record(step="wizard.view", outcome="visit")
-        env = load_env_file(get_env_path(config_dir)) if config_dir else {}
-        runtime_env = load_env_file(config_dir / "runtime.env") if config_dir else {}
-        workspace_root = env.get("EXECUTION_WORKSPACE_ROOT", str(Path.cwd()))
-        profile = "trusted"
-        autonomous_tool_loop = _env_flag_enabled(
-            runtime_env.get(AUTONOMOUS_TOOL_LOOP_ENV)
-            or env.get(AUTONOMOUS_TOOL_LOOP_ENV)
-            or os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV, "")
-        )
-        default_agent = agent_service.get_agent("default")
-        if default_agent:
-            profile = default_agent.policy_profile
-        return templates.TemplateResponse(
-            "onboarding.html",
-            {
-                "request": request,
-                "nav": "onboarding",
-                "onboarding_state": onboarding.load(),
-                "workspace_root": workspace_root,
-                "policy_profile": profile,
-                "autonomous_tool_loop": autonomous_tool_loop,
-                "provider_key_hint": provider_key_hint,
-                "error": "",
-                "result": "",
-            },
-        )
+        try:
+            onboarding.record(step="wizard.view", outcome="visit")
+            env = load_env_file(get_env_path(config_dir)) if config_dir else {}
+            runtime_env = load_env_file(config_dir / "runtime.env") if config_dir else {}
+            workspace_root = env.get("EXECUTION_WORKSPACE_ROOT", str(Path.cwd()))
+            profile = "trusted"
+            autonomous_tool_loop = _env_flag_enabled(
+                runtime_env.get(AUTONOMOUS_TOOL_LOOP_ENV)
+                or env.get(AUTONOMOUS_TOOL_LOOP_ENV)
+                or os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV, "")
+            )
+            default_agent = agent_service.get_agent("default")
+            if default_agent:
+                profile = default_agent.policy_profile
+            return templates.TemplateResponse(
+                "onboarding.html",
+                {
+                    "request": request,
+                    "nav": "onboarding",
+                    "onboarding_state": onboarding.load(),
+                    "workspace_root": workspace_root,
+                    "policy_profile": profile,
+                    "autonomous_tool_loop": autonomous_tool_loop,
+                    "provider_key_hint": provider_key_hint,
+                    "error": "",
+                    "result": "",
+                },
+            )
+        except Exception as exc:
+            return templates.TemplateResponse(
+                "onboarding.html",
+                {
+                    "request": request,
+                    "nav": "onboarding",
+                    "onboarding_state": onboarding.load(),
+                    "workspace_root": str(Path.cwd()),
+                    "policy_profile": "trusted",
+                    "autonomous_tool_loop": _env_flag_enabled(os.environ.get(AUTONOMOUS_TOOL_LOOP_ENV, "")),
+                    "provider_key_hint": provider_key_hint,
+                    "error": f"Onboarding temporarily unavailable: {str(exc)[:200]}",
+                    "result": "",
+                },
+                status_code=200,
+            )
 
     @app.post("/onboarding", response_class=HTMLResponse)
     async def onboarding_submit(
@@ -1691,10 +1788,15 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     async def runs_page(request: Request):
         if (redir := _ui_auth_redirect(request)) is not None:
             return redir
-        runs = [_run_to_dict(r) for r in agent_service.list_recent_runs(limit=100)]
+        try:
+            runs = [_run_to_dict(r) for r in agent_service.list_recent_runs(limit=100)]
+            error = ""
+        except Exception as exc:
+            runs = []
+            error = f"Runs are temporarily unavailable: {str(exc)[:200]}"
         return templates.TemplateResponse(
             "runs.html",
-            {"request": request, "nav": "runs", "runs": runs},
+            {"request": request, "nav": "runs", "runs": runs, "error": error},
         )
 
     @app.get("/runs/{run_id}", response_class=HTMLResponse)
@@ -1805,6 +1907,45 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
             return redir
         plugin_manager.uninstall_plugin(plugin_id)
         return RedirectResponse(url="/plugins", status_code=303)
+
+    # ------------------------------------------------------------------
+    # Tools tab
+    # ------------------------------------------------------------------
+
+    @app.get("/tools", response_class=HTMLResponse)
+    async def tools_page(request: Request):
+        if (redir := _ui_auth_redirect(request)) is not None:
+            return redir
+        from codex_telegram_bot.tools.base import NATIVE_TOOL_SCHEMAS
+
+        snapshot = agent_service.runtime_tool_snapshot(session_id="")
+        tools_list = []
+        for name in snapshot.names():
+            schema = NATIVE_TOOL_SCHEMAS.get(name, {})
+            input_schema = schema.get("input_schema") or {}
+            param_count = len((input_schema.get("properties") or {}))
+            tools_list.append({
+                "name": name,
+                "description": schema.get("description", ""),
+                "param_count": param_count,
+            })
+        disabled = [{"name": k, "reason": v} for k, v in snapshot.disabled.items()]
+        events = agent_service.list_recent_tool_events(limit=50)
+        return templates.TemplateResponse(
+            "tools.html",
+            {
+                "request": request,
+                "nav": "tools",
+                "tools": tools_list,
+                "disabled": disabled,
+                "events": events,
+            },
+        )
+
+    @app.get("/api/tools/events")
+    async def api_tool_events(request: Request, limit: int = 50):
+        events = agent_service.list_recent_tool_events(limit=limit)
+        return {"events": events}
 
     @app.get("/skills", response_class=HTMLResponse)
     async def skills_page(request: Request, error: str = ""):
@@ -2136,10 +2277,15 @@ border-radius:.375rem;cursor:pointer;font-size:.9rem;}
     async def approvals_page(request: Request):
         if (redir := _ui_auth_redirect(request)) is not None:
             return redir
-        approvals = agent_service.list_all_pending_tool_approvals(limit=200)
+        try:
+            approvals = agent_service.list_all_pending_tool_approvals(limit=200)
+            error = ""
+        except Exception as exc:
+            approvals = []
+            error = f"Approvals are temporarily unavailable: {str(exc)[:200]}"
         return templates.TemplateResponse(
             "approvals.html",
-            {"request": request, "nav": "approvals", "approvals": approvals},
+            {"request": request, "nav": "approvals", "approvals": approvals, "error": error},
         )
 
     @app.post("/agents", response_class=HTMLResponse)

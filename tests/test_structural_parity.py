@@ -130,8 +130,12 @@ class TestStructuralParityHeuristics(unittest.TestCase):
         self.assertIn("requires", _browser_tool_args_error("browser_script", {}))
         self.assertEqual("", _browser_tool_args_error("browser_script", {"script": "return 1;"}))
 
+    def test_browser_action_contract_allows_empty_args_in_permissive_mode(self):
+        self.assertEqual("", _browser_tool_args_error("browser_action", {}))
+        self.assertEqual("", _browser_tool_args_error("browser_action", {"action": "click", "selector": "body"}))
+
     def test_browser_open_contract_requires_url_or_query(self):
-        self.assertIn("requires", _browser_tool_args_error("browser_open", {}))
+        self.assertEqual("", _browser_tool_args_error("browser_open", {}))
         self.assertEqual("", _browser_tool_args_error("browser_open", {"url": "https://example.com"}))
         self.assertEqual("", _browser_tool_args_error("browser_open", {"query": "example"}))
 

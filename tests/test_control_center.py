@@ -144,7 +144,9 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(detail_page.status_code, 200)
         self.assertIn(run_id, detail_page.text)
         self.assertIn("run.provider.selected", detail_page.text)
-        self.assertIn('role="status"', detail_page.text)
+        # role="status" only rendered for failed runs with recovery options;
+        # verify timeline section is present instead.
+        self.assertIn("Live Timeline", detail_page.text)
 
         settings = client.get("/settings")
         self.assertEqual(settings.status_code, 200)
@@ -161,6 +163,11 @@ class TestControlCenter(unittest.IsolatedAsyncioTestCase):
         chat = client.get("/chat")
         self.assertEqual(chat.status_code, 200)
         self.assertIn("Realtime Chat", chat.text)
+
+        tools = client.get("/tools")
+        self.assertEqual(tools.status_code, 200)
+        self.assertIn("Registered Tools", tools.text)
+        self.assertIn("Tool Execution Log", tools.text)
 
     async def test_error_catalog_and_recovery_api(self):
         tmp = tempfile.TemporaryDirectory()

@@ -35,10 +35,16 @@ When connected, the popup status shows `active`, the extension icon badge shows 
 - `open_url` -> opens URL in new/existing tab
 - `navigate_url` -> navigates current active tab
 - `run_script` -> executes JavaScript in active/specified tab via `chrome.scripting`
+- `snapshot` -> returns compact page snapshot + element refs for deterministic follow-up actions
+- `screenshot` -> captures tab image for visual verification
 
 These are triggered by agent tools:
 
 - `browser_open`
 - `browser_navigate`
 - `browser_script`
+- `browser_action`
+- `browser_extract`
+- `browser_snapshot`
+- `browser_screenshot`
 - `browser_status`

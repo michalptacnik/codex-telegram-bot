@@ -880,6 +880,34 @@ class SqliteRunStore:
             for row in rows
         ]
 
+    def list_recent_events_by_type(self, type_prefix: str = "tool.", limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent events whose event_type starts with *type_prefix*."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT run_id, event_type, payload, created_at
+                FROM run_events
+                WHERE event_type LIKE ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (f"{type_prefix}%", max(1, min(limit, 500))),
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for row in rows:
+            payload_raw = row["payload"] or "{}"
+            try:
+                payload_obj = json.loads(payload_raw) if isinstance(payload_raw, str) else payload_raw
+            except (json.JSONDecodeError, TypeError):
+                payload_obj = {"raw": str(payload_raw)[:500]}
+            out.append({
+                "run_id": row["run_id"],
+                "event_type": row["event_type"],
+                "payload": payload_obj,
+                "created_at": row["created_at"],
+            })
+        return out
+
     def list_agents(self) -> List[AgentRecord]:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM agents ORDER BY created_at ASC").fetchall()
@@ -1867,7 +1895,7 @@ class SqliteRunStore:
                     """
                     INSERT OR REPLACE INTO heartbeat_state
                     (session_id, heartbeat_enabled, heartbeat_interval_min, timezone, last_heartbeat_at, next_heartbeat_at, updated_at)
-                    VALUES (?, 0, 60, 'Europe/Amsterdam', NULL, ?, ?)
+                    VALUES (?, 1, 60, 'Europe/Amsterdam', NULL, ?, ?)
                     """,
                     (session_id, now, now),
                 )

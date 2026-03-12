@@ -12,14 +12,9 @@ from codex_telegram_bot.services.thin_memory import ThinMemoryStore
 HEARTBEAT_FILENAME = "memory/HEARTBEAT.md"
 HEARTBEAT_TEMPLATE = """# HEARTBEAT v1
 ## Daily (active hours only)
-- [ ] Review today's obligations
-- [ ] Summarize ongoing missions
 ## Weekly
-- [ ] Weekly review
 ## Monitors
-- [ ] Check GitHub issues assigned to me
 ## Waiting on
-- [ ] Replies from clients
 ## Quiet Hours
 - start: 22:00
 - end: 08:00
@@ -34,6 +29,15 @@ class HeartbeatConfig:
     waiting_on: List[str] = field(default_factory=list)
     quiet_start: str = "22:00"
     quiet_end: str = "08:00"
+
+    def is_effectively_empty(self) -> bool:
+        """True when no checklist items are configured in any section.
+
+        OpenClaw parity: when HEARTBEAT.md contains only section headers
+        (no ``- [ ]`` items), the heartbeat tick is skipped entirely —
+        no ThinMemoryStore reads, no LLM call, zero tokens consumed.
+        """
+        return not (self.daily or self.weekly or self.monitors or self.waiting_on)
 
 
 @dataclass(frozen=True)
@@ -175,6 +179,9 @@ class HeartbeatStore:
         local_now = now.astimezone(ZoneInfo(timezone_name))
         if is_quiet_hours(local_now, cfg.quiet_start, cfg.quiet_end):
             return HeartbeatDecision(action="NO_ACTION", text="", quiet_hours_blocked=True)
+        # OpenClaw parity: skip entirely when HEARTBEAT.md has no items.
+        if cfg.is_effectively_empty():
+            return HeartbeatDecision(action="NO_ACTION", text="")
         memory = ThinMemoryStore(self._workspace)
         index = memory.load_index()
         due_obligations: List[str] = []
@@ -225,3 +232,16 @@ def is_quiet_hours(local_now: datetime, start: str, end: str) -> bool:
     if start_min < end_min:
         return start_min <= now_min < end_min
     return now_min >= start_min or now_min < end_min
+
+
+def is_heartbeat_noop_response(text: str) -> bool:
+    """True when an agent reply to a heartbeat prompt is a no-op.
+
+    OpenClaw parity: if the agent responds with just ``HEARTBEAT_OK``
+    (or a short variant), the message is dropped silently — not forwarded
+    to the user.  This avoids spamming the chat with "nothing to report".
+    """
+    clean = (text or "").strip().upper()
+    if len(clean) > 300:
+        return False
+    return clean in {"HEARTBEAT_OK", "HEARTBEAT OK", "OK", "NO ACTION", "NO_ACTION"}

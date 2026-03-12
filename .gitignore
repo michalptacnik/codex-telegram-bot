@@ -10,3 +10,5 @@ venv/
 dist/
 .codex-telegram-bot/
 .session_workspaces/
+.runtime-config/
+.runtime-workspace/

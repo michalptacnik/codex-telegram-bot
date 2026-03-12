@@ -7,6 +7,15 @@
   </div>
 </div>
 
+{% if error %}
+<section class="card table-card">
+  <div class="error-banner">
+    <div class="error-title">Runtime warning</div>
+    <div class="error-message">{{ error }}</div>
+  </div>
+</section>
+{% endif %}
+
 <section class="card table-card">
   <table>
     <thead>

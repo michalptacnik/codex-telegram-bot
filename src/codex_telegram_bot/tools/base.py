@@ -402,7 +402,11 @@ NATIVE_TOOL_SCHEMAS: Dict[str, Dict[str, Any]] = {
                 "wait": {"type": "boolean", "description": "Wait for browser execution result (default true)"},
                 "timeout_sec": {"type": "integer", "description": "Wait timeout in seconds (default 180)"},
             },
-            "required": ["action"],
+            "required": [],
+            "anyOf": [
+                {"required": ["action"]},
+                {"required": ["steps"]},
+            ],
         },
     },
     "browser_extract": {

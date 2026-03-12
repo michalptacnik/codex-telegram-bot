@@ -294,6 +294,8 @@ def _is_transient_exception(exc: Exception) -> bool:
         "temporary failure",
         "name or service not known",
         "connection reset",
+        "remote end closed connection",
+        "incompleteread",
         "readerror",
     ]
     return any(marker in text for marker in transient_markers)

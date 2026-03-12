@@ -175,7 +175,20 @@ class TestSkillMarketplace(unittest.TestCase):
             market._fetch_skill_bundle = lambda install_ref: {  # type: ignore[assignment]
                 "SKILL.md": signed_skill.encode("utf-8"),
             }
-            installed = market.install(skill_ref="demo:writer", target="workspace")
+            # Mock verify_skill_signature so the test focuses on the marketplace
+            # install flow rather than actual Ed25519 crypto verification.
+            from codex_telegram_bot.services.skill_signature import VerificationResult
+            mock_result = VerificationResult(
+                verified=True,
+                reason="signature valid",
+                public_key_id="pk-live-1",
+                publisher="Acme",
+            )
+            with patch(
+                "codex_telegram_bot.services.skill_marketplace.verify_skill_signature",
+                return_value=mock_result,
+            ):
+                installed = market.install(skill_ref="demo:writer", target="workspace")
             self.assertTrue(installed.get("verified"))
 
 

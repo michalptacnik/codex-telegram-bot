@@ -77,6 +77,8 @@ class BrowserOpenTool:
 
         url = _normalize_url(raw_url=raw_url, query=query)
         if not url:
+            url = _active_tab_url_from_bridge(self._bridge)
+        if not url:
             return ToolResult(ok=False, output="url or query is required.")
 
         if not _is_allowed_url(url):
@@ -117,6 +119,8 @@ class BrowserNavigateTool:
         active = _to_bool(request.args.get("active"), default=True)
 
         url = _normalize_url(raw_url=raw_url, query=query)
+        if not url:
+            url = _active_tab_url_from_bridge(self._bridge)
         if not url:
             return ToolResult(ok=False, output="url or query is required.")
         if not _is_allowed_url(url):
@@ -357,6 +361,13 @@ class BrowserSnapshotTool:
         self._bridge = bridge
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        supports_native_snapshot = True
+        if self._bridge is not None:
+            try:
+                supports_native_snapshot = bool(self._bridge.extension_supports_command("snapshot"))
+            except Exception:
+                supports_native_snapshot = True
+
         max_elements = _to_int(
             request.args.get("max_elements"),
             default=_BROWSER_SNAPSHOT_DEFAULT_MAX_ELEMENTS,
@@ -373,13 +384,23 @@ class BrowserSnapshotTool:
         )
         tab_id = _to_int(request.args.get("tab_id"), default=0, min_value=0, max_value=2_147_483_647)
 
-        payload: Dict[str, Any] = {"max_elements": max_elements}
+        payload: Dict[str, Any]
+        command_type: str
+        if supports_native_snapshot:
+            command_type = "snapshot"
+            payload = {"max_elements": max_elements}
+        else:
+            command_type = "run_script"
+            payload = {
+                "script": _build_legacy_snapshot_script(max_elements=max_elements),
+                "all_frames": False,
+            }
         if tab_id > 0:
             payload["tab_id"] = int(tab_id)
 
         result = _run_browser_command(
             bridge=self._bridge,
-            command_type="snapshot",
+            command_type=command_type,
             payload=payload,
             client_id=client_id,
             wait=wait,
@@ -413,6 +434,8 @@ class BrowserSnapshotTool:
                 pass
 
         normalized = _format_snapshot_for_agent(snapshot)
+        if not supports_native_snapshot:
+            normalized["mode"] = "emulated_via_run_script"
         return ToolResult(ok=True, output=json.dumps(normalized, ensure_ascii=True))
 
 
@@ -424,6 +447,20 @@ class BrowserScreenshotTool:
         self._bridge = bridge
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
+        # Pre-check: does the connected extension support screenshot?
+        if self._bridge is not None:
+            try:
+                if not self._bridge.extension_supports_command("screenshot"):
+                    return ToolResult(
+                        ok=False,
+                        output=(
+                            "Chrome extension is outdated (pre-v2.0) and does not support browser_screenshot. "
+                            "Reload/reinstall the extension from ./chrome-extension."
+                        ),
+                    )
+            except Exception:
+                pass
+
         client_id = _normalize_client_id(request.args.get("client_id", ""))
         wait = _to_bool(request.args.get("wait"), default=True)
         timeout_sec = _to_int(
@@ -462,11 +499,15 @@ class BrowserActionTool:
         self._bridge = bridge
 
     def run(self, request: ToolRequest, context: ToolContext) -> ToolResult:
-        plan, plan_error = _build_browser_action_plan(dict(request.args or {}))
-        if plan_error:
-            return ToolResult(ok=False, output=plan_error)
-        if not plan:
-            return ToolResult(ok=False, output="action or steps is required.")
+        payload = dict(request.args or {})
+        plan, plan_error = _build_browser_action_plan(payload)
+        used_default_extract = False
+        if plan_error or (not plan):
+            # Legacy/permissive mode: when planner emits empty browser_action args,
+            # degrade gracefully instead of hard-failing the turn.
+            plan = _build_default_browser_action_plan(payload)
+            plan_error = ""
+            used_default_extract = True
 
         # Fetch ref map from bridge if any step uses ref-based targeting
         ref_map: Optional[Dict[str, str]] = None
@@ -553,6 +594,11 @@ class BrowserActionTool:
         source = str(parsed.get("source") or "").strip()
         if source:
             normalized["source"] = source
+        if used_default_extract:
+            normalized["warning"] = (
+                "browser_action received empty args; defaulted to action=extract "
+                "to keep workflow progressing."
+            )
         ok = bool(normalized.get("ok"))
         return ToolResult(ok=ok, output=json.dumps(normalized, ensure_ascii=True))
 
@@ -566,18 +612,43 @@ def _run_browser_command(
     wait: bool,
     timeout_sec: int,
 ) -> ToolResult:
+    request_payload = dict(payload or {})
     result: Dict[str, Any] = {"ok": False, "error": "Browser bridge is not configured."}
     if bridge is not None:
         result = dict(
             bridge.enqueue_command(
                 command_type=command_type,
-                payload=dict(payload or {}),
+                payload=dict(request_payload),
                 client_id=client_id,
                 wait=wait,
                 timeout_sec=timeout_sec,
             )
         )
     result = _unwrap_remote_payload(result)
+
+    if (not result.get("ok")) and _should_retry_without_tab_id(result=result, payload=request_payload):
+        retry_payload = dict(request_payload)
+        retry_payload.pop("tab_id", None)
+        retry_payload.pop("tabId", None)
+        retry = dict(
+            bridge.enqueue_command(
+                command_type=command_type,
+                payload=dict(retry_payload),
+                client_id=client_id,
+                wait=wait,
+                timeout_sec=timeout_sec,
+            )
+        )
+        retry = _unwrap_remote_payload(retry)
+        fallback_note = "Requested tab_id was unavailable; retried on active tab."
+        if bool(retry.get("ok")):
+            retry["warning"] = str(retry.get("warning") or fallback_note)
+            result = retry
+        elif _is_pending_result(retry):
+            retry["error"] = str(retry.get("error") or fallback_note)
+            result = retry
+        else:
+            result = retry
 
     if _is_pending_result(result):
         return ToolResult(ok=True, output=json.dumps(_promote_pending_to_success(result), ensure_ascii=True))
@@ -686,6 +757,27 @@ def _normalize_string_list(value: Any, *, limit: int) -> list[str]:
     return out
 
 
+def _active_tab_url_from_bridge(bridge: Any) -> str:
+    if bridge is None:
+        return ""
+    try:
+        status = bridge.status()
+    except Exception:
+        return ""
+    if not isinstance(status, dict):
+        return ""
+    clients = status.get("clients")
+    if not isinstance(clients, list):
+        return ""
+    for client in clients:
+        if not isinstance(client, dict):
+            continue
+        url = str(client.get("active_tab_url") or "").strip()
+        if url:
+            return url
+    return ""
+
+
 def _build_extract_script(
     *,
     max_chars: int,
@@ -757,6 +849,43 @@ def _build_extract_script(
     )
 
 
+def _build_legacy_snapshot_script(*, max_elements: int) -> str:
+    max_items = _to_int(
+        max_elements,
+        default=_BROWSER_SNAPSHOT_DEFAULT_MAX_ELEMENTS,
+        min_value=10,
+        max_value=_BROWSER_SNAPSHOT_MAX_ELEMENTS,
+    )
+    return (
+        f"const MAX={int(max_items)};\n"
+        "const txt=(v,m)=>String(v==null?\"\":v).replace(/\\s+/g,\" \").trim().slice(0,m||200);\n"
+        "const esc=(window.CSS&&CSS.escape)?CSS.escape:(s=>String(s).replace(/[^a-zA-Z0-9_-]/g,'\\\\$&'));\n"
+        "const sel=(el)=>{if(!el||el.nodeType!==1)return\"\";if(el.id)return`#${esc(el.id)}`;"
+        "const parts=[];let cur=el;let depth=0;while(cur&&cur.nodeType===1&&depth<6){let p=cur.tagName.toLowerCase();"
+        "if(cur.classList&&cur.classList.length){const cls=Array.from(cur.classList).slice(0,2).map((c)=>esc(c));"
+        "if(cls.length)p+=`.`+cls.join('.');}const parent=cur.parentElement;"
+        "if(parent){const sib=Array.from(parent.children).filter((n)=>n.tagName===cur.tagName);"
+        "if(sib.length>1)p+=`:nth-of-type(${sib.indexOf(cur)+1})`;}"
+        "parts.unshift(p);cur=parent;depth+=1;}return parts.join(' > ');};\n"
+        "const roleOf=(el)=>txt(el.getAttribute('role')||'',60)||'';\n"
+        "const nameOf=(el)=>txt(el.getAttribute('aria-label')||el.getAttribute('title')||el.getAttribute('alt')||el.getAttribute('placeholder')||'',120);\n"
+        "const candidates=Array.from(document.querySelectorAll("
+        "'a,button,input,textarea,select,[role],summary,[contenteditable=true],[tabindex]'));"
+        "const seen=new Set();const elements=[];const ref_map={};let ref=1;\n"
+        "for(const el of candidates){if(elements.length>=MAX)break;"
+        "if(!el||el.nodeType!==1)continue;const r=el.getBoundingClientRect();"
+        "if((r.width<=0||r.height<=0)&&el!==document.activeElement)continue;"
+        "const selector=sel(el);if(!selector||seen.has(selector))continue;seen.add(selector);"
+        "const tag=(el.tagName||'').toLowerCase();const text=txt(el.innerText||el.textContent||el.value||'',120);"
+        "const role=roleOf(el)||(tag==='a'?'link':(tag==='button'?'button':''));"
+        "const name=nameOf(el)||text;const type=txt(el.getAttribute('type')||'',40);"
+        "const href=txt(el.getAttribute('href')||'',200);const placeholder=txt(el.getAttribute('placeholder')||'',120);"
+        "const row={ref,tag,role,name,text,type,href,placeholder,selector};elements.push(row);ref_map[String(ref)]=selector;ref+=1;}\n"
+        "return{url:String(location.href||''),title:String(document.title||''),elements,ref_map,"
+        "total_elements_on_page:candidates.length,truncated:candidates.length>elements.length};"
+    )
+
+
 def _build_browser_action_plan(args: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], str]:
     payload = dict(args or {})
     default_timeout_ms = _to_int(
@@ -801,16 +930,46 @@ def _build_browser_action_plan(args: Dict[str, Any]) -> Tuple[List[Dict[str, Any
     return [normalized], ""
 
 
+def _build_default_browser_action_plan(args: Dict[str, Any]) -> List[Dict[str, Any]]:
+    timeout_ms = _to_int(
+        args.get("step_timeout_ms") or args.get("timeout_ms"),
+        default=_BROWSER_ACTION_DEFAULT_STEP_TIMEOUT_MS,
+        min_value=100,
+        max_value=_BROWSER_ACTION_MAX_STEP_TIMEOUT_MS,
+    )
+    return [
+        {
+            "action": "extract",
+            "timeout_ms": timeout_ms,
+            "max_chars": 4000,
+            "include_links": True,
+            "max_links": 20,
+        }
+    ]
+
+
 def _normalize_browser_action_step(step: Dict[str, Any], *, default_timeout_ms: int) -> Tuple[Dict[str, Any], str]:
     alias = {
         "input": "type",
         "fill": "type",
+        "set_text": "type",
+        "setvalue": "type",
+        "set_value": "type",
+        "enter_text": "type",
         "key": "press",
         "keypress": "press",
+        "tap": "click",
+        "choose": "select",
         "wait": "wait_for",
         "waitfor": "wait_for",
     }
-    action_raw = str(step.get("action") or step.get("op") or "").strip().lower()
+    action_raw = str(
+        step.get("action")
+        or step.get("op")
+        or step.get("operation")
+        or step.get("command")
+        or ""
+    ).strip().lower()
     if not action_raw:
         return {}, "action is required."
     action = alias.get(action_raw, action_raw)
@@ -825,6 +984,7 @@ def _normalize_browser_action_step(step: Dict[str, Any], *, default_timeout_ms: 
         max_value=_BROWSER_ACTION_MAX_STEP_TIMEOUT_MS,
     )
     selector = _clip_string(step.get("selector"), _BROWSER_ACTION_MAX_SELECTOR_CHARS)
+    selector = _expand_browser_selector_aliases(selector=selector, action=action)
     text_contains = _clip_string(
         step.get("text_contains") or step.get("contains_text") or step.get("contains"),
         500,
@@ -937,6 +1097,84 @@ def _clip_string(value: Any, max_len: int) -> str:
     return text[: max(1, int(max_len))]
 
 
+def _expand_browser_selector_aliases(*, selector: str, action: str) -> str:
+    base = str(selector or "").strip()
+    if not base:
+        return ""
+    candidates: List[str] = [base]
+    low = base.lower()
+    compose_hint = any(
+        marker in low
+        for marker in (
+            "tweetbutton",
+            "compose/post",
+            "compose",
+            "newtweet",
+            "sidenav_newtweet_button",
+            "apptabbar_newtweet_link",
+        )
+    )
+
+    if compose_hint:
+        candidates.extend(
+            [
+                "[data-testid='tweetButton']",
+                "button[data-testid='tweetButton']",
+                "div[data-testid='tweetButton']",
+                "[data-testid='tweetButtonInline']",
+                "button[data-testid='tweetButtonInline']",
+                "div[data-testid='tweetButtonInline']",
+                "a[href='/compose/post']",
+                "a[href*='/compose/post']",
+                "[data-testid='SideNav_NewTweet_Button']",
+                "a[data-testid='SideNav_NewTweet_Button']",
+                "button[data-testid='SideNav_NewTweet_Button']",
+                "[data-testid='AppTabBar_NewTweet_Link']",
+                "a[data-testid='AppTabBar_NewTweet_Link']",
+                "a[aria-label='Post']",
+                "a[aria-label='Tweet']",
+                "[aria-label='Post'][role='button']",
+                "[aria-label='Post'][role='link']",
+                "button[aria-label='Post']",
+                "button[aria-label='Tweet']",
+            ]
+        )
+
+    if ("tweettextarea_0" in low) or ("post text" in low):
+        candidates.extend(
+            [
+                "[data-testid='tweetTextarea_0']",
+                "div[data-testid='tweetTextarea_0']",
+                "[data-testid='tweetTextarea_0'] [contenteditable='true']",
+                "[data-testid='tweetTextarea_0RichTextInputContainer'] [contenteditable='true']",
+                "div[aria-label='Post text'][role='textbox']",
+                "div[contenteditable='true'][role='textbox']",
+                "div[contenteditable='true'][aria-label='Post text']",
+            ]
+        )
+
+    # For click flows on X, include both compose-entry and publish button targets.
+    if action == "click" and compose_hint:
+        candidates.extend(
+            [
+                "[data-testid='SideNav_NewTweet_Button']",
+                "[data-testid='AppTabBar_NewTweet_Link']",
+                "[data-testid='tweetButton']",
+                "[data-testid='tweetButtonInline']",
+            ]
+        )
+
+    unique: List[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        clipped = _clip_string(item, _BROWSER_ACTION_MAX_SELECTOR_CHARS)
+        if not clipped or clipped in seen:
+            continue
+        seen.add(clipped)
+        unique.append(clipped)
+    return ",".join(unique)
+
+
 def _build_browser_action_script(plan: List[Dict[str, Any]], ref_map: Optional[Dict[str, str]] = None) -> str:
     steps_json = json.dumps(plan, ensure_ascii=True, separators=(",", ":"))
     ref_map_json = json.dumps(ref_map or {}, ensure_ascii=True, separators=(",", ":"))
@@ -949,15 +1187,36 @@ def _build_browser_action_script(plan: List[Dict[str, Any]], ref_map: Optional[D
         "const bodyText=()=>txt((document.body&&document.body.innerText)||\"\",120000);\n"
         "const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,Number(v)||0));\n"
         "const elText=(el)=>txt((el&&(el.innerText||el.textContent||el.value||\"\"))||\"\",2000);\n"
+        "const attr=(el,name)=>String((el&&el.getAttribute&&el.getAttribute(name))||'').toLowerCase();\n"
+        "const isVisible=(el)=>{if(!el||!(el instanceof Element))return false;const s=window.getComputedStyle(el);"
+        "if(!s||s.visibility==='hidden'||s.display==='none')return false;const r=el.getBoundingClientRect();"
+        "return !!(r&&r.width>0&&r.height>0);};\n"
+        "const isDisabled=(el)=>{if(!el)return true;if(el.disabled===true)return true;return attr(el,'aria-disabled')==='true';};\n"
+        "const isInteractable=(el)=>isVisible(el)&&!isDisabled(el);\n"
+        "const dedupe=(nodes)=>{const out=[];const seen=new Set();for(const n of (nodes||[])){if(!n||seen.has(n))continue;seen.add(n);out.push(n);}return out;};\n"
+        "const scoreNode=(el,step)=>{let s=0;if(isVisible(el))s+=5;if(!isDisabled(el))s+=4;"
+        "const role=attr(el,'role');if(role==='button'||role==='link')s+=2;"
+        "const tag=String(el&&el.tagName||'').toLowerCase();if(tag==='button'||tag==='a'||tag==='input'||tag==='textarea')s+=2;"
+        "const sem=(attr(el,'aria-label')+' '+attr(el,'title')+' '+elText(el).toLowerCase());"
+        "if(String(step&&step.action||'').toLowerCase()==='click'&&(sem.includes('post')||sem.includes('tweet')||sem.includes('compose')))s+=3;return s;};\n"
+        "const maybeComposeTargets=(step)=>{const hint=String(step&&step.selector||'').toLowerCase();"
+        "if(!(hint.includes('compose')||hint.includes('tweetbutton')||hint.includes('newtweet')||hint.includes('post')))return [];"
+        "const sels=[\"[data-testid='SideNav_NewTweet_Button']\",\"[data-testid='AppTabBar_NewTweet_Link']\",\"[data-testid='tweetButtonInline']\",\"[data-testid='tweetButton']\",\"a[href='/compose/post']\",\"a[href*='/compose/post']\",\"button[aria-label='Post']\",\"[aria-label='Post'][role='button']\",\"[aria-label='Post'][role='link']\"];"
+        "let nodes=[];for(const sel of sels){try{nodes=nodes.concat(Array.from(document.querySelectorAll(sel)));}catch(_){}}return nodes;};\n"
         "const query=(step)=>{"
         "if(step.ref){const sel=__refMap[String(step.ref)];if(sel){try{const el=document.querySelector(sel);if(el)return el;}catch(_){}}}"
         "let nodes=[];const sels=[];if(step.selector)sels.push(String(step.selector));"
         "if(!sels.length&&step.text_contains)sels.push(\"button,a,[role='button'],input,textarea,article,div,span\");"
         "for(const sel of sels){try{nodes=nodes.concat(Array.from(document.querySelectorAll(sel)));}catch(_e){}}"
+        "if(!nodes.length)nodes=maybeComposeTargets(step);"
+        "nodes=dedupe(nodes);"
         "if(step.text_contains){const needle=String(step.text_contains).toLowerCase();"
         "nodes=nodes.filter((n)=>elText(n).toLowerCase().includes(needle));}"
         "if(step.text_not_contains){const noNeedle=String(step.text_not_contains).toLowerCase();"
         "nodes=nodes.filter((n)=>!elText(n).toLowerCase().includes(noNeedle));}"
+        "const interactive=new Set(['click','type','focus','submit','select']);"
+        "if(interactive.has(String(step.action||'').toLowerCase())){const active=nodes.filter((n)=>isInteractable(n));if(active.length)nodes=active;}"
+        "nodes.sort((a,b)=>scoreNode(b,step)-scoreNode(a,step));"
         "if(!nodes.length)return null;const idx=clamp(step.index,0,Math.max(0,nodes.length-1));"
         "return nodes[idx]||nodes[0]||null;};\n"
         "const waitEl=async(step,timeoutMs)=>{const start=now();for(;;){const el=query(step);if(el)return el;"
@@ -967,6 +1226,15 @@ def _build_browser_action_script(plan: List[Dict[str, Any]], ref_map: Optional[D
         "const d=p?Object.getOwnPropertyDescriptor(p,'value'):null;"
         "if(d&&typeof d.set==='function'){d.set.call(el,value);}else{el.value=value;}"
         "el.dispatchEvent(new Event('input',{bubbles:true}));"
+        "el.dispatchEvent(new Event('change',{bubbles:true}));};\n"
+        "const setContentEditable=(el,value,clear)=>{if(el&&el.focus)el.focus();if(clear){"
+        "try{const sel=window.getSelection&&window.getSelection();const range=document.createRange();range.selectNodeContents(el);"
+        "if(sel){sel.removeAllRanges();sel.addRange(range);}if(document.execCommand)document.execCommand('delete',false,null);}catch(_){el.textContent='';}}"
+        "const text=String(value||'');let inserted=false;"
+        "try{if(document.execCommand){inserted=!!document.execCommand('insertText',false,text);}}catch(_){inserted=false;}"
+        "if(!inserted){el.textContent=String(el.textContent||'')+text;}"
+        "try{el.dispatchEvent(new InputEvent('input',{bubbles:true,data:text,inputType:'insertText'}));}"
+        "catch(_){el.dispatchEvent(new Event('input',{bubbles:true}));}"
         "el.dispatchEvent(new Event('change',{bubbles:true}));};\n"
         "const keyDispatch=(el,key)=>{const target=el||document.activeElement||document.body;"
         "if(target&&target.focus)target.focus();const k=String(key||'Enter');"
@@ -984,11 +1252,15 @@ def _build_browser_action_script(plan: List[Dict[str, Any]], ref_map: Optional[D
         "const steps=[];for(let i=0;i<plan.length;i++){const step=plan[i]||{};const action=String(step.action||'').toLowerCase();"
         "const timeoutMs=clamp(step.timeout_ms||15000,100,120000);try{"
         "if(action==='click'){const el=await waitEl(step,timeoutMs);if(step.scroll!==false&&el.scrollIntoView)el.scrollIntoView({block:'center',inline:'center'});"
+        "if(!isInteractable(el))throw new Error('Target is not interactable');"
         "if(typeof el.click==='function'){el.click();}else{throw new Error('Target not clickable');}"
         "steps.push({index:i,action,ok:true,target:elText(el)});continue;}"
         "if(action==='type'){const el=await waitEl(step,timeoutMs);if(step.scroll!==false&&el.scrollIntoView)el.scrollIntoView({block:'center',inline:'center'});"
-        "if(!('value' in el))throw new Error('Target does not support typing');if(el.focus)el.focus();"
-        "const base=step.clear===false?String(el.value||''):'';const next=base+String(step.text||'');setValue(el,next);if(step.submit)keyDispatch(el,'Enter');"
+        "const clear=step.clear!==false;const input=String(step.text||'');let next='';"
+        "if('value' in el){if(el.focus)el.focus();const base=clear?'':String(el.value||'');next=base+input;setValue(el,next);}"
+        "else if(el.isContentEditable||attr(el,'contenteditable')==='true'){const base=clear?'':String(el.textContent||'');next=base+input;setContentEditable(el,clear?next:input,clear);}"
+        "else{throw new Error('Target does not support typing');}"
+        "if(step.submit)keyDispatch(el,'Enter');"
         "steps.push({index:i,action,ok:true,chars:next.length});continue;}"
         "if(action==='press'){let el=null;if(step.selector||step.text_contains)el=await waitEl(step,timeoutMs);keyDispatch(el,String(step.key||'Enter'));"
         "steps.push({index:i,action,ok:true,key:String(step.key||'Enter')});continue;}"
@@ -1063,9 +1335,37 @@ def _should_try_remote(result: Dict[str, Any]) -> bool:
     )
 
 
+def _should_retry_without_tab_id(*, result: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    raw_tab_id = payload.get("tab_id")
+    if raw_tab_id is None:
+        raw_tab_id = payload.get("tabId")
+    try:
+        tab_id = int(raw_tab_id)
+    except Exception:
+        tab_id = 0
+    if tab_id <= 0:
+        return False
+    err = str(result.get("error") or "").strip().lower()
+    if not err:
+        return False
+    return (
+        "no tab with id" in err
+        or "no target tab available" in err
+        or "tab was closed" in err
+        or "invalid tab id" in err
+        or "cannot find tab" in err
+    )
+
+
 def _normalize_browser_error(message: str) -> str:
     text = str(message or "").strip()
     low = text.lower()
+    if "unsupported command type: snapshot" in low or "unsupported command type: screenshot" in low:
+        return (
+            "Connected Chrome extension is outdated and does not support snapshot/screenshot. "
+            "Reload/reinstall the extension from ./chrome-extension and retry. "
+            "Meanwhile, use browser_extract as a fallback to read page content."
+        )
     if "unsupported command type: run_script" in low:
         return (
             "Connected Chrome extension is outdated and cannot execute scripts "

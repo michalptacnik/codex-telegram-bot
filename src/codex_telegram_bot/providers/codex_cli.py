@@ -99,7 +99,17 @@ class CodexCliProvider(ProviderAdapter):
         correlation_id: str = "",
         policy_profile: str = "balanced",
     ) -> str:
-        safe_prompt = redact(prompt)
+        raw_prompt = str(prompt or "")
+        if not raw_prompt.strip():
+            log_json(
+                logger,
+                "provider.execute.error",
+                provider="codex_cli",
+                run_id=correlation_id,
+                kind="empty_prompt",
+            )
+            return "Error: empty prompt payload reached codex_cli provider."
+        safe_prompt = redact(raw_prompt)
         log_json(
             logger,
             "provider.execute.start",

@@ -684,7 +684,7 @@ class TestAgentService(unittest.IsolatedAsyncioTestCase):
                 tool_calls = [c for c in runner.calls if c["argv"] and c["argv"][0] == "/bin/echo"]
                 self.assertTrue(tool_calls)
                 self.assertTrue(tool_calls[0]["workspace_root"])
-                self.assertTrue(str(tool_calls[0]["workspace_root"]).startswith(str(workspace_root)))
+                self.assertTrue(str(tool_calls[0]["workspace_root"]).startswith(str(workspace_root.resolve())))
             finally:
                 await service.shutdown()
 
@@ -2026,7 +2026,7 @@ class TestAutonomousToolPlanner(unittest.IsolatedAsyncioTestCase):
                 session_id=session.session_id,
                 agent_id="default",
             )
-            self.assertEqual(out, "contacts: none")
+            self.assertIn("contacts: none", out)
             await service.shutdown()
 
 

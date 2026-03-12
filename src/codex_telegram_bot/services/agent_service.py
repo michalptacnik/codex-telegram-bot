@@ -12,6 +12,10 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+try:
+    import resource  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - non-POSIX fallback
+    resource = None  # type: ignore[assignment]
 
 from codex_telegram_bot.config import load_env_file, write_env_file
 from codex_telegram_bot.agent_core.capabilities import MarkdownCapabilityRegistry
@@ -68,8 +72,9 @@ from codex_telegram_bot.services.workspace_manager import WorkspaceManager
 from codex_telegram_bot.services.thin_memory import ensure_memory_layout
 from codex_telegram_bot.services.thin_memory import ThinMemoryStore
 from codex_telegram_bot.services.soul import SoulStore
-from codex_telegram_bot.services.heartbeat import HeartbeatStore
+from codex_telegram_bot.services.heartbeat import HeartbeatStore, is_heartbeat_noop_response
 from codex_telegram_bot.tools import ToolContext, ToolRegistry, ToolRequest, ToolResult, build_default_tool_registry
+from codex_telegram_bot.tools.base import NATIVE_TOOL_SCHEMAS
 from codex_telegram_bot.tools.runtime_registry import ToolRegistrySnapshot, build_runtime_tool_registry
 from codex_telegram_bot.tools.email import email_tool_enabled
 
@@ -77,10 +82,35 @@ logger = logging.getLogger(__name__)
 AGENT_ID_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
 PROVIDER_NAME_RE = re.compile(r"^[a-z0-9_-]{2,40}$")
 ALLOWED_POLICY_PROFILES = {"strict", "balanced", "trusted"}
-CONTEXT_BUDGET_TOTAL_CHARS = 12000
-CONTEXT_HISTORY_BUDGET_CHARS = 6500
-CONTEXT_RETRIEVAL_BUDGET_CHARS = 4000
-CONTEXT_SUMMARY_BUDGET_CHARS = 1200
+
+
+def _read_char_budget_env(name: str, default: int, *, minimum: int = 1000, maximum: int = 500000) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, min(value, maximum))
+
+
+CONTEXT_BUDGET_TOTAL_CHARS = _read_char_budget_env("CONTEXT_BUDGET_TOTAL_CHARS", 60000, minimum=6000)
+CONTEXT_HISTORY_BUDGET_CHARS = _read_char_budget_env(
+    "CONTEXT_HISTORY_BUDGET_CHARS",
+    max(6500, int(CONTEXT_BUDGET_TOTAL_CHARS * 0.55)),
+    minimum=3000,
+)
+CONTEXT_RETRIEVAL_BUDGET_CHARS = _read_char_budget_env(
+    "CONTEXT_RETRIEVAL_BUDGET_CHARS",
+    max(4000, int(CONTEXT_BUDGET_TOTAL_CHARS * 0.30)),
+    minimum=2000,
+)
+CONTEXT_SUMMARY_BUDGET_CHARS = _read_char_budget_env(
+    "CONTEXT_SUMMARY_BUDGET_CHARS",
+    max(1200, int(CONTEXT_BUDGET_TOTAL_CHARS * 0.10)),
+    minimum=800,
+)
 MODEL_JOB_HEARTBEAT_SEC = 15
 AUTONOMOUS_TOOL_LOOP_ENV = "AUTONOMOUS_TOOL_LOOP"
 AUTONOMOUS_PROTOCOL_MAX_DEPTH_ENV = "AUTONOMOUS_PROTOCOL_MAX_DEPTH"
@@ -500,6 +530,90 @@ TOOL_SCHEMA_MAP: Dict[str, Dict[str, Any]] = {
         "args": {"tool_id": "string (required)", "args": "object (optional)"},
     },
 }
+
+
+def _json_schema_type_label(schema: Dict[str, Any]) -> str:
+    if not isinstance(schema, dict):
+        return "value"
+    schema_type = schema.get("type")
+    if isinstance(schema_type, str) and schema_type.strip():
+        return schema_type.strip()
+    one_of = schema.get("oneOf")
+    if isinstance(one_of, list) and one_of:
+        options: List[str] = []
+        for item in one_of:
+            if not isinstance(item, dict):
+                continue
+            candidate = str(item.get("type") or "").strip()
+            if candidate and candidate not in options:
+                options.append(candidate)
+        if options:
+            return " or ".join(options)
+    return "value"
+
+
+def _native_schema_to_agent_prompt_schema(native_schema: Dict[str, Any]) -> Dict[str, Any]:
+    schema = dict(native_schema or {})
+    name = str(schema.get("name") or "").strip().lower()
+    input_schema = schema.get("input_schema")
+    args: Dict[str, str] = {}
+    constraints: List[str] = []
+    if isinstance(input_schema, dict):
+        required = {str(item).strip() for item in list(input_schema.get("required") or []) if str(item).strip()}
+        properties = input_schema.get("properties")
+        if isinstance(properties, dict):
+            for arg_name, arg_schema in properties.items():
+                key = str(arg_name or "").strip()
+                if not key:
+                    continue
+                kind = _json_schema_type_label(arg_schema if isinstance(arg_schema, dict) else {})
+                label = f"{kind} ({'required' if key in required else 'optional'})"
+                desc = ""
+                if isinstance(arg_schema, dict):
+                    desc = str(arg_schema.get("description") or "").strip()
+                if desc:
+                    label = f"{label} - {desc[:180]}"
+                args[key] = label
+        any_of = input_schema.get("anyOf")
+        if isinstance(any_of, list):
+            for item in any_of:
+                if not isinstance(item, dict):
+                    continue
+                req = [str(part).strip() for part in list(item.get("required") or []) if str(part).strip()]
+                if req:
+                    constraints.append(" + ".join(req))
+    description = str(schema.get("description") or "").strip()
+    if constraints:
+        description = (
+            f"{description} "
+            f"Constraint: provide at least one of ({' | '.join(constraints)})."
+        ).strip()
+    return {
+        "name": name,
+        "protocol": "!tool",
+        "description": description,
+        "args": args,
+    }
+
+
+def _tool_schema_for_prompt(name: str) -> Optional[Dict[str, Any]]:
+    normalized = str(name or "").strip().lower()
+    if not normalized:
+        return None
+    if normalized == "exec":
+        return dict(TOOL_SCHEMA_MAP.get("exec") or {})
+    native = NATIVE_TOOL_SCHEMAS.get(normalized)
+    if isinstance(native, dict):
+        return _native_schema_to_agent_prompt_schema(native)
+    fallback = TOOL_SCHEMA_MAP.get(normalized)
+    return dict(fallback) if isinstance(fallback, dict) else None
+
+
+# Use runtime-native schemas as source-of-truth for prompt injection to avoid
+# schema drift (for example browser_snapshot/browser_screenshot).
+for _tool_name, _native_schema in NATIVE_TOOL_SCHEMAS.items():
+    TOOL_SCHEMA_MAP[_tool_name] = _native_schema_to_agent_prompt_schema(_native_schema)
+
 APPROVAL_REQUIRED_TOOLS = {"send_email_smtp", "send_email", "soul_apply_patch"}
 
 
@@ -599,6 +713,8 @@ class AgentService:
         self._session_context_diagnostics: Dict[str, Dict[str, Any]] = {}
         self._session_workspace_roots: Dict[str, str] = {}
         self._runtime_registry_snapshots: Dict[str, ToolRegistrySnapshot] = {}
+        self._session_browser_tab_affinity: Dict[str, int] = {}
+        self._session_browser_unsupported_tools: Dict[str, set[str]] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry(
             provider_registry=provider_registry,
@@ -627,9 +743,9 @@ class AgentService:
         )
         self._last_process_cleanup_ts = 0.0
         self._process_cleanup_interval_sec = max(5, int(os.environ.get("PROCESS_CLEANUP_TICK_SEC", "15") or 15))
-        self._heartbeat_feature_enabled = (
-            (os.environ.get("ENABLE_HEARTBEAT") or "").strip().lower() in {"1", "true", "yes", "on"}
-        )
+        _hb_raw = (os.environ.get("ENABLE_HEARTBEAT") or "").strip().lower()
+        # Default to enabled; only disable with explicit "0"/"false"/"no"/"off".
+        self._heartbeat_feature_enabled = _hb_raw not in {"0", "false", "no", "off"}
         self._heartbeat_default_interval_min = max(
             30,
             min(int(os.environ.get("HEARTBEAT_INTERVAL_MIN_DEFAULT", "60") or 60), 1440),
@@ -1473,6 +1589,7 @@ class AgentService:
             workspace_root=workspace_root,
             extra_tools=extra_tools,
         )
+        snapshot = self._apply_browser_capability_filter(snapshot=snapshot, session_id=session_id)
         if not extra_tools:
             self._runtime_registry_snapshots[session_id] = snapshot
             try:
@@ -1492,6 +1609,101 @@ class AgentService:
                 disabled_tools=dict(snapshot.disabled),
             )
         return snapshot
+
+    def _browser_capability_snapshot(self) -> Dict[str, Any]:
+        if self._browser_bridge is None:
+            return {"connected": False, "supported_commands": [], "clients": []}
+        try:
+            payload = self._browser_bridge.active_extension_capabilities()
+        except Exception:
+            return {"connected": False, "supported_commands": [], "clients": []}
+        if not isinstance(payload, dict):
+            return {"connected": False, "supported_commands": [], "clients": []}
+        supported = payload.get("supported_commands")
+        normalized_supported = {
+            str(item or "").strip().lower()
+            for item in list(supported or [])
+            if str(item or "").strip()
+        }
+        emulated: List[str] = []
+        # OpenClaw parity: browser_snapshot can be emulated via run_script for
+        # legacy extension clients that do not expose native snapshot command.
+        if "run_script" in normalized_supported and "snapshot" not in normalized_supported:
+            normalized_supported.add("snapshot")
+            emulated.append("snapshot")
+        payload["supported_commands"] = sorted(normalized_supported)
+        payload["emulated_supported_commands"] = sorted({str(item).strip().lower() for item in emulated if str(item).strip()})
+        payload["connected"] = bool(payload.get("connected"))
+        return payload
+
+    def _apply_browser_capability_filter(self, *, snapshot: ToolRegistrySnapshot, session_id: str) -> ToolRegistrySnapshot:
+        tools = dict(snapshot.tools)
+        disabled = dict(snapshot.disabled)
+        schemas = list(snapshot.schemas)
+
+        def _disable_tool(name: str, reason: str) -> None:
+            normalized = str(name or "").strip().lower()
+            if not normalized:
+                return
+            if normalized in tools:
+                tools.pop(normalized, None)
+                disabled[normalized] = reason
+            schemas[:] = [item for item in schemas if str(item.get("name") or "").strip().lower() != normalized]
+
+        # Session-learned suppressions from previous deterministic incompatibility
+        # outcomes (legacy extension mode).
+        for suppressed in sorted(self._session_browser_unsupported_tools.get(session_id, set())):
+            _disable_tool(
+                suppressed,
+                "disabled: unsupported by connected browser extension (session compatibility cache)",
+            )
+
+        browser_tool_to_command = {
+            "browser_open": "open_url",
+            "browser_navigate": "navigate_url",
+            "browser_script": "run_script",
+            "browser_action": "run_script",
+            "browser_extract": "run_script",
+            "browser_snapshot": "snapshot",
+            "browser_screenshot": "screenshot",
+        }
+        capabilities = self._browser_capability_snapshot()
+        connected = bool(capabilities.get("connected"))
+        supported_commands = {
+            str(item or "").strip().lower()
+            for item in list(capabilities.get("supported_commands") or [])
+            if str(item or "").strip()
+        }
+        if connected and supported_commands:
+            for tool_name, command_name in browser_tool_to_command.items():
+                if tool_name not in tools:
+                    continue
+                if command_name not in supported_commands:
+                    _disable_tool(
+                        tool_name,
+                        f"disabled: extension does not support command '{command_name}'",
+                    )
+        elif connected:
+            # Legacy metadata path: fall back to runtime capability probe.
+            for tool_name, command_name in browser_tool_to_command.items():
+                if tool_name not in tools:
+                    continue
+                try:
+                    supported = bool(self._browser_bridge.extension_supports_command(command_name))
+                except Exception:
+                    supported = True
+                if not supported:
+                    _disable_tool(
+                        tool_name,
+                        f"disabled: extension compatibility probe failed for '{command_name}'",
+                    )
+
+        return ToolRegistrySnapshot(
+            tools=tools,
+            disabled=disabled,
+            schemas=schemas,
+            invariants=snapshot.invariants,
+        )
 
     def enforce_transport_text_contract(
         self,
@@ -1520,6 +1732,60 @@ class AgentService:
             )
             return SAFE_RUNTIME_ERROR_TEXT
         return to_telegram_text(events, safe_fallback=SAFE_RUNTIME_ERROR_TEXT)
+
+    async def try_recover_leaked_tool_call(
+        self,
+        *,
+        session_id: str,
+        raw_output: str,
+    ) -> Optional[str]:
+        """Last-resort recovery: if raw_output contains a parseable tool call
+        that the normal execution engine failed to handle, attempt to execute
+        it here before the transport boundary drops it.
+
+        Returns the tool output on success, or None if recovery is not possible.
+        """
+        parsed = _extract_tool_invocation_from_output(raw_output)
+        if not parsed:
+            return None
+        tool_name, tool_args = parsed
+        snapshot = self.runtime_tool_snapshot(session_id=session_id)
+        if tool_name not in snapshot.names():
+            return None
+        workspace = self.session_workspace(session_id=session_id)
+        action_id = "recovery-" + uuid.uuid4().hex[:8]
+        log_json(
+            logger,
+            "transport_boundary.recovery_attempt",
+            session_id=session_id,
+            action_id=action_id,
+            tool_name=tool_name,
+            tool_args_keys=sorted(tool_args.keys()) if tool_args else [],
+        )
+        try:
+            result = await self._execute_registered_tool_action(
+                action_id=action_id,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                workspace_root=workspace,
+                policy_profile=self._agent_policy_profile(agent_id="default"),
+                extra_tools=dict(snapshot.tools),
+                allowed_tool_names=snapshot.names(),
+                session_id=session_id,
+            )
+        except Exception:
+            logger.exception("transport_boundary.recovery_failed session=%s", session_id)
+            return None
+        if not result.ok:
+            return None
+        log_json(
+            logger,
+            "transport_boundary.recovery_ok",
+            session_id=session_id,
+            action_id=action_id,
+            tool_name=tool_name,
+        )
+        return _compact_tool_output(result.output)
 
     def run_retention_sweep(self) -> Dict[str, Any]:
         """Run session retention policy sweep. Returns a summary dict."""
@@ -1657,6 +1923,10 @@ class AgentService:
         if len(prompt) > CONTEXT_BUDGET_TOTAL_CHARS:
             lines = _trim_lines_from_end(lines, CONTEXT_BUDGET_TOTAL_CHARS)
             prompt = "\n".join(lines)
+        if not prompt.strip():
+            # Never enqueue an empty provider prompt (codex exec - requires stdin).
+            fallback = str(user_prompt or "").strip()
+            prompt = (fallback[:CONTEXT_BUDGET_TOTAL_CHARS] if fallback else "user: (no prompt)")
         self._session_context_diagnostics[session_id] = {
             "summary_chars": len(used_summary),
             "soul_chars": sum(len(x) for x in soul_lines),
@@ -1732,6 +2002,34 @@ class AgentService:
                     lines.append(f"  {bullet}")
                 else:
                     lines.append(f"  - {bullet}")
+        return lines
+
+    def _build_browser_capability_context_for_tools(self, tool_names: Sequence[str]) -> List[str]:
+        selected = set(_normalize_tool_names(list(tool_names or [])))
+        if not any(name.startswith("browser_") for name in selected):
+            return []
+        snapshot = self._browser_capability_snapshot()
+        connected = bool(snapshot.get("connected"))
+        active_clients = int(snapshot.get("active_clients") or 0)
+        supported = [str(item) for item in list(snapshot.get("supported_commands") or []) if str(item).strip()]
+        if not connected:
+            return ["Browser extension capabilities: no active extension client reported."]
+        lines = [
+            "Browser extension capabilities:",
+            f"- active_clients={active_clients}",
+            f"- supported_commands={', '.join(supported) if supported else '(legacy metadata unavailable)'}",
+        ]
+        clients = list(snapshot.get("clients") or [])
+        if clients:
+            versions: List[str] = []
+            for item in clients[:3]:
+                if not isinstance(item, dict):
+                    continue
+                version = str(item.get("extension_version") or "").strip() or "unknown"
+                instance = str(item.get("instance_id") or "").strip()
+                versions.append(f"{instance}:{version}" if instance else version)
+            if versions:
+                lines.append(f"- extension_versions={', '.join(versions)}")
         return lines
 
     def _build_retrieval_context_with_meta(self, user_prompt: str, limit: int = 4) -> tuple[List[str], Dict[str, Any]]:
@@ -2009,6 +2307,11 @@ class AgentService:
                 approval_required=True,
                 approval_granted=True,
                 exit_code=(0 if result_obj.ok else 1),
+                **self._tool_exec_post_meta(
+                    exit_code=(0 if result_obj.ok else 1),
+                    tool_name=tool_name,
+                    output=raw_output,
+                ),
             )
             self._run_store.set_tool_approval_status(approval_id, "executed")
             self.append_session_assistant_message(session_id=session_id, content=text, run_id=tool_run_id)
@@ -2046,6 +2349,11 @@ class AgentService:
             approval_required=True,
             approval_granted=True,
             exit_code=result.returncode,
+            **self._tool_exec_post_meta(
+                exit_code=result.returncode,
+                output=(result.stderr or result.stdout or ""),
+                stderr=(result.stderr or ""),
+            ),
         )
         self._run_store.set_tool_approval_status(approval_id, "executed")
         raw_output = (
@@ -2583,6 +2891,7 @@ class AgentService:
         observations: List[str] = []
         executed_action_summaries: List[Dict[str, Any]] = []
         session_workspace = workspace_root
+        prefer_current_tab = _prompt_prefers_current_browser_tab(cleaned_prompt or prompt)
         for index, action in enumerate(actions_to_run, start=1):
             action_id = "tool-" + uuid.uuid4().hex[:8]
             command = action.checkpoint_command()
@@ -2620,6 +2929,29 @@ class AgentService:
                 },
             )
             if action.kind == "tool":
+                if prefer_current_tab and str(action.tool_name or "").strip().lower() == "browser_open":
+                    guarded_args = dict(action.tool_args or {})
+                    raw_new_tab = guarded_args.get("new_tab")
+                    if raw_new_tab is None:
+                        guarded_args["new_tab"] = False
+                        action = LoopAction(
+                            kind=action.kind,
+                            argv=list(action.argv),
+                            tool_name=action.tool_name,
+                            tool_args=guarded_args,
+                            timeout_sec=int(action.timeout_sec),
+                        )
+                        command = action.checkpoint_command()
+                    elif str(raw_new_tab).strip().lower() not in {"0", "false", "no", "off"}:
+                        guarded_args["new_tab"] = False
+                        action = LoopAction(
+                            kind=action.kind,
+                            argv=list(action.argv),
+                            tool_name=action.tool_name,
+                            tool_args=guarded_args,
+                            timeout_sec=int(action.timeout_sec),
+                        )
+                        command = action.checkpoint_command()
                 approval_required = self._tool_action_requires_approval(action.tool_name)
                 log_json(
                     logger,
@@ -2713,6 +3045,11 @@ class AgentService:
                         approval_required=True,
                         approval_granted=False,
                         exit_code=None,
+                        **self._tool_exec_post_meta(
+                            exit_code=None,
+                            tool_name=action.tool_name,
+                            output="approval pending",
+                        ),
                     )
                     action_preview = _format_tool_action_preview(action.tool_name, action.tool_args)
                     msg = (
@@ -2751,6 +3088,11 @@ class AgentService:
                     approval_required=False,
                     approval_granted=True,
                     exit_code=rc,
+                    **self._tool_exec_post_meta(
+                        exit_code=rc,
+                        tool_name=action.tool_name,
+                        output=result.output,
+                    ),
                 )
                 if self._run_store:
                     self._run_store.upsert_tool_loop_checkpoint(
@@ -2833,6 +3175,10 @@ class AgentService:
                     approval_required=approval_required,
                     approval_granted=False,
                     exit_code=126,
+                    **self._tool_exec_post_meta(
+                        exit_code=126,
+                        output=decision.reason,
+                    ),
                 )
                 return msg
 
@@ -2884,6 +3230,10 @@ class AgentService:
                         approval_required=True,
                         approval_granted=False,
                         exit_code=None,
+                        **self._tool_exec_post_meta(
+                            exit_code=None,
+                            output="approval pending",
+                        ),
                     )
                     command_preview = " ".join(argv)
                     msg = (
@@ -2946,6 +3296,10 @@ class AgentService:
                     approval_required=True,
                     approval_granted=False,
                     exit_code=None,
+                    **self._tool_exec_post_meta(
+                        exit_code=None,
+                        output="approval pending",
+                    ),
                 )
                 command_preview = " ".join(argv)
                 msg = (
@@ -2980,6 +3334,11 @@ class AgentService:
                 approval_required=False,
                 approval_granted=True,
                 exit_code=result.returncode,
+                **self._tool_exec_post_meta(
+                    exit_code=result.returncode,
+                    output=(result.stderr or result.stdout or ""),
+                    stderr=(result.stderr or ""),
+                ),
             )
             observations.append(
                 f"{action_id} rc={result.returncode}\n"
@@ -3104,14 +3463,28 @@ class AgentService:
         profile_state = self.execution_profile_state()
         browser_connected = False
         browser_active_clients = 0
+        browser_supported_commands: List[str] = []
+        browser_extension_versions: List[str] = []
         if self._browser_bridge is not None:
             try:
                 browser_status = self._browser_bridge.status()
                 browser_connected = bool(browser_status.get("connected"))
                 browser_active_clients = int(browser_status.get("active_clients") or 0)
+                browser_supported_commands = [
+                    str(item) for item in list(browser_status.get("supported_commands") or []) if str(item).strip()
+                ]
+                clients = list(browser_status.get("clients") or [])
+                browser_extension_versions = [
+                    str(item.get("extension_version") or "").strip()
+                    for item in clients
+                    if isinstance(item, dict) and str(item.get("extension_version") or "").strip()
+                ]
             except Exception:
                 browser_connected = False
                 browser_active_clients = 0
+                browser_supported_commands = []
+                browser_extension_versions = []
+        fd_usage = _fd_usage_snapshot()
         return {
             "execution_backend": backend,
             "execution_runner": runner_name,
@@ -3120,12 +3493,17 @@ class AgentService:
             "browser_bridge_enabled": bool(self._browser_bridge is not None),
             "browser_bridge_connected": browser_connected,
             "browser_bridge_active_clients": browser_active_clients,
+            "browser_supported_commands": browser_supported_commands,
+            "browser_extension_versions": browser_extension_versions,
             "skill_packs_enabled": bool(self._skill_pack_loader is not None),
             "skill_marketplace_enabled": bool(self._skill_marketplace is not None),
             "tool_policy_enabled": bool(self._tool_policy_engine is not None),
             "execution_profile": profile_state.get("profile", PROFILE_SAFE),
             "unsafe_active": bool(profile_state.get("unsafe_active", False)),
             "unsafe_seconds_remaining": int(profile_state.get("seconds_until_unsafe_expiry", 0) or 0),
+            "fd_open_count": int(fd_usage.get("open_fds") or 0),
+            "fd_soft_limit": int(fd_usage.get("soft_limit") or 0),
+            "fd_usage_pct": int(fd_usage.get("usage_pct") or 0),
         }
 
     def execution_profile_state(self) -> Dict[str, Any]:
@@ -3519,6 +3897,11 @@ class AgentService:
                 ok=False,
                 output=f"{action_id} tool={tool_name} error=invalid_path outside_workspace",
             )
+        normalized_args = self._inject_browser_tab_affinity(
+            session_id=session_id,
+            tool_name=normalized_tool_name,
+            tool_args=normalized_args,
+        )
         if normalized_tool_name == "shell_exec":
             normalized_args.setdefault("_chat_id", int(chat_id or 0))
             normalized_args.setdefault("_user_id", int(user_id or 0))
@@ -3560,10 +3943,179 @@ class AgentService:
         except Exception as exc:
             return ToolResult(ok=False, output=f"{action_id} tool={tool_name} error=tool_exception {exc}")
         status = "ok" if result.ok else "error"
+        self._record_browser_tool_outcome(
+            session_id=session_id,
+            tool_name=normalized_tool_name,
+            ok=bool(result.ok),
+            output=str(result.output or ""),
+        )
         return ToolResult(
             ok=result.ok,
             output=f"{action_id} tool={tool_name} status={status}\n{result.output}",
         )
+
+    def _inject_browser_tab_affinity(self, *, session_id: str, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = str(tool_name or "").strip().lower()
+        if normalized not in {
+            "browser_script",
+            "browser_action",
+            "browser_extract",
+            "browser_snapshot",
+            "browser_screenshot",
+        }:
+            return dict(tool_args or {})
+        args = dict(tool_args or {})
+        current = int(args.get("tab_id") or 0) if str(args.get("tab_id") or "").strip() else 0
+        if current > 0:
+            return args
+        preferred_tab_id = int(self._session_browser_tab_affinity.get(session_id, 0) or 0)
+        if preferred_tab_id > 0:
+            args["tab_id"] = preferred_tab_id
+        return args
+
+    def _record_browser_tool_outcome(self, *, session_id: str, tool_name: str, ok: bool, output: str) -> None:
+        normalized = str(tool_name or "").strip().lower()
+        if not normalized.startswith("browser_"):
+            return
+        payload = self._extract_first_json_object(output)
+        tab_id = self._extract_tab_id_from_browser_payload(payload)
+        if ok and tab_id > 0:
+            self._session_browser_tab_affinity[session_id] = tab_id
+        if ok:
+            return
+        unsupported_tools = self._unsupported_browser_tools_from_error(tool_name=normalized, output=output)
+        if not unsupported_tools:
+            return
+        existing = self._session_browser_unsupported_tools.setdefault(session_id, set())
+        changed = False
+        for name in unsupported_tools:
+            if name not in existing:
+                existing.add(name)
+                changed = True
+        if changed:
+            self._runtime_registry_snapshots.pop(session_id, None)
+
+    def _unsupported_browser_tools_from_error(self, *, tool_name: str, output: str) -> set[str]:
+        text = str(output or "").strip().lower()
+        if not text:
+            return set()
+        unsupported: set[str] = set()
+        if "unsupported command type: snapshot" in text or "does not support browser_snapshot" in text:
+            unsupported.add("browser_snapshot")
+        if "unsupported command type: screenshot" in text or "does not support browser_screenshot" in text:
+            unsupported.add("browser_screenshot")
+        if "unsupported command type: run_script" in text or "cannot execute scripts" in text:
+            unsupported.update({"browser_script", "browser_action", "browser_extract"})
+        if "outdated" in text and "browser_snapshot" in text:
+            unsupported.add("browser_snapshot")
+        if "outdated" in text and "browser_screenshot" in text:
+            unsupported.add("browser_screenshot")
+        if "outdated" in text and "scripts" in text:
+            unsupported.update({"browser_script", "browser_action", "browser_extract"})
+        if "unsupported command type" in text and not unsupported and tool_name.startswith("browser_"):
+            unsupported.add(tool_name)
+        return unsupported
+
+    def _extract_first_json_object(self, text: str) -> Dict[str, Any]:
+        raw = str(text or "").strip()
+        if not raw:
+            return {}
+        candidates: List[str] = [raw]
+        if "\n" in raw:
+            lines = [ln for ln in raw.splitlines() if ln.strip()]
+            if lines:
+                candidates.append(lines[-1])
+                if len(lines) > 1:
+                    candidates.append("\n".join(lines[1:]))
+        for candidate in candidates:
+            payload = str(candidate or "").strip()
+            if not payload:
+                continue
+            try:
+                parsed = json.loads(payload)
+            except Exception:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+        return {}
+
+    def _extract_tab_id_from_browser_payload(self, payload: Dict[str, Any]) -> int:
+        if not isinstance(payload, dict):
+            return 0
+        for value in (
+            payload.get("tab_id"),
+            (payload.get("command") or {}).get("tab_id") if isinstance(payload.get("command"), dict) else None,
+            (payload.get("data") or {}).get("tab_id") if isinstance(payload.get("data"), dict) else None,
+        ):
+            try:
+                tab_id = int(value or 0)
+            except Exception:
+                tab_id = 0
+            if tab_id > 0:
+                return tab_id
+        command = payload.get("command")
+        if isinstance(command, dict):
+            data = command.get("data")
+            if isinstance(data, dict):
+                try:
+                    nested = int(data.get("tab_id") or 0)
+                except Exception:
+                    nested = 0
+                if nested > 0:
+                    return nested
+                result = data.get("result")
+                if isinstance(result, dict):
+                    try:
+                        nested_result = int(result.get("tab_id") or 0)
+                    except Exception:
+                        nested_result = 0
+                    if nested_result > 0:
+                        return nested_result
+        return 0
+
+    def _tool_exec_post_meta(
+        self,
+        *,
+        exit_code: Optional[int],
+        tool_name: str = "",
+        output: str = "",
+        stderr: str = "",
+    ) -> Dict[str, Any]:
+        preview_limit = 220
+        merged = str(output or "").strip()
+        if not merged and stderr:
+            merged = str(stderr or "").strip()
+        low = merged.lower()
+        error_class = ""
+        if exit_code not in (None, 0):
+            error_class = "nonzero_exit"
+        if "unsupported command type" in low:
+            error_class = "unsupported_command"
+        elif "outdated" in low:
+            error_class = "outdated_extension"
+        elif "tool_exception" in low:
+            error_class = "tool_exception"
+        elif "blocked" in low:
+            error_class = "policy_blocked"
+        payload = self._extract_first_json_object(merged)
+        browser_command_status = ""
+        browser_command_type = ""
+        browser_command_id = ""
+        if isinstance(payload, dict):
+            cmd = payload.get("command")
+            if isinstance(cmd, dict):
+                browser_command_status = str(cmd.get("status") or "").strip().lower()
+                browser_command_type = str(cmd.get("command_type") or "").strip().lower()
+                browser_command_id = str(cmd.get("command_id") or "").strip()
+            else:
+                browser_command_status = str(payload.get("status") or "").strip().lower()
+        return {
+            "error_class": error_class,
+            "error_message_preview": merged[:preview_limit],
+            "browser_command_status": browser_command_status,
+            "browser_command_type": browser_command_type,
+            "browser_command_id": browser_command_id,
+        }
 
     async def _execute_cron_job(self, job: Dict[str, Any]) -> bool:
         if self._run_store is None:
@@ -3794,6 +4346,7 @@ class AgentService:
             tool_names = ["exec"]
         tool_lines = _render_tool_schema_lines(tool_names)
         capability_lines = self._build_capability_context_for_tools(tool_names, max_capabilities=4)
+        capability_lines.extend(self._build_browser_capability_context_for_tools(tool_names))
         guidance = [
             "You are in autonomous execution mode.",
             "The previous response described intent but did not execute.",
@@ -3820,11 +4373,16 @@ class AgentService:
                 "Use ref numbers from the snapshot for reliable element targeting."
             )
         if "browser_action" in normalized_tools:
-            guidance.append("If using browser_action, include args.action or a non-empty args.steps list. Use ref from browser_snapshot for targeting.")
+            guidance.append(
+                "If using browser_action, prefer args.action or non-empty args.steps. "
+                "If omitted, runtime falls back to a safe extract step. "
+                "Use ref from browser_snapshot for precise targeting."
+            )
         if "browser_script" in normalized_tools:
             guidance.append("If using browser_script, args MUST include non-empty `script` JavaScript.")
         if "browser_open" in normalized_tools or "browser_navigate" in normalized_tools:
             guidance.append("If using browser_open/browser_navigate, include `url` or `query`.")
+        guidance.extend(_browser_capability_warning_lines(prompt=prompt, selected_tools=tool_names))
         guidance.extend(tool_lines)
         if capability_lines:
             guidance.extend(capability_lines)
@@ -3967,6 +4525,30 @@ class AgentService:
                 )
             else:
                 text = recovered
+
+        if (
+            allow_correction
+            and has_executed_tool
+            and executed_slash is None
+            and _autonomous_tool_followup_required(base_prompt, text)
+            and autonomy_depth < self._autonomous_protocol_max_depth()
+        ):
+            continue_prompt = (
+                "Continue executing the remaining browser actions until publish is complete.\n"
+                f"Original task:\n{(goal or base_prompt).strip()}\n\n"
+                f"Latest tool result:\n{text}\n\n"
+                "Do not stop at extraction or draft steps. "
+                "If already published, return posted text and permalink."
+            )
+            return await self.run_prompt_with_tool_loop(
+                prompt=continue_prompt,
+                chat_id=chat_id,
+                user_id=user_id,
+                session_id=session_id,
+                agent_id=agent_id,
+                progress_callback=progress_callback,
+                autonomy_depth=autonomy_depth + 1,
+            )
 
         if (
             allow_correction
@@ -4126,7 +4708,11 @@ class AgentService:
             return
         try:
             await callback(payload)
-        except Exception:
+        except Exception as exc:
+            msg = str(exc or "").strip().lower()
+            if any(token in msg for token in ("websocketdisconnect", "close message has been sent", "closed websocket")):
+                logger.debug("tool loop progress callback disconnected")
+                return
             logger.debug("tool loop progress callback failed", exc_info=True)
 
     async def _wait_job_with_progress(
@@ -4260,6 +4846,7 @@ class AgentService:
         provider_for_call = self._provider_for_agent(agent_id=agent_id)
         tool_lines = _render_tool_schema_lines(normalized_tools)
         capability_lines = self._build_capability_context_for_tools(normalized_tools, max_capabilities=4)
+        capability_lines.extend(self._build_browser_capability_context_for_tools(normalized_tools))
         call_prompt = self._build_need_tools_prompt(
             prompt=prompt,
             goal=goal,
@@ -4323,14 +4910,20 @@ class AgentService:
             lines.append(
                 "Browser workflow: ALWAYS call browser_snapshot FIRST to see page elements and get "
                 "element refs. Then use ref parameter in browser_action to interact. Cycle: "
-                "navigate → snapshot → read refs → act on ref → snapshot → verify."
+                "navigate → snapshot → read refs → act on ref → snapshot → verify. "
+                "If browser_snapshot fails with 'outdated' or 'Unsupported command type', "
+                "fall back to browser_extract to read page content. Do NOT stop."
             )
         if "browser_action" in selected:
-            lines.append("Tool contract: browser_action must include args.action or non-empty args.steps. Use ref from browser_snapshot for reliable targeting.")
+            lines.append(
+                "Tool contract: browser_action should include args.action or non-empty args.steps "
+                "(empty args auto-fallback to extract). Use ref from browser_snapshot for reliable targeting."
+            )
         if "browser_script" in selected:
             lines.append("Tool contract: browser_script args MUST include non-empty `script` JavaScript.")
         if "browser_open" in selected or "browser_navigate" in selected:
             lines.append("Tool contract: browser_open/browser_navigate require `url` or `query`.")
+        lines.extend(_browser_capability_warning_lines(prompt=prompt, selected_tools=selected_tools))
         if tool_lines:
             lines.extend(tool_lines)
         if capability_lines:
@@ -4559,6 +5152,16 @@ class AgentService:
                 failed += 1
                 logger.exception("heartbeat tick failed session=%s", str(row.get("session_id") or ""))
         return {"heartbeat_due": len(due), "heartbeat_ran": ran, "heartbeat_failed": failed}
+
+    def list_recent_tool_events(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Return the most recent tool execution events from the run_events table."""
+        if self._run_store is None:
+            return []
+        try:
+            return self._run_store.list_recent_events_by_type(type_prefix="tool.", limit=limit)
+        except Exception:
+            logger.debug("list_recent_tool_events failed", exc_info=True)
+            return []
 
     def list_skills(self) -> List[Dict[str, Any]]:
         if self._skill_manager is None:
@@ -4873,6 +5476,88 @@ def _prompt_requires_browser_actuation(prompt: str) -> bool:
     return any(marker in low for marker in implicit_markers)
 
 
+def _prompt_prefers_current_browser_tab(prompt: str) -> bool:
+    low = (prompt or "").strip().lower()
+    if not low:
+        return False
+    current_tab_markers = (
+        "this tab",
+        "current tab",
+        "already open",
+        "in this browser",
+        "on this page",
+    )
+    return any(marker in low for marker in current_tab_markers)
+
+
+def _prompt_requires_social_publish_completion(prompt: str) -> bool:
+    low = (prompt or "").strip().lower()
+    if not low:
+        return False
+    markers = (
+        "post it",
+        "publish",
+        "tweet",
+        "comment",
+        "reply",
+        "retweet",
+        "quote",
+        "post url",
+    )
+    return _prompt_requires_browser_actuation(prompt) and any(marker in low for marker in markers)
+
+
+def _extract_compact_tool_name(output: str) -> str:
+    text = str(output or "")
+    match = re.search(r"\btool=([a-z0-9_]+)\b", text, flags=re.I)
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip().lower()
+
+
+def _tool_output_contains_social_permalink(output: str) -> bool:
+    low = str(output or "").lower()
+    return ("/status/" in low) or ("post_url=" in low) or ("tweet_url=" in low)
+
+
+def _autonomous_tool_followup_required(base_prompt: str, tool_output: str) -> bool:
+    if not _prompt_requires_social_publish_completion(base_prompt):
+        return False
+    if _tool_output_indicates_error(tool_output):
+        return False
+    if _tool_output_contains_social_permalink(tool_output):
+        return False
+    tool_name = _extract_compact_tool_name(tool_output)
+    if tool_name in {"browser_extract", "browser_status", "browser_snapshot", "browser_screenshot"}:
+        return True
+    if tool_name in {"browser_script", "browser_action", "browser_js"}:
+        low = str(tool_output or "").lower()
+        # Draft/inspection-only script outputs are not terminal for publish tasks.
+        if any(marker in low for marker in ("draft", "compose", "extract", "posted\": false", "posted: false")):
+            return True
+    return False
+
+
+def _browser_capability_warning_lines(*, prompt: str, selected_tools: Sequence[str]) -> List[str]:
+    selected = set(_normalize_tool_names(list(selected_tools)))
+    lines: List[str] = []
+    if "browser_action" in selected and "browser_snapshot" not in selected:
+        lines.append(
+            "Browser capability warning: browser_snapshot is unavailable; use browser_extract to inspect the page "
+            "state before browser_action/browser_script."
+        )
+    if "browser_screenshot" not in selected and ("browser_action" in selected or "browser_extract" in selected):
+        lines.append(
+            "Browser capability warning: screenshot capture may be unavailable on this extension client."
+        )
+    if _prompt_prefers_current_browser_tab(prompt):
+        lines.append(
+            "Current-tab intent: do not open a new tab. Prefer in-tab actions or browser_navigate and set "
+            "browser_open.new_tab=false when browser_open is unavoidable."
+        )
+    return lines
+
+
 def _browser_guardrail_tools_for_prompt(prompt: str, available_tool_names: Sequence[str]) -> List[str]:
     available = set(_normalize_tool_names(list(available_tool_names)))
     picks: List[str] = []
@@ -4982,18 +5667,16 @@ def _browser_tool_args_error(tool_name: str, args: Dict[str, Any]) -> str:
     name = str(tool_name or "").strip().lower()
     payload = dict(args or {})
     if name == "browser_action":
-        has_action = _has_nonempty_tool_arg(payload, "action")
-        has_steps = isinstance(payload.get("steps"), list) and len(payload.get("steps") or []) > 0
-        if not has_action and not has_steps:
-            return "browser_action requires args.action or non-empty args.steps."
+        # Permissive runtime: empty browser_action args are accepted and tool-level
+        # fallback defaults to a safe extract step.
+        return ""
     if name == "browser_script":
         if not _has_nonempty_tool_arg(payload, "script"):
             return "browser_script requires non-empty args.script."
     if name in {"browser_open", "browser_navigate"}:
-        has_url = _has_nonempty_tool_arg(payload, "url")
-        has_query = _has_nonempty_tool_arg(payload, "query")
-        if not has_url and not has_query:
-            return f"{name} requires either args.url or args.query."
+        # Permissive runtime: when url/query is omitted, tool-level fallback
+        # reuses current active tab URL when available.
+        return ""
     return ""
 
 
@@ -5054,13 +5737,13 @@ def _default_probe_tools_for_prompt(prompt: str, available_tool_names: Sequence[
 def _render_tool_schema_lines(selected_tools: Sequence[str]) -> List[str]:
     lines: List[str] = []
     for name in _normalize_tool_names(selected_tools):
-        schema = TOOL_SCHEMA_MAP.get(name)
+        schema = _tool_schema_for_prompt(name)
         if not schema:
             continue
         lines.append("- " + json.dumps(schema, ensure_ascii=True, sort_keys=True))
     if lines:
         return lines
-    return ["- " + json.dumps(TOOL_SCHEMA_MAP["exec"], ensure_ascii=True, sort_keys=True)]
+    return ["- " + json.dumps(_tool_schema_for_prompt("exec"), ensure_ascii=True, sort_keys=True)]
 
 
 def _parse_probe_output(raw: str, available_tool_names: Sequence[str], default_max_steps: int) -> ProbeDecision:
@@ -5196,6 +5879,36 @@ def _loop_action_tool_names(actions: Sequence[LoopAction]) -> List[str]:
         seen.add(name)
         names.append(name)
     return names
+
+
+def _fd_usage_snapshot() -> Dict[str, int]:
+    soft_limit = 0
+    hard_limit = 0
+    if resource is not None:
+        try:
+            soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)  # type: ignore[arg-type]
+        except Exception:
+            soft_limit, hard_limit = 0, 0
+    open_fds = 0
+    for fd_path in ("/proc/self/fd", "/dev/fd"):
+        try:
+            open_fds = len(os.listdir(fd_path))
+        except Exception:
+            continue
+        if open_fds > 0:
+            break
+    usage_pct = 0
+    if soft_limit and open_fds:
+        try:
+            usage_pct = int(max(0, min(100, round((open_fds / soft_limit) * 100))))
+        except Exception:
+            usage_pct = 0
+    return {
+        "open_fds": int(open_fds or 0),
+        "soft_limit": int(soft_limit or 0),
+        "hard_limit": int(hard_limit or 0),
+        "usage_pct": int(usage_pct or 0),
+    }
 
 
 def _resolve_workspace_bound_path(raw_path: Any, workspace_root: Path) -> Optional[str]:
@@ -5400,9 +6113,40 @@ def _parse_tool_directive(
     obj = _decode_tool_payload_json(payload)
     if isinstance(obj, dict):
         tool_name = str(obj.get("name") or obj.get("tool") or "").strip().lower()
-        args = obj.get("args")
+        action_used_as_tool_name = False
+        if not tool_name:
+            # Some models emit {"action":"tool_name", ...} for generic tool calls.
+            action_name = str(obj.get("action") or "").strip().lower()
+            if action_name and (
+                (preferred_tools and action_name in set(_normalize_tool_names(list(preferred_tools))))
+                or action_name in TOOL_SCHEMA_MAP
+            ):
+                tool_name = action_name
+                action_used_as_tool_name = True
+
+        candidate_args = (
+            obj.get("args")
+            or obj.get("kwargs")
+            or obj.get("arguments")
+            or obj.get("input")
+            or obj.get("parameters")
+        )
+        merged_args: Dict[str, Any] = {}
+        if isinstance(candidate_args, dict):
+            merged_args.update(dict(candidate_args))
+        direct_args = dict(obj)
+        metadata_keys = {"name", "tool", "args", "kwargs", "arguments", "input", "parameters"}
+        # Keep top-level "action" as a normal argument for tools that use it
+        # (for example browser_action / shell_exec). Only strip it when it was
+        # consumed as the tool-name alias.
+        if action_used_as_tool_name:
+            metadata_keys.add("action")
+        for key in metadata_keys:
+            direct_args.pop(key, None)
+        if direct_args:
+            merged_args.update(direct_args)
         if tool_name == "exec":
-            args_dict = dict(args or {}) if isinstance(args, dict) else {}
+            args_dict = dict(merged_args)
             cmd = str(args_dict.get("cmd") or args_dict.get("command") or "").strip()
             if not cmd:
                 return None
@@ -5413,20 +6157,17 @@ def _parse_tool_directive(
                 return LoopAction(kind="exec", argv=argv, tool_name="", tool_args={}, timeout_sec=timeout_sec)
             return None
         if (not tool_name) and isinstance(obj, dict):
-            direct_args = dict(obj)
-            direct_args.pop("name", None)
-            direct_args.pop("tool", None)
-            direct_args.pop("args", None)
-            merged: Dict[str, Any] = {}
-            if isinstance(args, dict):
-                merged.update(dict(args))
-            merged.update(direct_args)
+            merged: Dict[str, Any] = dict(merged_args)
             inferred = preferred_tool_name or _infer_tool_name_from_args(merged, preferred_tools or [])
             if inferred:
                 return LoopAction(kind="tool", argv=[], tool_name=inferred, tool_args=merged)
+            logger.debug(
+                "parse_tool_directive: JSON object has no tool name and could not infer; payload=%s",
+                payload[:200],
+            )
             return None
-        if tool_name and isinstance(args, dict):
-            return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(args))
+        if tool_name:
+            return LoopAction(kind="tool", argv=[], tool_name=tool_name, tool_args=dict(merged_args))
         return None
 
     try:
@@ -5608,22 +6349,31 @@ def _extract_loop_actions(prompt: str, preferred_tools: Optional[Sequence[str]] 
                 keep_lines.extend(raw_lines[index:consumed])
             index = consumed
             continue
-        tool_match = re.match(r"(?is)^!?tool\s+(.+)$", line)
+        tool_match = re.match(r"(?is)^!?tool(?:\s+(.*))?$", line)
         if tool_match:
-            body = tool_match.group(1).strip()
+            body = str(tool_match.group(1) or "").strip()
             consumed = index + 1
-            parsed = _parse_tool_directive(
-                body,
-                preferred_tool_name=preferred_tool_name,
-                preferred_tools=normalized_preferred,
-            )
-            if (not parsed) and body.startswith("{"):
+            parsed = None
+            if body:
+                parsed = _parse_tool_directive(
+                    body,
+                    preferred_tool_name=preferred_tool_name,
+                    preferred_tools=normalized_preferred,
+                )
+            # Accept multiline form where the model emits:
+            #   !tool
+            #   { ...json... }
+            should_try_multiline = (not body) or body.startswith("{")
+            if (not parsed) and should_try_multiline:
                 multiline = body
                 extra_lines = 0
-                while consumed < len(raw_lines) and extra_lines < 12:
-                    multiline = multiline + "\n" + raw_lines[consumed]
+                while consumed < len(raw_lines) and extra_lines < 24:
+                    next_line = raw_lines[consumed]
                     consumed += 1
                     extra_lines += 1
+                    if not multiline and not next_line.strip():
+                        continue
+                    multiline = (multiline + "\n" + next_line).strip()
                     parsed = _parse_tool_directive(
                         multiline,
                         preferred_tool_name=preferred_tool_name,
@@ -5631,7 +6381,7 @@ def _extract_loop_actions(prompt: str, preferred_tools: Optional[Sequence[str]] 
                     )
                     if parsed:
                         break
-                    if multiline.count("{") <= multiline.count("}") and raw_lines[consumed - 1].strip().endswith("}"):
+                    if multiline.startswith("{") and multiline.count("{") <= multiline.count("}") and next_line.strip().endswith("}"):
                         break
             if parsed:
                 actions.append(parsed)
@@ -5824,11 +6574,19 @@ def _trim_lines_to_budget(lines: List[str], budget_chars: int) -> List[str]:
 
 
 def _trim_lines_from_end(lines: List[str], budget_chars: int) -> List[str]:
+    if budget_chars <= 0:
+        return []
     out: List[str] = []
     used = 0
     for line in reversed(lines):
         n = len(line)
         if used + n > budget_chars:
+            # Keep at least a clipped tail line so callers never receive an
+            # empty prompt when a single line exceeds the context budget.
+            if not out:
+                clipped = line[:budget_chars].strip()
+                if clipped:
+                    out.append(clipped)
             break
         out.append(line)
         used += n

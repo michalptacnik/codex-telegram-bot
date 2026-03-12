@@ -76,6 +76,15 @@ class Agent:
                 progress_callback=progress_callback,
             )
         output = sanitize_terminal_output(output)
+        # Structural safety net: if the execution engine failed to parse a
+        # valid tool call (e.g. model omitted "args" key), attempt last-resort
+        # execution here before the transport boundary drops it silently.
+        recovered = await self._agent_service.try_recover_leaked_tool_call(
+            session_id=session.session_id,
+            raw_output=output,
+        )
+        if recovered is not None:
+            output = recovered
         safe_output = self._agent_service.enforce_transport_text_contract(
             session_id=session.session_id,
             raw_output=output,

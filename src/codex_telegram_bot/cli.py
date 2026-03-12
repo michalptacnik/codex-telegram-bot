@@ -24,6 +24,7 @@ from .config import (
     parse_allowlist,
 )
 from .telegram_bot import build_application
+from codex_telegram_bot.services.process_singleton import ProcessSingletonLockError, hold_process_singleton
 from .util import redact
 
 
@@ -192,52 +193,61 @@ def main() -> None:
     _preflight_codex_cli()
 
     config = load_config(config_dir)
-
     callbacks = {
         "reinstall_callback": lambda: reinstall_env(config_dir),
         "purge_callback": lambda: purge_env(config_dir),
         "restart_callback": _restart_self,
     }
-
-    state_db_path = config.config_dir / "state.db"
-    agent_service = build_agent_service(state_db_path=state_db_path, config_dir=config.config_dir)
-
-    # --daemon: standalone background agent (no Telegram)
     if args.daemon:
-        cron_agent = _build_cron_agent(config_dir, agent_service=agent_service)
-        print(
-            "  ┌──────────────────────────────────────────────────────────┐\n"
-            "  │  Daemon mode: background agent running                    │\n"
-            "  │  Heartbeat, cron jobs, and system watchers active.        │\n"
-            "  │  Press Ctrl+C to stop.                                    │\n"
-            "  └──────────────────────────────────────────────────────────┘",
-            file=sys.stderr,
-        )
-        asyncio.run(cron_agent.run())
-        return
-
-    if args.control_center:
-        from codex_telegram_bot.control_center.app import create_app_with_config
-        import uvicorn
-
-        app = create_app_with_config(agent_service, config_dir=config_dir)
-        uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
-        return
-
-    app = build_application(
-        config.token,
-        config.allowlist,
-        callbacks,
-        agent_service=agent_service,
-    )
-
-    # Start the CronHeartbeatAgent alongside Telegram polling
-    cron_agent = _build_cron_agent(config_dir, agent_service=agent_service)
-    _run_polling_with_cron_agent(app, cron_agent)
+        lock_scope = "daemon"
+    elif args.control_center:
+        lock_scope = f"control-center-{args.host}-{args.port}"
+    else:
+        lock_scope = "telegram-polling"
     try:
-        asyncio.run(agent_service.shutdown())
-    except Exception:
-        logging.getLogger(__name__).exception("agent_service.shutdown failed")
+        with hold_process_singleton(config_dir=config_dir, scope=lock_scope):
+            state_db_path = config.config_dir / "state.db"
+            agent_service = build_agent_service(state_db_path=state_db_path, config_dir=config.config_dir)
+
+            # --daemon: standalone background agent (no Telegram)
+            if args.daemon:
+                cron_agent = _build_cron_agent(config_dir, agent_service=agent_service)
+                print(
+                    "  ┌──────────────────────────────────────────────────────────┐\n"
+                    "  │  Daemon mode: background agent running                    │\n"
+                    "  │  Heartbeat, cron jobs, and system watchers active.        │\n"
+                    "  │  Press Ctrl+C to stop.                                    │\n"
+                    "  └──────────────────────────────────────────────────────────┘",
+                    file=sys.stderr,
+                )
+                asyncio.run(cron_agent.run())
+                return
+
+            if args.control_center:
+                from codex_telegram_bot.control_center.app import create_app_with_config
+                import uvicorn
+
+                app = create_app_with_config(agent_service, config_dir=config_dir)
+                uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level.lower())
+                return
+
+            app = build_application(
+                config.token,
+                config.allowlist,
+                callbacks,
+                agent_service=agent_service,
+            )
+
+            # Start the CronHeartbeatAgent alongside Telegram polling
+            cron_agent = _build_cron_agent(config_dir, agent_service=agent_service)
+            _run_polling_with_cron_agent(app, cron_agent)
+            try:
+                asyncio.run(agent_service.shutdown())
+            except Exception:
+                logging.getLogger(__name__).exception("agent_service.shutdown failed")
+    except ProcessSingletonLockError as exc:
+        print(f"Startup blocked: {exc}", file=sys.stderr)
+        return
 
 
 def _run_polling_with_cron_agent(app, cron_agent) -> None:

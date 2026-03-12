@@ -1,3 +1,6 @@
+const EXTENSION_VERSION = String((chrome.runtime.getManifest() || {}).version || "0.0.0");
+const SUPPORTED_COMMANDS = ["open_url", "navigate_url", "run_script", "snapshot", "screenshot"];
+
 const DEFAULT_CONFIG = {
   baseUrl: "http://127.0.0.1:8765",
   token: "",
@@ -248,6 +251,8 @@ async function registerClient() {
     instance_id: instanceId,
     label: "AgentHQ Chrome Bridge",
     version: chrome.runtime.getManifest().version,
+    extension_version: EXTENSION_VERSION,
+    supported_commands: SUPPORTED_COMMANDS,
     platform: navigator.platform || "",
     user_agent: navigator.userAgent || "",
     active_tab_url: tab.active_tab_url,
@@ -296,6 +301,8 @@ async function heartbeat() {
   const tab = await activeTabInfo();
   const body = {
     instance_id: instanceId,
+    extension_version: EXTENSION_VERSION,
+    supported_commands: SUPPORTED_COMMANDS,
     active_tab_url: tab.active_tab_url,
     active_tab_title: tab.active_tab_title
   };

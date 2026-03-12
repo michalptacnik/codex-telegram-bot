@@ -191,6 +191,18 @@ Stop AgentHQ processes started for the local workspace config:
 ./scripts/stop_macos_app.sh
 ```
 
+Enable persistent startup on macOS (launches bot + Control Center automatically at login):
+
+```bash
+./scripts/install_macos_startup.sh
+```
+
+Remove macOS startup agents:
+
+```bash
+./scripts/uninstall_macos_startup.sh
+```
+
 First-run onboarding wizard:
 
 - Open `http://127.0.0.1:8765/onboarding`
