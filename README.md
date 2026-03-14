@@ -1,909 +1,137 @@
 # Agent HQ
 
-Agent HQ (`codex-telegram-bot`) is a Telegram-first agent runtime that forwards user messages to the local `codex` CLI and returns the response back in chat.
+**The fastest, smallest AI assistant & Telegram bot. Powered by ZeroClaw engine.**
 
-Designed for private/self-hosted use, with an optional allowlist to prevent unauthorized usage.
-
-## Features
-
-- Runs as a local polling Telegram bot
-- Forwards text prompts to `codex exec` (non-interactive)
-- Streams back long output in multiple Telegram messages
-- Built-in onboarding flow for token + allowlist
-- Safety guardrails:
-  - Input length cap
-  - Output chunking
-  - Secret redaction (AWS keys, GitHub tokens, Stripe keys, bearer tokens, generic API keys)
-  - Optional user allowlist
-  - Role-based access control (viewer / user / admin)
-  - Per-user daily spend ceilings
-- Session management:
-  - Persistent sessions per chat/user pair
-  - Automatic idle-session archival and pruning
-  - Per-session isolated workspace directories with disk-byte and file-count quotas
-- Agentic execution:
-  - Probe → expand prompt path keeps base context small
-  - SOUL kernel (`memory/SOUL.md`) is always loaded as a tiny identity profile with strict caps and gated patching
-  - Thin persistent memory index (`memory/MEMORY_INDEX.md`) is always loaded with strict size cap; heavy memory pages are pointer-opened on demand
-  - Tools are assistant-invoked (`!exec` / `!tool` / `!loop`), not user-taught syntax
-  - NEED_TOOLS lane enforces protocol-only tool actions with one repair retry
-  - Native `web_search` tool for internet retrieval with source URLs/snippets
-  - Native `web_fetch` tool for SSRF-safe URL-to-readable-text extraction
-  - Persistent scheduler tools (`schedule_task`, `list_schedules`, `cancel_schedule`) with SQLite-backed jobs and automatic tick loop
-  - Proactive heartbeat loop (`heartbeat_*` + opt-in scheduler) can push reminders/messages without user prompt, with quiet-hours and spend gating
-  - Task tools (`task_create`, `task_list`, `task_done`) persist Markdown tasks and sync concise obligations into MEMORY_INDEX
-  - Skill marketplace tools (`skills_market_*`) support search/install/enable/disable/remove with cache, hash verification, and progressive disclosure
-  - Proactive `send_message` tool for agent-initiated delivery to session owners
-  - Proactive `send_file` tool sends workspace files as Telegram attachments with path and access controls
-  - Channel-aware output formatter improves readability for Telegram/Web without extra model calls by default
-  - Default agent profile is `trusted`, so tools can operate across the host filesystem (approval-gated for high-risk actions)
-  - `exec` supports OpenClaw-style options (`command`, `workdir`, `env`, `background`, `timeoutSec/timeoutMs`) for universal command/app launching
-- Gateway/control plane:
-  - Control Center provides a Gateway-style admin API/UI for sessions, runs, reliability, and runtime visibility
-  - Real-time web chat page (`/chat`) over WebSocket (`/ws/chat`) with live tool status events and inline approval actions
-  - Optional WhatsApp bridge (`/whatsapp/webhook`) with one-time account linking and approval commands (`/pending`, `/approve`, `/deny`)
-  - Runtime backend visibility endpoint: `/api/runtime/capabilities`
-- Cost tracking:
-  - Usage events stored per provider turn
-  - Aggregated rollups per session and per user/day
-  - Control Center cost views + Telegram `/cost` command
-- Multi-provider architecture:
-  - Runtime provider registry with hot-switch support
-  - Capability-based provider routing
-  - Circuit-breaker with configurable echo fallback
-- Parity evaluation harness with CI-safe offline baseline mode
-- Admin commands:
-  - `/ping`
-  - `/status`
-  - `/help`
-  - `/workspace`
-  - `/skills`
-  - `/new`
-  - `/resume`
-  - `/branch`
-  - `/email`
-  - `/email_check`
-  - `/email_template`
-  - `/contact`
-  - `/template`
-  - `/gh`
-  - `/pending`
-  - `/approve <approval_id>`
-  - `/deny <approval_id>`
-  - `/interrupt`
-  - `/continue`
-  - `/sessions`
-  - `/tail [session_id]`
-  - `/kill [session_id]`
-  - `/continue yes` (required when replaying a prior high-risk tool prompt)
-  - `/reset`
-  - `/reinstall`
-  - `/purge`
-  - `/restart`
+Agent HQ is a production-grade, multi-transport, multi-provider AI agent runtime built 100% in Rust. It combines the ZeroClaw engine (zero overhead, zero compromise) with rich Agent HQ features: soul/personality, missions, plugins, sessions, browser bridge, and a full web dashboard.
 
 ## Architecture
 
 ```
-Telegram -> Agent Core -> AccessController -> AgentService -> CapabilityRouter
-                                                           -> ProviderRegistry -> codex CLI
-                                                           -> WorkspaceManager
-                                                           -> Tool Registry -> Execution Runner
+┌──────────────────────────────────────────────────────────────┐
+│                         AGENT HQ                             │
+│                                                              │
+│  ┌────────────┐  ┌────────────┐  ┌────────────────────────┐  │
+│  │  Chrome     │  │  VSCode    │  │  Web Dashboard (React) │  │
+│  │  Extension  │  │  Extension │  │  + Gateway (axum)      │  │
+│  └─────┬──────┘  └─────┬──────┘  └───────────┬────────────┘  │
+│        └───────────────┼──────────────────────┘               │
+│                        │                                      │
+│  ┌─────────────────────▼───────────────────────────────────┐  │
+│  │              ★ ZEROCLAW ENGINE (Rust) ★                 │  │
+│  │                                                         │  │
+│  │  Agent Loop │ 22+ LLM Providers │ Hybrid Memory         │  │
+│  │  40+ Tools  │ Security/Sandbox  │ Cron/Scheduler        │  │
+│  │  20+ Channels │ Gateway/Webhooks │ Observability        │  │
+│  │                                                         │  │
+│  │  + Soul/Personality │ Missions │ Plugins │ Sessions     │  │
+│  │  + Browser Bridge │ GitHub Outbound │ Cost Tracking     │  │
+│  └─────────────────────────────────────────────────────────┘  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Current module boundaries:
+## Features
 
-- `telegram_bot.py`: Telegram transport handlers and command wiring
-- `agent_core/agent.py`: agent entrypoint used by transport (`Agent.handle_message`)
-- `agent_core/router.py`: agent-to-service routing boundary
-- `agent_core/memory.py`: bounded memory defaults (`SESSION_MAX_TURNS=20`)
-- `services/agent_service.py`: orchestration, session, approvals, tool loop
-- `services/access_control.py`: role-based action authorization, spend ceilings, secret scanning
-- `services/capability_router.py`: selects best provider by capability requirements
-- `services/workspace_manager.py`: per-session disk workspaces with quota enforcement
-- `services/session_retention.py`: idle-session archival and pruning policy
-- `providers/registry.py`: runtime provider registry with hot-switch
-- `providers/*.py`: provider abstraction + codex-cli implementation
-- `tools/*.py`: explicit tool registry (`read_file`, `write_file`, `git_status`)
-- `execution/local_shell.py`: local subprocess execution boundary
-- `execution/docker_sandbox.py`: optional Docker sandbox execution backend
-- `control_center/app.py`: Gateway-style control plane API/UI
+### ZeroClaw Engine (Core)
+- **22+ LLM Providers**: Anthropic, OpenAI, Gemini, Ollama, OpenRouter, Azure, Bedrock, Copilot, GLM, Telnyx, and more
+- **40+ Tools**: Shell, file ops, git, HTTP, browser, cron, memory, email, screenshots, PDF, hardware, MCP, SOP
+- **20+ Channels**: Telegram, Discord, Slack, Matrix, WhatsApp (API + Web), Signal, Email, IRC, MQTT, Nostr, DingTalk, Lark, Mattermost, Nextcloud Talk, QQ, iMessage, CLI
+- **Hybrid Search Memory**: Vector + BM25 + FTS5 + RRF, backed by SQLite (+ optional Postgres/Qdrant)
+- **Security**: Device pairing, sandboxing (bubblewrap/firejail/landlock), encrypted secrets, filesystem scoping, prompt injection detection, e-stop
+- **Runtime**: Native + Docker + WASM execution
+- **Gateway**: HTTP/WebSocket server with SSE events, webhook ingestion, tunnel support (Cloudflare/Tailscale/ngrok)
+- **Cron/Scheduler**: Persistent scheduled tasks with cron expressions, one-shots, intervals
+- **Observability**: Structured logging, Prometheus metrics, OpenTelemetry traces
+- **Hardware**: Arduino, STM32 Nucleo, Raspberry Pi GPIO, ESP32 peripheral support
+- **Skills**: Community skill marketplace, skill auditing, SkillForge
+- **Identity**: AIEOS (AI Entity Object Specification) + markdown identity formats
+- **Cost Tracking**: Per-provider, per-model cost monitoring with daily/monthly budgets
+- **Heartbeat**: Proactive agent with configurable intervals
+- **Hooks**: Pre/post command hooks with audit logging
 
-The runtime is stateful per chat/user session with bounded memory and explicit reset/branch/resume controls.
+### Agent HQ Extensions
+- **Soul/Personality**: Editable agent personality with name, voice, principles, boundaries, and style knobs
+- **Autonomous Missions**: Multi-step mission execution with pause/resume/stop, budget enforcement, step-level retry
+- **Plugin System**: Install/enable/disable plugins with manifest validation, trust policies, and audit trails
+- **Session Management**: Per-(chat, user) isolated workspaces with disk quotas and message history
+- **Browser Bridge**: Chrome extension coordination for browser automation
+- **GitHub Outbound**: Create issues, comment on PRs, list/close issues
+- **Web Dashboard**: React SPA with Soul editor, Mission control, Plugin manager, Session browser, and all ZeroClaw pages
 
-## Probe Protocol
+### Extensions
+- **Chrome Extension**: AgentHQ Chrome Bridge for browser context passing
+- **VSCode Extension**: Agent HQ sidebar with real-time chat
 
-Before tool execution, the service runs a lightweight probe model call with strict output formats:
-
-- `NO_TOOLS`
-  - `<final assistant reply>`
-- `NEED_TOOLS {"tools":["read_file","shell_exec"],"goal":"...","max_steps":3}`
-
-Behavior:
-
-- `NO_TOOLS`: returns immediately (no tool schemas/capabilities injected, no tool loop).
-- `NEED_TOOLS`: injects only selected tool schemas + tool-mapped capability summaries, then enters tool loop.
-- If NEED_TOOLS output is prose instead of protocol, one repair retry is forced; a single shell command is auto-transpiled to `!exec ...`.
-
-All file operations are normalized to the active session workspace root and write operations are verified before completion is reported.
-
-## Roadmap Tracking
-
-- Roadmap execution is tracked in GitHub Issues and milestones.
-- Completed EPICs (merged to main):
-  - `#64` Agent Core Foundation
-  - `#65` Secure Computer Interaction Layer
-  - `#66` Multi-Provider Architecture
-  - `#67` Streaming and CLI-like Feedback
-  - `#68` Lightweight Web Control Center
-  - Parity 1: Session Retention Policy
-  - Parity 2: Tool Approval Gate (SQLite-backed)
-  - Parity 3: Streaming Updater
-  - Parity 4: Repo Context Retrieval
-  - Parity 5: Workspace Quota Enforcement
-  - Parity 6: Observability & Alerts
-  - Parity 7: Runbook Registry
-  - Parity 8: Capability-Based Provider Routing
-  - Parity 9: Role/Spend Access Control
-  - Parity 10: Control Center Session API
-
-## Requirements
-
-- Python 3.10+
-- `codex` CLI installed and accessible in `PATH`
-- Telegram bot token from `@BotFather`
-
-## Install
-
-Dev install:
+## Quick Start
 
 ```bash
-pip install -e .
+# Build
+cargo build --release
+
+# Onboard (interactive setup)
+./target/release/agent-hq onboard
+
+# Start with channels
+./target/release/agent-hq channel start
+
+# Start gateway (web dashboard)
+./target/release/agent-hq gateway start
+
+# Or use Make
+make build-release
+make web        # Build web dashboard
+make docker     # Build Docker image
 ```
 
-Local install:
+## Configuration
+
+Configuration is stored in `~/.zeroclaw/config.toml` (TOML format).
+
+```toml
+api_key = "sk-..."
+default_provider = "anthropic"
+default_model = "claude-sonnet-4-6"
+
+[channels_config.telegram]
+enabled = true
+bot_token = "your-telegram-bot-token"
+allowlist = ["your_username"]
+
+[autonomy]
+level = "full"
+
+[gateway]
+port = 8765
+```
+
+See `agent-hq onboard --interactive` for guided setup.
+
+## Build from Source
+
+### Prerequisites
+- Rust 1.87+ (`rustup install stable`)
+- Node.js 18+ (for web dashboard)
 
 ```bash
-pip install .
+# Full build (engine + web dashboard)
+make all
+
+# Development
+cargo run -- chat         # Interactive CLI chat
+cargo run -- gateway start  # Start web dashboard
+
+# Docker
+docker build -t agent-hq .
+docker compose up -d
 ```
 
-## Run
+## Migration from Python codex-telegram-bot
 
-```bash
-codex-telegram-bot
-```
+If you're upgrading from the Python version:
 
-Run Control Center web UI (local dashboard):
-
-```bash
-codex-telegram-bot --control-center --host 127.0.0.1 --port 8765
-```
-
-Build a launchable macOS app bundle (starts bot + Control Center and opens `/chat`):
-
-```bash
-./scripts/build_macos_app.sh
-open ~/Applications/AgentHQ.app
-```
-
-Stop AgentHQ processes started for the local workspace config:
-
-```bash
-./scripts/stop_macos_app.sh
-```
-
-Enable persistent startup on macOS (launches bot + Control Center automatically at login):
-
-```bash
-./scripts/install_macos_startup.sh
-```
-
-Remove macOS startup agents:
-
-```bash
-./scripts/uninstall_macos_startup.sh
-```
-
-First-run onboarding wizard:
-
-- Open `http://127.0.0.1:8765/onboarding`
-- Configure provider key (optional), workspace root, and safety profile
-- Run built-in validation test and complete onboarding
-
-## Config
-
-By default, config is stored in:
-
-```
-~/.config/codex-telegram-bot/.env
-```
-
-Run lifecycle state is persisted in:
-
-```
-~/.config/codex-telegram-bot/state.db
-```
-
-You can override it with:
-
-```bash
-codex-telegram-bot --config-dir /path/to/config
-```
-
-On first run, the bot prompts you for:
-
-- `TELEGRAM_BOT_TOKEN`
-- `ALLOWLIST` (comma-separated Telegram user IDs)
-
-If `ALLOWLIST` is blank, the bot will warn and require you to type `YES` to continue.
-
-Environment variables override `.env`:
-
-- At startup, `.env` entries are applied as process-env defaults (without overriding already-exported vars).
-
-- `TELEGRAM_BOT_TOKEN` (required)
-- `ALLOWLIST` (optional)
-- `LOG_LEVEL` (default: INFO)
-- `PROVIDER_RETRY_ATTEMPTS` (default: `1`)
-- `PROVIDER_FAILURE_THRESHOLD` (default: `2`)
-- `PROVIDER_RECOVERY_SEC` (default: `30`)
-- `PROVIDER_FALLBACK_MODE` (`none` or `echo`, default: `none`)
-- `PROVIDER_BACKEND` (default: `codex-cli`; supported built-ins: `codex-cli`, `openai`, `anthropic`, `gemini`, `deepseek`, `qwen`, `responses-api`; also accepts names from `OPENAI_COMPATIBLE_PROVIDERS`)
-- `PROVIDERS_CONFIG` (optional path to providers config JSON; see provider config section below)
-- `OPENAI_COMPATIBLE_PROVIDERS` (optional comma-separated provider names; each provider reads `<NAME>_API_KEY`, `<NAME>_BASE_URL`, `<NAME>_MODEL`, `<NAME>_TIMEOUT_SEC`)
-- `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_MAX_TOKENS`, `OPENAI_TIMEOUT_SEC`, `OPENAI_API_BASE` (used by `responses-api`)
-- `ENABLE_PROBE_LOOP` (default: `0`; when `1`, enables probe-loop service wiring in container)
-- `ENABLE_WEB_SEARCH_TOOL` (default: `1`; when `0`, disables `web_search`)
-- `WEB_SEARCH_ENGINE` (default: `google`; options: `google`, `google_cse`, `duckduckgo`)
-- `GOOGLE_SEARCH_API_KEY` (required for Google web search)
-- `GOOGLE_SEARCH_CX` (required for Google Programmable Search Engine)
-- `EMAIL_SEND_REQUIRE_APPROVAL` (default: `1`; when `0`, email tools can send without approval gate)
-- `STATUS_HEARTBEAT_PUSH_ENABLED` (default: `0`; when `1`, posts periodic heartbeat chat messages in addition to status-message updates)
-- `CODEX_EXEC_TIMEOUT_SEC` (default: `900`, bounded by policy profile max timeout)
-- `CODEX_VERSION_TIMEOUT_SEC` (default: `10`)
-- `CODEX_TIMEOUT_CONTINUE_RETRIES` (default: `1`; auto-continue attempts after timeout `124`)
-- `EXECUTION_WORKSPACE_ROOT` (default: current working directory)
-- `EXECUTION_BACKEND` (default: `local`; set to `docker` for Docker sandbox execution backend)
-- `DOCKER_SANDBOX_IMAGE` (default: `python:3.12-slim`)
-- `DOCKER_SANDBOX_NETWORK` (default: `none`)
-- `DOCKER_SANDBOX_WORKDIR` (default: `/workspace`)
-- `DOCKER_SANDBOX_DRY_RUN` (default: `0`; when `1`, prints resolved docker command instead of executing)
-- `CAPABILITIES_DIR` (default: `<EXECUTION_WORKSPACE_ROOT>/capabilities`)
-- `REDACTION_EXTRA_PATTERNS` (optional regex list separated by `;;`)
-- `SESSION_MAX_TURNS` (default: `20`)
-- `SESSION_MAX_MESSAGES` (default: `40`, derived from turns)
-- `SESSION_COMPACT_KEEP` (default: `20`)
-- `TOOL_LOOP_MAX_STEPS` (default: `3`)
-- `AUTONOMOUS_TOOL_LOOP` (default: `0`; when `1`, providers can auto-plan `!exec/!tool` steps before final response)
-- `AUTONOMOUS_PROTOCOL_MAX_DEPTH` (default: `6`; max recursive assistant-emitted protocol hops before forcing stop)
-- `AUTONOMOUS_ACTION_MAX_BATCHES` (default: `15`; max action batches before preliminary pause/continue handoff)
-- `ENABLE_EMAIL_TOOL` (default: `0`; when `1`, enables `send_email_smtp`; auto-enabled when `SMTP_HOST`, `SMTP_USER`, and `SMTP_APP_PASSWORD` are present)
-- Email sends are always approval-gated when the SMTP tool is enabled
-- `AGENT_TOOLCHAIN_COMMANDS` (optional comma-separated command list; default checks OpenClaw-like environment command baseline and logs missing commands)
-- `APPROVAL_TTL_SEC` (default: `900`)
-- `MAX_PENDING_APPROVALS_PER_USER` (default: `3`)
-- `MAX_WALL_SEC` (default: `21600`; max process session wall time)
-- `IDLE_TIMEOUT_SEC` (default: `1200`; idle timeout for process sessions)
-- `MAX_OUTPUT_BYTES` (default: `5242880`; hard cap per process session output)
-- `RING_BUFFER_BYTES` (default: `65536`; in-memory output tail bytes)
-- `MAX_SESSIONS_PER_USER` (default: `3`; concurrent process sessions per chat/user)
-- `SESSION_WORKSPACES_ROOT` (default: `<EXECUTION_WORKSPACE_ROOT>/.session_workspaces`)
-- `MESSAGE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_message`)
-- `FILE_SEND_COST_USD` (default: `0`; estimated spend unit charged per proactive `send_file`)
-- `ENABLE_HEARTBEAT` (default: `0`; heartbeat proactivity is opt-in)
-- `MEMORY_INDEX_MAX_CHARS` (default: `8000`; hard cap for always-loaded thin memory index)
-- `SOUL_MAX_CHARS` (default: `2000`; hard cap for always-loaded SOUL kernel)
-- `ENABLE_POLISH_PROBE` (default: `0`; optional final formatting pass with strict +5% length cap)
-- `TELEGRAM_MAX_ATTACHMENT_BYTES` (default: `26214400` = 25 MB per attachment)
-- `TELEGRAM_MAX_ATTACHMENTS_PER_DAY` (default: `50` per session/day)
-- `WHATSAPP_ENABLED` (default: `1`; set `0` to disable WhatsApp bridge endpoints)
-- `WHATSAPP_WEBHOOK_TOKEN` (optional; if set, required as `X-Codex-Webhook-Token` header or `?token=` query on `/whatsapp/webhook`)
-- `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_WHATSAPP_FROM` (optional; when set, enables proactive outbound WhatsApp delivery)
-- `WHATSAPP_HTTP_TIMEOUT_S` (default: `15`)
-- `MODEL_PRICE_CONFIG` (optional path to JSON model pricing map; falls back to `prices.json`)
-- `DEFAULT_AGENT_POLICY_PROFILE` is `trusted` in seeded state; use `balanced`/`strict` if you want workspace-constrained file tools
-- `REPO_SCAN_MAX_FILES` (default: `3000`)
-- `REPO_SCAN_MAX_FILE_BYTES` (default: `120000`)
-- `REPO_INDEX_AUTO_REFRESH_SEC` (default: `30`)
-- `ALERT_WEBHOOK_URL` (optional HTTPS endpoint for alerts)
-- `ALERT_WEBHOOK_TIMEOUT_SEC` (default: `3`)
-- `ALERT_MIN_SEVERITY` (`low|medium|high|critical`, default: `medium`)
-- `ALERT_DEDUP_WINDOW_SEC` (default: `90`)
-- `ALERT_RETRY_COUNT` (default: `2`)
-- `ALERT_DEAD_LETTER_MAX` (default: `200`)
-- `LOCAL_API_KEYS` (optional; enables scoped `/api/v1` integration API)
-- `PLUGIN_TRUST_POLICY` (`require_signature` or `allow_local_unsigned`, default: `require_signature`)
-- `WORKSPACE_MAX_DISK_BYTES` (default: `104857600` = 100 MB; per-session workspace disk quota)
-- `WORKSPACE_MAX_FILE_COUNT` (default: `5000`; per-session workspace file-count quota)
-- `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default: `30`; idle sessions archived after this many days)
-- `SESSION_DELETE_AFTER_DAYS` (default: `90`; archived sessions hard-deleted after this many days)
-- `SKILL_TRUSTED_HOSTS` (optional comma-separated allowlist for remote skill manifests; default: `raw.githubusercontent.com,github.com`)
-- `SKILL_SOURCES_JSON` (optional JSON array for marketplace catalogs; defaults to `openai/skills`)
-- `SKILL_TRUSTED_PUBLISHER_KEYS` (optional comma-separated trusted publisher key IDs for marketplace “Verified” status)
-- `SMTP_HOST`, `SMTP_PORT` (default `587`), `SMTP_USER`, `SMTP_APP_PASSWORD`, `SMTP_FROM` (used by `smtp_email` skill and `send_email_smtp`)
-
-Print active config summary (never prints token):
-
-```bash
-codex-telegram-bot --print-config
-```
-
-### Provider Config (`providers.json`)
-
-Provider instantiation is config-driven. Add providers without code changes by updating `providers.json`.
-
-Search order:
-
-1. `<workspace_root>/providers.json`
-2. `~/.config/codex-telegram-bot/providers.json`
-3. path from `PROVIDERS_CONFIG`
-
-Example:
-
-```json
-{
-  "deepseek": {
-    "type": "openai_compatible",
-    "api_key_env": "DEEPSEEK_API_KEY",
-    "base_url": "https://api.deepseek.com/v1",
-    "model": "deepseek-chat"
-  },
-  "qwen": {
-    "type": "openai_compatible",
-    "api_key_env": "QWEN_API_KEY",
-    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    "model": "qwen-plus"
-  }
-}
-```
-
-## Service (systemd)
-
-Ubuntu-first bootstrap (recommended):
-
-```bash
-./scripts/bootstrap_ubuntu.sh --user --workdir /path/to/repo
-```
-
-System-wide bootstrap:
-
-```bash
-sudo ./scripts/bootstrap_ubuntu.sh --system --workdir /opt/codex-telegram-bot
-```
-
-## Debian Packaging (CI)
-
-Build internal Debian package artifact locally:
-
-```bash
-./scripts/build_deb.sh --output-dir dist
-```
-
-CI workflow:
-
-- `.github/workflows/build-deb.yml`
-- On `v*` tags, the workflow also publishes package files to the corresponding GitHub Release.
-
-Outputs:
-
-- `dist/*.deb`
-- `dist/*.sha256`
-- `dist/*.provenance.json`
-
-Versioning and provenance details:
-
-- `docs/deb_provenance.md`
-- `docs/recovery_playbook.md`
-- `docs/reliability_ops.md`
-- `docs/upgrade_rollback_runbook.md`
-- `docs/local_api_v1.md`
-- `docs/plugin_manifest.md`
-- `docs/plugin_lifecycle.md`
-- `docs/parity_matrix_openclaw.md`
-- `docs/openclaw_parity_matrix.md`
-- `docs/runtime_map.md`
-
-Bootstrap behavior:
-
-- installs Ubuntu dependencies (`python3`, `python3-venv`, `systemd`, etc.)
-- installs extended agentic command toolchain by default (`ripgrep`, `fd-find`, `jq`, `wget`, `zip`, `unzip`, `tar`, `rsync`, `openssh-client`, `build-essential`)
-- creates a dedicated virtualenv and installs the project
-- generates and reloads systemd unit
-- enables and starts the service (unless `--no-enable`)
-
-Useful flags:
-
-- `--skip-apt` (use already-installed dependencies)
-- `--minimal-agent-tools` (install base runtime dependencies only, skip extended agentic toolchain)
-- `--no-enable` (install only, do not start service)
-- `--dry-run` (print commands without executing)
-- `--skip-migration-check` (skip state DB integrity+backup preflight; break-glass only)
-
-Recommended (user service):
-
-```bash
-./scripts/install_service.sh --user --workdir /path/to/repo
-systemctl --user enable --now codex-telegram-bot
-```
-
-System-wide:
-
-```bash
-sudo ./scripts/install_service.sh --system --workdir /opt/codex-telegram-bot
-sudo systemctl enable --now codex-telegram-bot
-```
-
-## Docker (optional)
-
-The container expects `codex` to be available. The simplest approach is to mount the host binary into the container.
-
-```bash
-docker compose up --build
-```
-
-If your `codex` binary is in a different location, update the volume in `docker-compose.yml`.
-
-To run tool execution through Docker sandbox backend (instead of local shell), set:
-
-```bash
-export EXECUTION_BACKEND=docker
-```
-
-## Admin Commands
-
-- `/status`: shows Codex version, working directory, allowlist mode
-- `/status`: live run card (session, active job id, current step/total steps, pending approvals, elapsed)
-- `/status`: includes context diagnostics (prompt chars + retrieval confidence)
-- `/help`: command taxonomy, examples, and active policy profile
-- `/workspace`: shows per-session isolated workspace path
-- `/sessions`: list process sessions for the current chat/user
-- `/tail [session_id]`: poll incremental output (`cursor_next` persisted)
-- `/interrupt`: send SIGINT to active process session (or current model run when no session exists)
-- `/kill [session_id]`: terminate process session with kill escalation
-- `/continue`: poll active process session output before replaying prompt continuation
-- `/reinstall`: clears stored token and restarts for onboarding
-- `/purge`: removes `.env` and restarts
-- `/restart`: immediate process restart
-
-## Control Center Endpoints
-
-- `GET /` dashboard
-- `GET /runs`
-- `GET /sessions`
-- `GET /chat`
-- `GET /approvals`
-- `GET /runs/{run_id}`
-- `GET /agents`
-- `GET /settings`
-- `GET /health`
-- `GET /api/metrics`
-- `GET /api/browser/status`
-- `POST /api/browser/command`
-- `GET /api/onboarding/status`
-- `GET /api/onboarding/readiness` (first-run checks: workspace, codex CLI, telegram token)
-- `GET /api/runs?limit=20`
-- `GET /api/sessions?limit=50`
-- `GET /api/sessions/{session_id}/detail`
-- `GET /api/attachments/{attachment_id}/download`
-- `GET /api/costs/session/{session_id}`
-- `GET /api/costs/user/{user_id}/daily`
-- `GET /api/costs/daily`
-- `GET /api/approvals?limit=200`
-- `POST /api/approvals/approve`
-- `POST /api/approvals/deny`
-- `WS /ws/chat` (messages: `user_message`; events: `assistant_chunk`, `tool_event`, `done`)
-- `GET /api/retrieval?query=...`
-- `GET /api/retrieval/stats`
-- `POST /api/retrieval/refresh`
-- `GET /api/reliability`
-- `GET /api/runs/{run_id}`
-- `GET /api/runs/{run_id}/events`
-- `GET /api/runs/{run_id}/artifact.txt`
-- `GET /api/error-catalog`
-- `GET /api/runs/{run_id}/recovery-options`
-- `POST /api/runs/{run_id}/recover`
-- `GET /api/recovery/playbook`
-- `GET /api/agents`
-- `POST /api/jobs/{job_id}/cancel`
-- `POST /api/handoffs`
-- `POST /agents` (create/update)
-- `POST /agents/{agent_id}/delete`
-
-Chrome extension bridge endpoints:
-
-- `POST /api/browser/extension/register`
-- `POST /api/browser/extension/heartbeat`
-- `GET /api/browser/extension/commands?instance_id=...`
-- `POST /api/browser/extension/commands/{command_id}/result`
-
-Chrome extension (unpacked) lives in [`chrome-extension/`](chrome-extension/README.md) and exposes active/inactive GUI state in popup while connected to Control Center.
-
-## Parity Evaluation Harness
-
-Run measurable parity benchmarks (Telegram agent path vs direct `codex exec`) using a shared case suite:
-
-```bash
-PYTHONPATH=src python3 -m codex_telegram_bot.eval_parity \
-  --cases docs/benchmarks/parity_cases.json \
-  --workspace-root /path/to/repo
-```
-
-Outputs:
-
-- `docs/reports/parity-report-<timestamp>.json`
-- `docs/reports/parity-report-<timestamp>.md`
-- `docs/reports/parity-report-latest.json` (via weekly helper script)
-- `docs/reports/parity-report-latest.md` (via weekly helper script)
-
-Exit code:
-
-- `0` parity gates passed
-- `2` one or more parity gates failed
-
-CI-safe offline baseline (no `codex` CLI required):
-
-```bash
-./scripts/run_parity_offline.sh
-```
-
-The offline baseline echoes `expected_contains` tokens as synthetic output and always scores 1.0
-`expected_match`. Use it in CI pipelines to verify the harness and benchmark file remain valid.
-
-Weekly automation against a live `codex` deployment (local cron/systemd-friendly):
-
-```bash
-./scripts/run_parity_weekly.sh
-```
-
-Example cron entry (Sundays at 09:00):
-
-```cron
-0 9 * * 0 cd /path/to/codex-telegram-bot && ./scripts/run_parity_weekly.sh >> /tmp/codex-parity.log 2>&1
-```
-
-Category filter (run only a subset of cases):
-
-```bash
-PYTHONPATH=src python3 -m codex_telegram_bot.eval_parity \
-  --cases docs/benchmarks/parity_cases.json \
-  --category safety
-```
-
-Available categories: `smoke`, `code_editing`, `debugging`, `domain_knowledge`, `multi_step`,
-`safety`, `security`, `output_format`, `latency`, `session`.
-
-Current benchmark: **20 cases** across all categories (minimum 15 required by gate).
-
-Parity gates and milestone plan:
-
-- `docs/parity_exit_criteria.md`
-- `scripts/demo_golden_scenarios.sh`
-
-Onboarding:
-
-- `GET /onboarding`
-- `POST /onboarding`
-
-## Logging
-
-Runtime lifecycle logs now include structured JSON lines with run correlation IDs for:
-
-- run start/failure/completion events
-- provider execution start/finish/error events
-- secret redaction audit events (`security.redaction.applied`)
-- recovery telemetry (`recovery.attempted`, `recovery.queued`, `recovery.completed`, `recovery.failed`)
-
-## Error UX
-
-- Failed runs expose stable backend error codes (`error_code`) in the run API.
-- Run detail page shows catalog-based recovery guidance and one-click actions.
-- Error catalog is available at `/api/error-catalog`.
-
-Provider router behavior:
-
-- Retries failed primary executions up to configured attempts
-- Opens circuit after configured consecutive failures
-- Uses fallback provider when circuit is open (if enabled)
-
-## Agent Registry
-
-Agent profiles are persisted in SQLite and seeded with:
-
-- `default` agent (`provider=codex_cli`, `policy_profile=trusted`)
-
-Supported policy profiles:
-
-- `strict`
-- `balanced`
-- `trusted`
-
-Execution profile behavior:
-
-- `strict`: command allowlist + workspace-root path enforcement + timeout cap `45s`
-- `balanced`: command allowlist + workspace-root path enforcement + timeout cap `120s`
-- `trusted`: relaxed command scope + timeout cap `1800s`
-
-Codex CLI sandbox mode is forced by policy profile to avoid read-only startup defaults:
-
-- `strict`: codex sandbox flag not overridden
-- `balanced`: `--sandbox=workspace-write`
-- `trusted`: `--sandbox=danger-full-access`
-
-Each run emits `run.policy.applied` audit events with agent/profile metadata.
-
-Agent concurrency:
-
-- Each agent has `max_concurrency` (1-10)
-- Scheduler enforces per-agent concurrency limits
-- Queued jobs support cancellation by `job_id`
-
-## Access Control
-
-Role-based action authorization is enforced by `AccessController`:
-
-| Role | Actions |
-|------|---------|
-| `viewer` | `view_status`, `view_help` |
-| `user` *(default)* | all viewer actions + `send_prompt`, `approve_tool`, `deny_tool`, `reset_session`, `branch_session`, `interrupt_run`, `continue_run` |
-| `admin` | all user actions + `switch_provider`, `manage_agents`, `view_logs`, `prune_sessions` |
-
-Additional enforcement:
-- **Per-user daily spend ceiling** (default `$10.00/day`, configurable per `UserProfile`)
-- **Secret scanning** on inbound text detects AWS access keys, GitHub tokens, Stripe keys, bearer tokens, and generic API keys before forwarding to the provider
-
-## Workspace Quotas
-
-Each session gets an isolated workspace directory under `SESSION_WORKSPACES_ROOT`.
-Quotas are enforced by `WorkspaceManager`:
-
-- `WORKSPACE_MAX_DISK_BYTES` (default 100 MB) — total bytes across all files in the workspace
-- `WORKSPACE_MAX_FILE_COUNT` (default 5000) — total number of files
-
-Attempts to write beyond quota raise `WorkspaceQuotaExceeded`.
-
-## Session Retention
-
-`SessionRetentionPolicy` runs on demand (e.g. via a cron job calling `AgentService.run_retention_sweep()`):
-
-- Sessions idle for `SESSION_ARCHIVE_AFTER_IDLE_DAYS` (default 30) are moved to `archived` status
-- Archived sessions older than `SESSION_DELETE_AFTER_DAYS` (default 90) are hard-deleted along with their messages
-
-## Capability-Based Provider Routing
-
-`CapabilityRouter` wraps the `ProviderRegistry` and selects the best provider per request:
-
-1. Filter registered providers by `required_caps` dict (e.g. `{"supports_streaming": True}`)
-2. Among matching providers, prefer one with `supports_streaming` if `prefer_streaming=True`
-3. Among matching providers, prefer the currently active provider
-4. Falls back to the active provider when no match is found
-
-At startup, built-in providers are registered (`codex_cli`, `openai`, `anthropic`, `gemini`, `deepseek`, `qwen`) and optional OpenAI-compatible providers from `OPENAI_COMPATIBLE_PROVIDERS` are added. The active provider is selected by `PROVIDER_BACKEND` (falls back to `codex_cli`).
-
-## Telegram Session Runtime
-
-- Each Telegram chat/user pair gets a persisted active session.
-- Session history is stored in SQLite and reused for subsequent prompts.
-- `/new` (or `/reset`) archives current session and starts a fresh one.
-- `/resume [session_prefix]` resumes active session or switches to a matching past session.
-- `/branch` creates a new session branched from current recent history.
-- Session metadata is visible in Control Center (`/sessions` and `/api/sessions`).
-- Telegram document/photo/audio/video uploads are stored under session workspace `attachments/<telegram_message_id>/...` and surfaced in Control Center session detail.
-- Retention policy compacts old session history when message count exceeds configured limits.
-- Tool execution uses isolated per-session workspace directories managed by `WorkspaceManager`.
-
-## Persistent Memory (Thin Index)
-
-- Session workspace bootstraps a memory tree:
-  - `memory/MEMORY_INDEX.md` (always-loaded thin index)
-  - `memory/HEARTBEAT.md`
-  - `memory/daily/YYYY-MM-DD.md`
-  - `memory/pages/*.md` (curated heavy pages, including `memory/pages/tasks.md`)
-- Keep `MEMORY_INDEX.md` machine-parseable and lean:
-  - max size controlled by `MEMORY_INDEX_MAX_CHARS` (default 8000 chars)
-  - section limits enforced (projects/obligations/preferences/pointers)
-- Memory tools:
-  - `memory_index_get`, `memory_page_list`, `memory_pointer_open`
-  - `memory_append_daily`, `memory_index_update`
-- Prompt contract:
-  - thin index is injected by default
-  - detailed pages/daily logs are opened only on-demand via pointers
-
-## SOUL Kernel (Minimal Persona)
-
-- Session workspace includes `memory/SOUL.md` with strict `SOUL v1` format and max size (`SOUL_MAX_CHARS`, default 2000).
-- SOUL is always loaded first in prompt assembly, before `MEMORY_INDEX.md`, to keep voice/values consistent with minimal token impact.
-- Direct edits via `write_file` are blocked for `memory/SOUL.md`.
-- Safe edit flow:
-  - `soul_get` to inspect current SOUL + validation status
-  - `soul_propose_patch` to validate structured patch and preview unified diff
-  - `soul_apply_patch` (approval-gated, high risk) to apply bounded patch only
-- History and audit:
-  - snapshots in `memory/.soul_history/*`
-  - SQLite audit rows in `soul_versions`
-  - Control Center SOUL panel supports history browsing and admin restore requests (approval-gated)
-
-## Heartbeat Proactivity
-
-- Heartbeat is opt-in by default:
-  - set `ENABLE_HEARTBEAT=1`
-  - enable per-session/user in heartbeat state (stored in SQLite)
-- Template file: `memory/HEARTBEAT.md`
-  - includes daily/weekly/monitor/waiting-on checklists and quiet hours (`start`/`end`)
-- Tools:
-  - `heartbeat_get`, `heartbeat_update`, `heartbeat_run_once` (`dry_run=true` supported)
-- Runtime behavior:
-  - cron tick evaluates due heartbeat sessions
-  - respects quiet hours using session timezone
-  - respects access-control spend ceilings before sending proactive messages
-
-## Skill Marketplace
-
-- Default catalog source: `openai/skills` (`.agents/skills` path)
-- Optional custom sources via `SKILL_SOURCES_JSON`
-- Marketplace tools:
-  - `skills_market_sources_list`
-  - `skills_market_search`
-  - `skills_market_install` (`workspace` or `global`)
-  - `skills_market_enable`, `skills_market_disable`, `skills_market_remove`
-- Safety model:
-  - instruction-only packs in this phase (no marketplace code execution)
-  - install-time SHA256 manifest stored in `.marketplace.json`
-  - enable-time hash re-verification
-  - optional trusted publisher badges via `SKILL_TRUSTED_PUBLISHER_KEYS`
-- Progressive disclosure:
-  - base prompt keeps skill loading lean
-  - full skill content is loaded only when selected/activated
-
-## Telegram Attachments + send_file
-
-- Inbound files:
-  - accepted: document/photo/audio/video
-  - saved into session workspace under `attachments/<message_id>/...`
-  - audited in SQLite (`messages` + `attachments` tables) with SHA256 and metadata
-  - limits: `TELEGRAM_MAX_ATTACHMENT_BYTES`, `TELEGRAM_MAX_ATTACHMENTS_PER_DAY`
-- Outbound files:
-  - use `send_file(path, caption?, kind?, session_id?)`
-  - path must resolve inside workspace root (absolute paths require trusted profile and still must be inside workspace)
-  - delivery is audited and linked to an assistant message row
-
-## Output Presentation (Telegram + Web)
-
-- A deterministic presentation layer post-processes assistant text per channel:
-  - paragraph splitting for long walls
-  - lightweight heading/list cleanup
-  - optional light emoji based on SOUL style
-- Telegram output uses MarkdownV2-safe escaping.
-- Web output keeps equivalent markdown structure and is rendered in Control Center chat.
-- SOUL style controls:
-  - `style.emoji`: `off|light|on`
-  - `style.emphasis`: `plain|light|rich`
-  - `style.brevity`: `short|normal`
-- Control Center `/chat` includes SOUL presentation controls (style update requests are approval-gated via `soul_apply_patch`).
-- Optional micro-style probe:
-  - disabled by default (`ENABLE_POLISH_PROBE=0`)
-  - if enabled, formatting pass is still heuristic-only and capped to +5% length growth.
-
-## Tool Loop (Probe -> Expand)
-
-- Core principle: tools are assistant-invoked, not user-invoked.
-- The user asks for outcomes. The assistant decides and emits `!exec` / `!tool` / `!loop` internally when needed.
-- Request handling uses a cheap probe first:
-  - `NO_TOOLS`
-  - `<final assistant reply>`
-  - `NEED_TOOLS {"tools":["read_file","shell_exec"],"goal":"...","max_steps":3}`
-- `NO_TOOLS` returns immediately (no tool schemas/capability bundles injected).
-- `NEED_TOOLS` activates lazy injection:
-  - strict behavior rules
-  - only selected tool schemas
-  - only selected capability summaries
-  - tool loop execution
-- If the NEED_TOOLS reply describes intent but does not execute, the service triggers one corrective model turn that must emit exactly one tool call block.
-- If a model still emits raw shell text (for example fenced `bash`, `Step 1: ...`, or split `!exec` forms), runtime normalizes it into executable tool-loop actions instead of replying with command text.
-- Optional autonomous planning bridge:
-  - set `AUTONOMOUS_TOOL_LOOP=1` to let text-only API providers (`deepseek`, `openai`, `gemini`, etc.) propose tool-loop steps automatically
-  - planner runs only as fallback when probe/NEED_TOOLS path did not produce executable tool actions
-  - keep disabled for `codex_cli` in most setups (Codex already has native agentic tool execution)
-- Skills can extend tool availability per task:
-  - skills are auto-activated ad hoc from prompt intent + env prerequisites
-  - skills are auto-deactivated after the run
-- The agent executes listed actions, captures observations, and injects them into the provider prompt.
-- High-risk actions require explicit approval:
-  - `/pending` to list pending approvals
-  - `/approve <approval_id>` to execute approved action
-  - `/deny <approval_id>` to reject pending action
-- `send_email_smtp` always requires approval when enabled (explicitly via `ENABLE_EMAIL_TOOL=1` or implicitly via SMTP env config).
-- Tool loop enforces per-message max step budget (`TOOL_LOOP_MAX_STEPS`).
-- Pending approvals expire automatically after `APPROVAL_TTL_SEC`.
-- Pending approvals are capped per user (`MAX_PENDING_APPROVALS_PER_USER`) to reduce abuse risk.
-- Telegram now emits step-by-step loop progress messages (start, step start, approval wait, finish).
-- Progress updates are delivered via in-place status message edits to reduce chat noise.
-- Progress updates are impermanent: in-place status messages auto-delete shortly after completion.
-- High-risk tool approvals include Telegram 1/2/3 action buttons:
-  - `1) Allow once`
-  - `2) Deny`
-  - `3) Show pending`
-- Web chat exposes inline Approve/Deny buttons backed by the same approval gate.
-- `/interrupt` cancels active run for current chat (queued job + in-flight task).
-- `/continue` reuses latest user prompt and asks the agent to continue the task.
-- Shortcut command surface for common workflows:
-  - `/email [--dry-run] to@example.com | Subject | Body`
-  - `/email_check <email>`
-  - `/contact add <email> [name...] | list | remove <email>`
-  - `/template save <id> | <subject> | <body> | list | show <id> | delete <id>`
-  - `/email_template [--dry-run] <template_id> <to_email>`
-  - `/gh comment|create|close ...`
-- Scheduler tools:
-  - `schedule_task(when, message, repeat, session_id?)`
-  - `list_schedules(session_id?)`
-  - `cancel_schedule(id)`
-  - scheduler tick starts automatically in both Telegram bot runtime and Control Center runtime
-- Safe replay guardrails:
-  - high-risk replays require explicit confirmation (`/continue yes`)
-  - completed tool steps can be checkpoint-skipped on identical replay to avoid duplicate execution
-
-## Skills (Universal)
-
-- Skills are provider-agnostic: same skill runtime works with `codex_cli`, `deepseek`, `openai`, `gemini`, etc.
-- Built-in seeded skills:
-  - `smtp_email` (enabled by default): provides `send_email_smtp` tool
-  - `email_ops` (enabled by default): provides validation, contacts, templates, and template-send tools
-  - `github_outbound` (disabled by default): provides GitHub outbound tools
-- Skill lifecycle:
-  - install from trusted manifest URL (`/skills` page or `POST /api/skills/install`)
-  - enable/disable manually (`/skills` page or `/api/skills/{id}/enable|disable`)
-  - auto-activate/deactivate per run based on prompt keywords and required env vars
-
-## Capability Registry
-
-- Capability markdowns live in `capabilities/`:
-  - `capabilities/system.md`
-  - `capabilities/git.md`
-  - `capabilities/files.md`
-- Registry behavior is lean:
-  - load markdowns dynamically from `CAPABILITIES_DIR`
-  - select only relevant capabilities by prompt keywords
-  - inject only short summaries, never full markdown contents
-
-## Repository Retrieval (MVP)
-
-- Prompt construction now includes relevant local repository snippets.
-- Retrieval uses fast path+content scoring over text files under `EXECUTION_WORKSPACE_ROOT`.
-- Retrieval index is cached in memory and auto-refreshed.
-- Symbol-aware weighting boosts files with matching `def/class/function` names.
-- Debug retrieval quality via `GET /api/retrieval?query=...`.
-
-## Handoff Protocol
-
-Cross-agent handoff uses an explicit envelope payload:
-
-- `version`
-- `from_agent_id`
-- `to_agent_id`
-- `parent_run_id`
-- `created_at`
-- `prompt_preview`
-
-Handoff lifecycle events (attached to `parent_run_id` timeline when provided):
-
-- `handoff.requested`
-- `handoff.accepted`
-- `handoff.recovered` (fallback to `default` agent if target unavailable)
-- `handoff.completed`
-- `handoff.failed`
-
-## Troubleshooting
-
-See [docs/support.md](docs/support.md) for the full troubleshooting playbook, FAQ,
-and bug reporting instructions.
-
-Quick checks:
-
-- `Error: codex CLI not found.`
-  - Ensure `codex` is installed and available in `PATH` for the runtime user.
-- Bot does not respond in Telegram
-  - Verify token correctness
-  - Verify allowlist includes your Telegram user ID
-  - Check stderr logs for handler exceptions
+1. Your Telegram bot token and settings can be migrated: `make migrate-from-python`
+2. Run `agent-hq onboard --reinit` to set up the new Rust configuration
+3. Your SOUL.md and memory files are automatically loaded from the workspace
 
 ## License
 
-MIT
+MIT OR Apache-2.0

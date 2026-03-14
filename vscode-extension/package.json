@@ -1,9 +1,9 @@
 {
-  "name": "codex-control-center",
-  "displayName": "Codex Control Center",
-  "description": "VS Code extension to interact with the Codex Telegram Bot gateway",
-  "version": "0.1.1",
-  "publisher": "codex",
+  "name": "agent-hq",
+  "displayName": "Agent HQ",
+  "description": "VS Code extension for Agent HQ — powered by ZeroClaw engine",
+  "version": "1.0.0",
+  "publisher": "agent-hq",
   "engines": {
     "vscode": "^1.85.0"
   },
