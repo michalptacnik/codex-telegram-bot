@@ -565,7 +565,7 @@ fn format_step_context(sop: &Sop, run: &SopRun, step: &SopStep) -> String {
 
 // ── Utilities ───────────────────────────────────────────────────
 
-pub(crate) fn now_iso8601() -> String {
+pub fn now_iso8601() -> String {
     // Use chrono if available, otherwise fallback to SystemTime
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

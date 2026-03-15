@@ -76,6 +76,7 @@ pub mod missions;
 pub mod browser_bridge;
 pub mod plugins;
 pub mod sessions;
+pub mod sop;
 
 pub use config::Config;
 
@@ -360,6 +361,23 @@ Examples:
     Resume {
         /// Task ID
         id: String,
+    },
+}
+
+/// SOP (Standard Operating Procedure) management subcommands
+#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SopCommands {
+    /// List all SOPs in the configured directory
+    List,
+    /// Validate a SOP by name (or all SOPs if name is omitted)
+    Validate {
+        /// Name of the SOP to validate (omit to validate all)
+        name: Option<String>,
+    },
+    /// Show details of a SOP by name
+    Show {
+        /// Name of the SOP to show
+        name: String,
     },
 }
 

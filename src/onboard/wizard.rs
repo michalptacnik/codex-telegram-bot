@@ -174,6 +174,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         transcription: crate::config::TranscriptionConfig::default(),
         tts: crate::config::TtsConfig::default(),
         daemon: crate::config::schema::DaemonConfig::default(),
+        sop: crate::config::SopConfig::default(),
     };
 
     println!(
@@ -528,6 +529,7 @@ async fn run_quick_setup_with_home(
         transcription: crate::config::TranscriptionConfig::default(),
         tts: crate::config::TtsConfig::default(),
         daemon: crate::config::schema::DaemonConfig::default(),
+        sop: crate::config::SopConfig::default(),
     };
 
     config.save().await?;

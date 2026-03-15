@@ -50,7 +50,7 @@ mod approval;
 mod auth;
 mod channels;
 mod rag {
-    pub use agent_hq::rag::*;
+    pub use zeroclaw::rag::*;
 }
 mod config;
 mod cost;
@@ -86,11 +86,14 @@ mod missions;
 mod browser_bridge;
 mod plugins;
 mod sessions;
+mod sop {
+    pub use zeroclaw::sop::*;
+}
 
 use config::Config;
 
 // Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
-pub use agent_hq::{
+pub use zeroclaw::{
     ChannelCommands, CronCommands, GatewayCommands, HardwareCommands, IntegrationCommands,
     MigrateCommands, PeripheralCommands, ServiceCommands, SkillCommands,
 };

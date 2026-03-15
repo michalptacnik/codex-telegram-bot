@@ -233,7 +233,46 @@ pub struct Config {
     /// Daemon process configuration (`[daemon]`).
     #[serde(default)]
     pub daemon: DaemonConfig,
+
+    /// SOP (Standard Operating Procedure) configuration (`[sop]`).
+    #[serde(default)]
+    pub sop: SopConfig,
 }
+
+/// SOP configuration: directory, execution, and runtime limits.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SopConfig {
+    /// Override directory for SOP YAML files (default: `<workspace>/sops`).
+    pub sops_dir: Option<String>,
+    /// Default execution mode for SOPs that do not specify one.
+    #[serde(default)]
+    pub default_execution_mode: crate::sop::types::SopExecutionMode,
+    /// Maximum number of concurrently active SOP runs.
+    #[serde(default = "default_sop_max_concurrent")]
+    pub max_concurrent_total: usize,
+    /// Seconds to wait for manual approval before a run step times out.
+    #[serde(default = "default_sop_approval_timeout")]
+    pub approval_timeout_secs: u64,
+    /// Maximum number of finished runs to retain in memory.
+    #[serde(default = "default_sop_max_finished")]
+    pub max_finished_runs: usize,
+}
+
+impl Default for SopConfig {
+    fn default() -> Self {
+        Self {
+            sops_dir: None,
+            default_execution_mode: Default::default(),
+            max_concurrent_total: default_sop_max_concurrent(),
+            approval_timeout_secs: default_sop_approval_timeout(),
+            max_finished_runs: default_sop_max_finished(),
+        }
+    }
+}
+
+fn default_sop_max_concurrent() -> usize { 5 }
+fn default_sop_approval_timeout() -> u64 { 300 }
+fn default_sop_max_finished() -> usize { 100 }
 
 /// Named provider profile definition compatible with Codex app-server style config.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -4057,6 +4096,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
+            sop: SopConfig::default(),
         }
     }
 }
