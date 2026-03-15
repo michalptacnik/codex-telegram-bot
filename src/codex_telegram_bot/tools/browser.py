@@ -93,6 +93,7 @@ class BrowserOpenTool:
                 "active": bool(active),
             },
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -134,6 +135,7 @@ class BrowserNavigateTool:
                 "active": bool(active),
             },
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -184,6 +186,7 @@ class BrowserScriptTool:
             command_type="run_script",
             payload=payload,
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -254,6 +257,7 @@ class BrowserExtractTool:
             command_type="run_script",
             payload=payload,
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -403,6 +407,7 @@ class BrowserSnapshotTool:
             command_type=command_type,
             payload=payload,
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -483,6 +488,7 @@ class BrowserScreenshotTool:
             command_type="screenshot",
             payload=payload,
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -548,6 +554,7 @@ class BrowserActionTool:
             command_type="run_script",
             payload=payload,
             client_id=client_id,
+            session_key=str(context.session_id or ""),
             wait=wait,
             timeout_sec=timeout_sec,
         )
@@ -609,6 +616,7 @@ def _run_browser_command(
     command_type: str,
     payload: Dict[str, Any],
     client_id: str,
+    session_key: str,
     wait: bool,
     timeout_sec: int,
 ) -> ToolResult:
@@ -620,6 +628,7 @@ def _run_browser_command(
                 command_type=command_type,
                 payload=dict(request_payload),
                 client_id=client_id,
+                session_key=str(session_key or ""),
                 wait=wait,
                 timeout_sec=timeout_sec,
             )
@@ -635,6 +644,7 @@ def _run_browser_command(
                 command_type=command_type,
                 payload=dict(retry_payload),
                 client_id=client_id,
+                session_key=str(session_key or ""),
                 wait=wait,
                 timeout_sec=timeout_sec,
             )
@@ -660,6 +670,7 @@ def _run_browser_command(
                 command_type=command_type,
                 payload=dict(payload or {}),
                 client_id=client_id,
+                session_key=str(session_key or ""),
                 wait=remote_wait,
                 timeout_sec=timeout_sec,
             )
@@ -1403,6 +1414,7 @@ def _remote_enqueue_command(
     command_type: str,
     payload: Dict[str, Any],
     client_id: str,
+    session_key: str,
     wait: bool,
     timeout_sec: int,
 ) -> Dict[str, Any]:
@@ -1410,6 +1422,7 @@ def _remote_enqueue_command(
         "command_type": str(command_type or "").strip(),
         "payload": dict(payload or {}),
         "client_id": str(client_id or "").strip(),
+        "session_key": str(session_key or "").strip(),
         "wait": bool(wait),
         "timeout_sec": int(timeout_sec),
     }

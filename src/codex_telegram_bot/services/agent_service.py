@@ -714,6 +714,7 @@ class AgentService:
         self._session_workspace_roots: Dict[str, str] = {}
         self._runtime_registry_snapshots: Dict[str, ToolRegistrySnapshot] = {}
         self._session_browser_tab_affinity: Dict[str, int] = {}
+        self._session_browser_client_affinity: Dict[str, str] = {}
         self._session_browser_unsupported_tools: Dict[str, set[str]] = {}
         self._alert_dispatcher = alert_dispatcher or AlertDispatcher()
         self._tool_registry = tool_registry or build_default_tool_registry(
@@ -3957,6 +3958,8 @@ class AgentService:
     def _inject_browser_tab_affinity(self, *, session_id: str, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         normalized = str(tool_name or "").strip().lower()
         if normalized not in {
+            "browser_open",
+            "browser_navigate",
             "browser_script",
             "browser_action",
             "browser_extract",
@@ -3965,6 +3968,11 @@ class AgentService:
         }:
             return dict(tool_args or {})
         args = dict(tool_args or {})
+        current_client_id = str(args.get("client_id") or "").strip()
+        if not current_client_id:
+            preferred_client_id = str(self._session_browser_client_affinity.get(session_id, "") or "").strip()
+            if preferred_client_id:
+                args["client_id"] = preferred_client_id
         current = int(args.get("tab_id") or 0) if str(args.get("tab_id") or "").strip() else 0
         if current > 0:
             return args
@@ -3978,6 +3986,9 @@ class AgentService:
         if not normalized.startswith("browser_"):
             return
         payload = self._extract_first_json_object(output)
+        client_id = self._extract_client_id_from_browser_payload(payload)
+        if ok and client_id:
+            self._session_browser_client_affinity[session_id] = client_id
         tab_id = self._extract_tab_id_from_browser_payload(payload)
         if ok and tab_id > 0:
             self._session_browser_tab_affinity[session_id] = tab_id
@@ -4072,6 +4083,27 @@ class AgentService:
                     if nested_result > 0:
                         return nested_result
         return 0
+
+    def _extract_client_id_from_browser_payload(self, payload: Dict[str, Any]) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        candidates = [
+            payload.get("client_id"),
+            (payload.get("command") or {}).get("client_id") if isinstance(payload.get("command"), dict) else None,
+            (payload.get("data") or {}).get("client_id") if isinstance(payload.get("data"), dict) else None,
+        ]
+        for value in candidates:
+            text = str(value or "").strip()
+            if text:
+                return text
+        command = payload.get("command")
+        if isinstance(command, dict):
+            data = command.get("data")
+            if isinstance(data, dict):
+                text = str(data.get("client_id") or "").strip()
+                if text:
+                    return text
+        return ""
 
     def _tool_exec_post_meta(
         self,

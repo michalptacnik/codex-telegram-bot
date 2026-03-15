@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "codex-telegram-bot"
 version = "0.3.0"
-description = "Telegram bot that forwards messages to local codex CLI"
+description = "Telegram-first agent runtime with DeepSeek provider and Control Center GUI"
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"

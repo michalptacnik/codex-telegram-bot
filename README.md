@@ -178,6 +178,17 @@ Run Control Center web UI (local dashboard):
 codex-telegram-bot --control-center --host 127.0.0.1 --port 8765
 ```
 
+Run the ZeroClaw compatibility adapter (reuses AgentHQ Chrome extension protocol and exposes `/v1/actions`):
+
+```bash
+./scripts/start_zeroclaw_adapter.sh
+```
+
+Optional adapter auth:
+
+- `BROWSER_EXTENSION_TOKEN` secures extension register/heartbeat/command endpoints.
+- `ZEROCLAW_COMPUTER_USE_TOKEN` secures `/v1/actions` bearer auth (defaults to `BROWSER_EXTENSION_TOKEN` when unset).
+
 Build a launchable macOS app bundle (starts bot + Control Center and opens `/chat`):
 
 ```bash

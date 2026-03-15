@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -62,6 +63,14 @@ class BrowserBridge:
         self._last_snapshot_ref_map: Dict[str, str] = {}
         self._extension_versions: Dict[str, str] = {}  # client_id -> extension_version
         self._supported_commands: Dict[str, List[str]] = {}  # client_id -> command types supported by extension
+        self._default_client_id: str = ""
+        self._session_client_affinity: Dict[str, str] = {}
+        self._single_client_mode: bool = str(os.environ.get("BROWSER_BRIDGE_SINGLE_CLIENT", "1") or "").strip().lower() not in {
+            "0",
+            "false",
+            "off",
+            "no",
+        }
 
     # ------------------------------------------------------------------
     # Snapshot ref map — caches ref_id -> CSS selector from last snapshot
@@ -130,6 +139,7 @@ class BrowserBridge:
                 "active_clients": len(active_clients),
                 "clients": active_clients,
                 "supported_commands": sorted(supported_union),
+                "default_client_id": str(self._default_client_id or ""),
             }
 
     # ------------------------------------------------------------------
@@ -181,6 +191,8 @@ class BrowserBridge:
                     existing.active_tab_title = str(active_tab_title).strip()
                 existing.last_seen_at = now
             self._queue_by_client.setdefault(client_id, [])
+            if not self._default_client_id:
+                self._default_client_id = client_id
             self._prune_locked(now)
             return self._client_to_dict(existing, now)
 
@@ -220,6 +232,8 @@ class BrowserBridge:
                 client.active_tab_url = str(active_tab_url).strip()
             if active_tab_title:
                 client.active_tab_title = str(active_tab_title).strip()
+            if not self._default_client_id:
+                self._default_client_id = client_id
             self._prune_locked(now)
             return self._client_to_dict(client, now)
 
@@ -242,6 +256,8 @@ class BrowserBridge:
             "heartbeat_ttl_sec": self._heartbeat_ttl_sec,
             "clients": clients,
             "supported_commands": list(capabilities.get("supported_commands") or []),
+            "default_client_id": str(self._default_client_id or ""),
+            "session_client_affinity_count": len(self._session_client_affinity),
         }
 
     # ------------------------------------------------------------------
@@ -254,6 +270,7 @@ class BrowserBridge:
         command_type: str,
         payload: Dict[str, Any],
         client_id: str = "",
+        session_key: str = "",
         wait: bool = False,
         timeout_sec: int = 20,
     ) -> Dict[str, Any]:
@@ -264,6 +281,7 @@ class BrowserBridge:
         with self._lock:
             self._prune_locked(now)
             requested_client = (client_id or "").strip()
+            normalized_session_key = _normalize_session_key(session_key)
             target_client = ""
             if requested_client:
                 requested = self._clients.get(requested_client)
@@ -272,13 +290,24 @@ class BrowserBridge:
                 else:
                     # Fallback to any active client when the requested id is stale/invalid.
                     target_client = self._pick_best_client_locked(now)
+            elif normalized_session_key:
+                bound = str(self._session_client_affinity.get(normalized_session_key) or "").strip()
+                if bound:
+                    bound_client = self._clients.get(bound)
+                    if bound_client is not None and _client_is_active(bound_client, now, self._heartbeat_ttl_sec):
+                        target_client = bound
             else:
+                target_client = ""
+            if not target_client:
                 target_client = self._pick_best_client_locked(now)
             if not target_client:
                 return {
                     "ok": False,
                     "error": "No active Chrome extension client is connected.",
                 }
+            self._default_client_id = target_client
+            if normalized_session_key:
+                self._session_client_affinity[normalized_session_key] = target_client
             cmd = BrowserCommand(
                 command_id=str(uuid.uuid4()),
                 client_id=target_client,
@@ -419,13 +448,23 @@ class BrowserBridge:
     # ------------------------------------------------------------------
 
     def _pick_best_client_locked(self, now: datetime) -> str:
+        preferred = str(self._default_client_id or "").strip()
+        if preferred:
+            preferred_client = self._clients.get(preferred)
+            if preferred_client is not None and _client_is_active(preferred_client, now, self._heartbeat_ttl_sec):
+                return preferred
+
         best: Optional[BrowserClient] = None
         for client in self._clients.values():
             if not _client_is_active(client, now, self._heartbeat_ttl_sec):
                 continue
             if best is None or client.last_seen_at > best.last_seen_at:
                 best = client
-        return best.instance_id if best is not None else ""
+        if best is None:
+            return ""
+        if self._single_client_mode:
+            self._default_client_id = best.instance_id
+        return best.instance_id
 
     def _client_to_dict(self, client: BrowserClient, now: Optional[datetime] = None) -> Dict[str, Any]:
         ref = now or _now_utc()
@@ -492,6 +531,11 @@ class BrowserBridge:
         for client_id in list(self._supported_commands.keys()):
             if client_id not in active_client_ids:
                 self._supported_commands.pop(client_id, None)
+        for key, client_id in list(self._session_client_affinity.items()):
+            if client_id not in active_client_ids:
+                self._session_client_affinity.pop(key, None)
+        if self._default_client_id and self._default_client_id not in active_client_ids:
+            self._default_client_id = ""
 
 
 def _now_utc() -> datetime:
@@ -522,6 +566,14 @@ def _normalize_supported_commands(raw: List[str]) -> List[str]:
         seen.add(name)
         out.append(name)
     return out
+
+
+def _normalize_session_key(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    # Keep keys compact to avoid unbounded memory cardinality.
+    return text[:128]
 
 
 def _parse_major(version: str) -> int:
