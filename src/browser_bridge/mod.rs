@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
 // ── Constants ────────────────────────────────────────────────────
@@ -107,6 +107,8 @@ pub struct BrowserBridge {
     snapshot_ref_map: Arc<Mutex<HashMap<String, String>>>,
     supported_commands: Arc<Mutex<HashMap<String, Vec<String>>>>,
 }
+
+static GLOBAL_BROWSER_BRIDGE: OnceLock<Arc<BrowserBridge>> = OnceLock::new();
 
 impl BrowserBridge {
     pub fn new() -> Self {
@@ -278,11 +280,37 @@ impl BrowserBridge {
     pub fn active_clients(&self) -> Vec<BrowserClient> {
         let now = Utc::now();
         let clients = self.clients.lock();
-        clients
+        let mut active: Vec<_> = clients
             .values()
             .filter(|c| (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec)
             .cloned()
-            .collect()
+            .collect();
+        active.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+        active
+    }
+
+    /// Pick the most recently active client, optionally requiring support for a command.
+    pub fn pick_client(&self, required_command: Option<&str>) -> Option<BrowserClient> {
+        let want = required_command.map(str::trim).filter(|s| !s.is_empty());
+        let supported = self.supported_commands.lock();
+
+        self.active_clients().into_iter().find(|client| {
+            let Some(command) = want else {
+                return true;
+            };
+            supported
+                .get(&client.instance_id)
+                .is_some_and(|cmds| cmds.iter().any(|item| item == command))
+        })
+    }
+
+    /// Return the supported command list for a given client.
+    pub fn supported_commands_for(&self, client_id: &str) -> Vec<String> {
+        self.supported_commands
+            .lock()
+            .get(client_id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Check if any active extension supports a given command type.
@@ -353,6 +381,11 @@ impl Default for BrowserBridge {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Return the process-global browser bridge instance.
+pub fn global_bridge() -> Arc<BrowserBridge> {
+    Arc::clone(GLOBAL_BROWSER_BRIDGE.get_or_init(|| Arc::new(BrowserBridge::new())))
 }
 
 #[cfg(test)]

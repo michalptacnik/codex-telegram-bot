@@ -1206,7 +1206,7 @@ pub struct BrowserConfig {
     /// Browser session name (for agent-browser automation)
     #[serde(default)]
     pub session_name: Option<String>,
-    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "auto"
+    /// Browser automation backend: "agent_browser" | "rust_native" | "computer_use" | "extension_bridge" | "auto"
     #[serde(default = "default_browser_backend")]
     pub backend: String,
     /// Headless mode for rust-native backend
@@ -1224,7 +1224,7 @@ pub struct BrowserConfig {
 }
 
 fn default_browser_backend() -> String {
-    "agent_browser".into()
+    "auto".into()
 }
 
 fn default_browser_webdriver_url() -> String {
@@ -4188,6 +4188,16 @@ async fn load_persisted_workspace_dirs(
     } else {
         default_config_dir.join(parsed_dir)
     };
+
+    if is_temp_directory(&config_dir) {
+        tracing::warn!(
+            path = %config_dir.display(),
+            marker = %state_path.display(),
+            "Ignoring active workspace marker because it points to a temp directory"
+        );
+        return Ok(None);
+    }
+
     Ok(Some((config_dir.clone(), config_dir.join("workspace"))))
 }
 
@@ -7104,7 +7114,7 @@ default_temperature = 0.7
         let b = BrowserConfig::default();
         assert!(!b.enabled);
         assert!(b.allowed_domains.is_empty());
-        assert_eq!(b.backend, "agent_browser");
+        assert_eq!(b.backend, "auto");
         assert!(b.native_headless);
         assert_eq!(b.native_webdriver_url, "http://127.0.0.1:9515");
         assert!(b.native_chrome_path.is_none());
@@ -7867,6 +7877,47 @@ default_model = "legacy-model"
             std::env::remove_var("HOME");
         }
         let _ = fs::remove_dir_all(temp_home).await;
+    }
+
+    #[test]
+    async fn load_or_init_ignores_temp_directory_active_workspace_marker() {
+        let _env_guard = env_override_lock().await;
+        let home_root =
+            std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
+        let default_config_dir = home_root.join(".zeroclaw");
+        let marker_path = default_config_dir.join(ACTIVE_WORKSPACE_STATE_FILE);
+        let temp_marker_config_dir =
+            std::env::temp_dir().join(format!("zeroclaw-temp-profile-{}", uuid::Uuid::new_v4()));
+
+        fs::create_dir_all(&default_config_dir).await.unwrap();
+        fs::create_dir_all(&temp_marker_config_dir).await.unwrap();
+        fs::write(
+            marker_path,
+            format!(
+                "config_dir = {:?}\n",
+                temp_marker_config_dir.to_string_lossy().to_string()
+            ),
+        )
+        .await
+        .unwrap();
+
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home_root);
+        std::env::remove_var("ZEROCLAW_WORKSPACE");
+        std::env::remove_var("ZEROCLAW_CONFIG_DIR");
+
+        let config = Config::load_or_init().await.unwrap();
+
+        assert_eq!(config.config_path, default_config_dir.join("config.toml"));
+        assert_eq!(config.workspace_dir, default_config_dir.join("workspace"));
+
+        if let Some(home) = original_home {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = fs::remove_dir_all(home_root).await;
+        let _ = fs::remove_dir_all(temp_marker_config_dir).await;
     }
 
     #[test]
