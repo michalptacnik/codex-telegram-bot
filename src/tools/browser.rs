@@ -1472,8 +1472,10 @@ impl Tool for BrowserTool {
         concat!(
             "Web/browser automation with pluggable backends (agent-browser, rust-native, computer_use, extension_bridge). ",
             "Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, ",
-            "key_type, key_press, screen_capture) through a computer-use sidecar. Use 'snapshot' to map ",
-            "interactive elements to refs (@e1, @e2). Enforces browser.allowed_domains for open actions."
+            "key_type, key_press, screen_capture) through a computer-use sidecar. For normal websites and logged-in web apps, ",
+            "prefer open -> snapshot -> find/fill/click/press/get_text. Use 'snapshot' to map interactive elements to refs ",
+            "(@e1, @e2). Window/tab management and OS-level mouse/keyboard actions are only for computer_use-style backends. ",
+            "Enforces browser.allowed_domains for open actions."
         )
     }
 
@@ -1489,7 +1491,7 @@ impl Tool for BrowserTool {
                              "list_windows", "focus_window", "list_tabs", "focus_tab", "verify_artifact",
                              "mouse_move", "mouse_click", "mouse_drag", "key_type",
                              "key_press", "screen_capture"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use)"
+                    "description": "Browser action to perform. For websites use open/snapshot/find/fill/click/press/get_text. Window/tab management and OS-level actions require backend=computer_use."
                 },
                 "url": {
                     "type": "string",
@@ -1497,7 +1499,7 @@ impl Tool for BrowserTool {
                 },
                 "selector": {
                     "type": "string",
-                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or text=..."
+                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or semantic selectors like text=..., label=..., placeholder=..., role=..., testid=..."
                 },
                 "value": {
                     "type": "string",
@@ -3162,6 +3164,28 @@ mod tests {
             extension_selector_for_find("testid", "tweetButton"),
             "testid=tweetButton"
         );
+    }
+
+    #[test]
+    fn browser_tool_schema_guides_dom_actions_for_websites() {
+        let tool = BrowserTool::new(
+            Arc::new(SecurityPolicy::default()),
+            vec!["*".into()],
+            Some("test".into()),
+        );
+
+        let schema = tool.parameters_schema();
+        assert!(tool
+            .description()
+            .contains("prefer open -> snapshot -> find/fill/click/press/get_text"));
+        assert!(schema["properties"]["action"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("For websites use open/snapshot/find/fill/click/press/get_text"));
+        assert!(schema["properties"]["selector"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("label=..., placeholder=..., role=..., testid=..."));
     }
 
     #[test]

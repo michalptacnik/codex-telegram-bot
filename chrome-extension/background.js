@@ -2,7 +2,7 @@ const EXTENSION_VERSION = String((chrome.runtime.getManifest() || {}).version ||
 const SUPPORTED_COMMANDS = ["open_url", "navigate_url", "run_script", "snapshot", "screenshot"];
 
 const DEFAULT_CONFIG = {
-  baseUrl: "http://127.0.0.1:8765",
+  baseUrl: "http://127.0.0.1:42617",
   token: "",
   enabled: true,
   instanceId: ""
@@ -39,7 +39,11 @@ function normalizeBaseUrl(raw) {
   if (!text) {
     return DEFAULT_CONFIG.baseUrl;
   }
-  return text.replace(/\/$/, "");
+  const normalized = text.replace(/\/$/, "");
+  if (normalized === "http://127.0.0.1:8765") {
+    return DEFAULT_CONFIG.baseUrl;
+  }
+  return normalized;
 }
 
 function installAlarm() {
@@ -138,8 +142,12 @@ async function setStored(values) {
 
 async function loadConfig() {
   const stored = await getStored(["baseUrl", "token", "enabled", "instanceId"]);
+  const baseUrl = normalizeBaseUrl(stored.baseUrl || DEFAULT_CONFIG.baseUrl);
+  if (baseUrl !== String(stored.baseUrl || "").trim()) {
+    await setStored({ baseUrl });
+  }
   return {
-    baseUrl: normalizeBaseUrl(stored.baseUrl || DEFAULT_CONFIG.baseUrl),
+    baseUrl,
     token: String(stored.token || DEFAULT_CONFIG.token || ""),
     enabled: stored.enabled !== undefined ? Boolean(stored.enabled) : Boolean(DEFAULT_CONFIG.enabled),
     instanceId: String(stored.instanceId || DEFAULT_CONFIG.instanceId || "")

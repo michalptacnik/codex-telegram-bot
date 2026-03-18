@@ -154,6 +154,14 @@ impl EmailChannel {
         }
     }
 
+    fn normalized_address(email: &str) -> String {
+        email
+            .trim()
+            .trim_matches('<')
+            .trim_matches('>')
+            .to_ascii_lowercase()
+    }
+
     /// Check if a sender email is in the allowlist
     pub fn is_sender_allowed(&self, email: &str) -> bool {
         if self.config.allowed_senders.is_empty() {
@@ -162,19 +170,29 @@ impl EmailChannel {
         if self.config.allowed_senders.iter().any(|a| a == "*") {
             return true; // Wildcard = allow all
         }
-        let email_lower = email.to_lowercase();
+        let email_lower = Self::normalized_address(email);
         self.config.allowed_senders.iter().any(|allowed| {
             if allowed.starts_with('@') {
                 // Domain match with @ prefix: "@example.com"
                 email_lower.ends_with(&allowed.to_lowercase())
             } else if allowed.contains('@') {
                 // Full email address match
-                allowed.eq_ignore_ascii_case(email)
+                Self::normalized_address(allowed) == email_lower
             } else {
                 // Domain match without @ prefix: "example.com"
                 email_lower.ends_with(&format!("@{}", allowed.to_lowercase()))
             }
         })
+    }
+
+    fn is_self_sender(&self, email: &str) -> bool {
+        let sender = Self::normalized_address(email);
+        if sender.is_empty() {
+            return false;
+        }
+
+        sender == Self::normalized_address(&self.config.from_address)
+            || sender == Self::normalized_address(&self.config.username)
     }
 
     /// Strip HTML tags from content (basic)
@@ -664,6 +682,11 @@ impl EmailChannel {
         let messages = self.fetch_unseen(session).await?;
 
         for email in messages {
+            if self.is_self_sender(&email.sender) {
+                debug!("Ignoring self-sent email from {}", email.sender);
+                continue;
+            }
+
             // Check allowlist
             if !self.is_sender_allowed(&email.sender) {
                 warn!("Blocked email from {}", email.sender);
@@ -1015,6 +1038,19 @@ mod tests {
         assert!(!channel.is_sender_allowed(""));
         // "@example.com" ends with "@example.com" so it's allowed
         assert!(channel.is_sender_allowed("@example.com"));
+    }
+
+    #[test]
+    fn is_self_sender_matches_from_address_and_username() {
+        let config = EmailConfig {
+            username: "bot@example.com".to_string(),
+            from_address: "Bot@Example.com".to_string(),
+            ..Default::default()
+        };
+        let channel = EmailChannel::new(config);
+        assert!(channel.is_self_sender("bot@example.com"));
+        assert!(channel.is_self_sender("<BOT@example.com>"));
+        assert!(!channel.is_self_sender("other@example.com"));
     }
 
     // strip_html tests

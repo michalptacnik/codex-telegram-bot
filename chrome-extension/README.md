@@ -9,7 +9,7 @@ This extension connects your local Chrome session to AgentHQ Control Center so a
 3. Click **Load unpacked** and select this folder:
    - `chrome-extension/`
 4. Open the extension popup.
-5. Set **Control Center URL** (default `http://127.0.0.1:8765`).
+5. Set **Control Center URL** (default `http://127.0.0.1:42617`).
 6. If backend uses `BROWSER_EXTENSION_TOKEN`, paste it into **Bridge token**.
 7. Keep **Bridge enabled** checked.
 8. Click **Save** then **Ping now**.

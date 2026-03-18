@@ -6034,6 +6034,7 @@ default_temperature = 0.7
                 non_cli_excluded_tools: vec![],
             },
             security: SecurityConfig::default(),
+            sop: SopConfig::default(),
             runtime: RuntimeConfig {
                 kind: "docker".into(),
                 ..RuntimeConfig::default()
@@ -6260,6 +6261,7 @@ tool_dispatcher = "xml"
             observability: ObservabilityConfig::default(),
             autonomy: AutonomyConfig::default(),
             security: SecurityConfig::default(),
+            sop: SopConfig::default(),
             runtime: RuntimeConfig::default(),
             reliability: ReliabilityConfig::default(),
             scheduler: SchedulerConfig::default(),

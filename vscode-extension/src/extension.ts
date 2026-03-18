@@ -18,7 +18,7 @@ interface ExtensionConfig {
 function readConfig(): ExtensionConfig {
   const cfg = vscode.workspace.getConfiguration("codex-control-center");
   return {
-    gatewayUrl: cfg.get<string>("gatewayUrl") || "http://127.0.0.1:8765",
+    gatewayUrl: cfg.get<string>("gatewayUrl") || "http://127.0.0.1:42617",
     apiKey: cfg.get<string>("apiKey") || "",
     uiSecret: cfg.get<string>("uiSecret") || "",
     defaultChatId: cfg.get<number>("defaultChatId") || 1,

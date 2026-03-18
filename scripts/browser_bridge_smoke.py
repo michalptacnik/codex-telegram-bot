@@ -208,7 +208,7 @@ def _first_ref(ref_map: Dict[str, str]) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--base-url", default="http://127.0.0.1:8765")
+    parser.add_argument("--base-url", default="http://127.0.0.1:42617")
     parser.add_argument("--open-url", default="https://example.com")
     parser.add_argument("--timeout-sec", type=int, default=60)
     args = parser.parse_args()

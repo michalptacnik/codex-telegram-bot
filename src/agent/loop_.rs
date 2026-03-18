@@ -2839,6 +2839,9 @@ pub(crate) async fn run_tool_call_loop(
 /// how to invoke tools.
 pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
     let mut instructions = String::new();
+    let has_mail = tools_registry.iter().any(|tool| tool.name() == "mail");
+    let has_browser = tools_registry.iter().any(|tool| tool.name() == "browser");
+
     instructions.push_str("\n## Tool Use Protocol\n\n");
     instructions.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
     instructions.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
@@ -2850,6 +2853,21 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
     instructions.push_str("After tool execution, results appear in <tool_result> tags. ");
     instructions
         .push_str("Continue reasoning with the results until you can give a final answer.\n\n");
+
+    if has_mail {
+        instructions.push_str("### Email Rule\n\n");
+        instructions.push_str(
+            "For outbound email, use the `mail` tool first whenever it is available. After `mail` send succeeds, use `verify_sent` for the same attempt before claiming success. Only use browser-based webmail as a fallback when the `mail` tool fails, lacks the needed capability, or the user explicitly asks for browser/webmail automation.\n\n",
+        );
+    }
+
+    if has_browser {
+        instructions.push_str("### Browser Rule\n\n");
+        instructions.push_str(
+            "For browser tasks on websites (including Gmail, X, Slack, and other logged-in apps), prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`. Do not use `list_windows`, `focus_window`, `list_tabs`, `focus_tab`, `mouse_move`, `mouse_click`, `mouse_drag`, `key_type`, `key_press`, `screen_capture`, or `verify_artifact` unless OS-level computer-use behavior is truly required and supported by the active backend. If a browser action fails, stop and report the exact failed action and tool error instead of pretending the task completed.\n\n",
+        );
+    }
+
     instructions.push_str("### Available Tools\n\n");
 
     for tool in tools_registry {
@@ -4815,6 +4833,48 @@ Tail"#;
         assert!(instructions.contains("shell"));
         assert!(instructions.contains("file_read"));
         assert!(instructions.contains("file_write"));
+    }
+
+    #[test]
+    fn build_tool_instructions_prioritizes_mail_and_dom_browser_flow() {
+        use crate::channels::email_channel::EmailConfig;
+        use crate::security::SecurityPolicy;
+        use crate::tools::{browser::BrowserTool, mail::MailTool};
+
+        let security = Arc::new(SecurityPolicy::from_config(
+            &crate::config::AutonomyConfig::default(),
+            std::path::Path::new("/tmp"),
+        ));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(MailTool::new(
+                security.clone(),
+                Some(EmailConfig {
+                    imap_host: "imap.example.com".into(),
+                    imap_port: 993,
+                    imap_folder: "INBOX".into(),
+                    smtp_host: "smtp.example.com".into(),
+                    smtp_port: 465,
+                    smtp_tls: true,
+                    username: "user@example.com".into(),
+                    password: "secret".into(),
+                    from_address: "user@example.com".into(),
+                    allowed_senders: vec!["*".into()],
+                    default_subject: "Default".into(),
+                    idle_timeout_secs: 60,
+                }),
+            )),
+            Box::new(BrowserTool::new(
+                security,
+                vec!["*".into()],
+                Some("test".into()),
+            )),
+        ];
+
+        let instructions = build_tool_instructions(&tools);
+        assert!(instructions.contains("For outbound email, use the `mail` tool first"));
+        assert!(instructions.contains("prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`"));
+        assert!(instructions
+            .contains("If a browser action fails, stop and report the exact failed action"));
     }
 
     #[test]
