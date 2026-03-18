@@ -74,6 +74,54 @@ fn require_browser_extension_auth(
     }
 }
 
+fn browser_status_payload(
+    bridge: Option<&crate::browser_bridge::BrowserBridge>,
+) -> serde_json::Value {
+    let Some(bridge) = bridge else {
+        return serde_json::json!({
+            "connected": false,
+            "clients": [],
+            "supported_commands": [],
+            "pending_commands": 0,
+            "completed_commands": 0,
+        });
+    };
+
+    let status = bridge.status();
+    let supported_commands = status
+        .clients
+        .first()
+        .map(|client| bridge.supported_commands_for(&client.instance_id))
+        .unwrap_or_default();
+
+    serde_json::json!({
+        "connected": status.active_clients > 0,
+        "clients": status.clients,
+        "supported_commands": supported_commands,
+        "pending_commands": status.pending_commands,
+        "completed_commands": status.completed_commands,
+    })
+}
+
+fn browser_bridge_status_payload(
+    bridge: Option<&crate::browser_bridge::BrowserBridge>,
+) -> serde_json::Value {
+    let Some(bridge) = bridge else {
+        return serde_json::json!({
+            "browser_bridge": {
+                "active_clients": 0,
+                "clients": [],
+                "pending_commands": 0,
+                "completed_commands": 0,
+            }
+        });
+    };
+
+    serde_json::json!({
+        "browser_bridge": bridge.status()
+    })
+}
+
 // ── Query parameters ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -1401,29 +1449,7 @@ pub async fn handle_api_browser_status(
         return e.into_response();
     }
 
-    let Some(ref bridge) = state.browser_bridge else {
-        return Json(serde_json::json!({
-            "connected": false,
-            "clients": [],
-            "supported_commands": [],
-        }))
-        .into_response();
-    };
-
-    let status = bridge.status();
-    let supported_commands = bridge
-        .pick_client(None)
-        .map(|client| bridge.supported_commands_for(&client.instance_id))
-        .unwrap_or_default();
-
-    Json(serde_json::json!({
-        "connected": status.active_clients > 0,
-        "clients": status.clients,
-        "supported_commands": supported_commands,
-        "pending_commands": status.pending_commands,
-        "completed_commands": status.completed_commands,
-    }))
-    .into_response()
+    Json(browser_status_payload(state.browser_bridge.as_deref())).into_response()
 }
 
 /// POST /api/browser/command — enqueue a browser extension command.
@@ -1616,17 +1642,167 @@ pub async fn handle_api_browser_bridge_status(
         return e.into_response();
     }
 
-    if let Some(ref bridge) = state.browser_bridge {
-        let status = bridge.status();
-        Json(serde_json::json!({"browser_bridge": status})).into_response()
-    } else {
-        Json(serde_json::json!({"browser_bridge": {"active_clients": 0, "clients": [], "pending_commands": 0, "completed_commands": 0}})).into_response()
-    }
+    Json(browser_bridge_status_payload(state.browser_bridge.as_deref())).into_response()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gateway::AppState;
+    use crate::memory::traits::Memory;
+    use crate::providers::traits::Provider;
+    use crate::security::PairingGuard;
+    use async_trait::async_trait;
+    use axum::body::to_bytes;
+    use parking_lot::Mutex;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[derive(Default)]
+    struct TestProvider;
+
+    #[async_trait]
+    impl Provider for TestProvider {
+        async fn chat_with_system(
+            &self,
+            _system_prompt: Option<&str>,
+            _message: &str,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<String> {
+            Ok(String::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestMemory;
+
+    #[async_trait]
+    impl Memory for TestMemory {
+        fn name(&self) -> &str {
+            "test"
+        }
+
+        async fn store(
+            &self,
+            _key: &str,
+            _content: &str,
+            _category: crate::memory::traits::MemoryCategory,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn recall(
+            &self,
+            _query: &str,
+            _limit: usize,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<Vec<crate::memory::traits::MemoryEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> anyhow::Result<Option<crate::memory::traits::MemoryEntry>> {
+            Ok(None)
+        }
+
+        async fn list(
+            &self,
+            _category: Option<&crate::memory::traits::MemoryCategory>,
+            _session_id: Option<&str>,
+        ) -> anyhow::Result<Vec<crate::memory::traits::MemoryEntry>> {
+            Ok(Vec::new())
+        }
+
+        async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn count(&self) -> anyhow::Result<usize> {
+            Ok(0)
+        }
+
+        async fn health_check(&self) -> bool {
+            true
+        }
+    }
+
+    fn test_state_with_browser_bridge() -> AppState {
+        AppState {
+            config: Arc::new(Mutex::new(crate::config::Config::default())),
+            provider: Arc::new(TestProvider),
+            model: "test-model".into(),
+            temperature: 0.0,
+            mem: Arc::new(TestMemory),
+            auto_save: false,
+            webhook_secret_hash: None,
+            pairing: Arc::new(PairingGuard::new(false, &[])),
+            trust_forwarded_headers: false,
+            rate_limiter: Arc::new(crate::gateway::GatewayRateLimiter::new(100, 100, 100)),
+            idempotency_store: Arc::new(crate::gateway::IdempotencyStore::new(
+                Duration::from_secs(300),
+                1000,
+            )),
+            whatsapp: None,
+            whatsapp_app_secret: None,
+            linq: None,
+            linq_signing_secret: None,
+            nextcloud_talk: None,
+            nextcloud_talk_webhook_secret: None,
+            wati: None,
+            observer: Arc::new(crate::observability::NoopObserver),
+            tools_registry: Arc::new(Vec::new()),
+            cost_tracker: None,
+            event_tx: tokio::sync::broadcast::channel(16).0,
+            shutdown_tx: tokio::sync::watch::channel(false).0,
+            mission_runner: None,
+            plugin_manager: None,
+            session_store: None,
+            browser_bridge: Some(Arc::new(crate::browser_bridge::BrowserBridge::new())),
+        }
+    }
+
+    async fn json_body(response: axum::response::Response) -> Value {
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn browser_status_endpoints_agree_on_connected_client() {
+        let state = test_state_with_browser_bridge();
+        let bridge = state.browser_bridge.as_ref().unwrap();
+        bridge.heartbeat(crate::browser_bridge::HeartbeatMessage {
+            instance_id: "ext-1".into(),
+            label: Some("Test Chrome".into()),
+            version: Some("1.0".into()),
+            platform: Some("macOS".into()),
+            user_agent: Some("Chrome".into()),
+            active_tab_url: Some("https://x.com".into()),
+            active_tab_title: Some("X".into()),
+            supported_commands: Some(vec!["open_url".into(), "snapshot".into()]),
+            extension_version: Some("2.0.0".into()),
+        });
+
+        let browser = json_body(handle_api_browser_status(State(state.clone()), HeaderMap::new()).await.into_response()).await;
+        let bridge_status =
+            json_body(handle_api_browser_bridge_status(State(state), HeaderMap::new()).await.into_response()).await;
+
+        assert_eq!(browser["connected"], Value::Bool(true));
+        assert_eq!(browser["clients"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            browser["supported_commands"],
+            serde_json::json!(["open_url", "snapshot"])
+        );
+        assert_eq!(bridge_status["browser_bridge"]["active_clients"], Value::from(1));
+        assert_eq!(
+            bridge_status["browser_bridge"]["clients"],
+            browser["clients"]
+        );
+    }
 
     #[test]
     fn masking_keeps_toml_valid_and_preserves_api_keys_type() {

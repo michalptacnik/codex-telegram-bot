@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::ToSocketAddrs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -201,6 +202,26 @@ pub enum BrowserAction {
 }
 
 impl BrowserTool {
+    fn resolve_agent_browser_binary() -> PathBuf {
+        let direct = PathBuf::from("agent-browser");
+        if Path::new(&direct).is_file() {
+            return direct;
+        }
+
+        for candidate in [
+            "/opt/homebrew/bin/agent-browser",
+            "/usr/local/bin/agent-browser",
+            "/usr/bin/agent-browser",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+
+        direct
+    }
+
     pub fn new(
         security: Arc<SecurityPolicy>,
         allowed_domains: Vec<String>,
@@ -245,7 +266,7 @@ impl BrowserTool {
 
     /// Check if agent-browser CLI is available
     pub async fn is_agent_browser_available() -> bool {
-        Command::new("agent-browser")
+        Command::new(Self::resolve_agent_browser_binary())
             .arg("--version")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -467,7 +488,7 @@ impl BrowserTool {
 
     /// Execute an agent-browser command
     async fn run_command(&self, args: &[&str]) -> anyhow::Result<AgentBrowserResponse> {
-        let mut cmd = Command::new("agent-browser");
+        let mut cmd = Command::new(Self::resolve_agent_browser_binary());
 
         // Add session if configured
         if let Some(ref session) = self.session_name {

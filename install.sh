@@ -547,6 +547,25 @@ bootstrap_browser_automation_support() {
   return 0
 }
 
+cleanup_legacy_macos_browser_adapter() {
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    return 0
+  fi
+
+  local plist="$HOME/Library/LaunchAgents/com.agenthq.zeroclaw-adapter.plist"
+  if [[ ! -f "$plist" ]]; then
+    return 0
+  fi
+
+  if ! grep -q 'codex_telegram_bot.services.zeroclaw_extension_adapter' "$plist"; then
+    return 0
+  fi
+
+  warn "Removing legacy macOS browser adapter LaunchAgent that points at removed Python code."
+  launchctl bootout "gui/$(id -u)/com.agenthq.zeroclaw-adapter" 2>/dev/null || true
+  rm -f "$plist"
+}
+
 install_rust_toolchain() {
   if have_cmd cargo && have_cmd rustc; then
     info "Rust already installed: $(rustc --version)"
@@ -1101,6 +1120,7 @@ else
 fi
 
 bootstrap_browser_automation_support
+cleanup_legacy_macos_browser_adapter
 
 ZEROCLAW_BIN=""
 if have_cmd zeroclaw; then
