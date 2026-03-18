@@ -64,7 +64,8 @@ pub struct EmailConfig {
     /// RFC 2177 recommends clients restart IDLE every 29 minutes
     #[serde(default = "default_idle_timeout", alias = "poll_interval_secs")]
     pub idle_timeout_secs: u64,
-    /// Allowed sender addresses/domains (empty = deny all, ["*"] = allow all)
+    /// Allowed sender addresses/domains for inbound command handling.
+    /// Empty = deny all. Wildcard entries are intentionally ignored for safety.
     #[serde(default)]
     pub allowed_senders: Vec<String>,
     /// Default subject line for outgoing emails (default: "ZeroClaw Message")
@@ -162,13 +163,20 @@ impl EmailChannel {
             .to_ascii_lowercase()
     }
 
+    fn has_sender_wildcard(&self) -> bool {
+        self.config
+            .allowed_senders
+            .iter()
+            .any(|allowed| allowed.trim() == "*")
+    }
+
     /// Check if a sender email is in the allowlist
     pub fn is_sender_allowed(&self, email: &str) -> bool {
         if self.config.allowed_senders.is_empty() {
             return false; // Empty = deny all
         }
-        if self.config.allowed_senders.iter().any(|a| a == "*") {
-            return true; // Wildcard = allow all
+        if self.has_sender_wildcard() {
+            return false; // Wildcard is unsafe for inbound email commands
         }
         let email_lower = Self::normalized_address(email);
         self.config.allowed_senders.iter().any(|allowed| {
@@ -679,6 +687,13 @@ impl EmailChannel {
         session: &mut ImapSession,
         tx: &mpsc::Sender<ChannelMessage>,
     ) -> Result<()> {
+        if self.has_sender_wildcard() {
+            warn!(
+                "Ignoring inbound email because allowed_senders contains '*' which is unsafe for command ingestion"
+            );
+            return Ok(());
+        }
+
         let messages = self.fetch_unseen(session).await?;
 
         for email in messages {
@@ -941,15 +956,15 @@ mod tests {
     }
 
     #[test]
-    fn is_sender_allowed_wildcard_allows_all() {
+    fn is_sender_allowed_wildcard_denies_all() {
         let config = EmailConfig {
             allowed_senders: vec!["*".to_string()],
             ..Default::default()
         };
         let channel = EmailChannel::new(config);
-        assert!(channel.is_sender_allowed("anyone@example.com"));
-        assert!(channel.is_sender_allowed("user@test.com"));
-        assert!(channel.is_sender_allowed("random@domain.org"));
+        assert!(!channel.is_sender_allowed("anyone@example.com"));
+        assert!(!channel.is_sender_allowed("user@test.com"));
+        assert!(!channel.is_sender_allowed("random@domain.org"));
     }
 
     #[test]
@@ -1024,8 +1039,8 @@ mod tests {
             ..Default::default()
         };
         let channel = EmailChannel::new(config);
-        assert!(channel.is_sender_allowed("anyone@example.com"));
-        assert!(channel.is_sender_allowed("specific@example.com"));
+        assert!(!channel.is_sender_allowed("anyone@example.com"));
+        assert!(!channel.is_sender_allowed("specific@example.com"));
     }
 
     #[test]

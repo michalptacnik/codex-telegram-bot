@@ -1,6 +1,8 @@
 use crate::config::Config;
 use anyhow::{bail, Context, Result};
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -380,13 +382,13 @@ fn install_macos(config: &Config) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let exe = std::env::current_exe().context("Failed to resolve current executable")?;
-    let logs_dir = config
+    let config_root = config
         .config_path
         .parent()
-        .map_or_else(|| PathBuf::from("."), PathBuf::from)
-        .join("logs");
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
+    let logs_dir = config_root.join("logs");
     fs::create_dir_all(&logs_dir)?;
+    let exe = install_macos_service_binary(&config_root)?;
 
     let stdout = logs_dir.join("daemon.stdout.log");
     let stderr = logs_dir.join("daemon.stderr.log");
@@ -424,6 +426,53 @@ fn install_macos(config: &Config) -> Result<()> {
     println!("✅ Installed launchd service: {}", file.display());
     println!("   Start with: zeroclaw service start");
     Ok(())
+}
+
+fn install_macos_service_binary(config_root: &Path) -> Result<PathBuf> {
+    let source = std::env::current_exe().context("Failed to resolve current executable")?;
+    let bin_dir = config_root.join("bin");
+    fs::create_dir_all(&bin_dir)?;
+
+    let target = bin_dir.join(
+        source
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("agent-hq"),
+    );
+
+    fs::copy(&source, &target).with_context(|| {
+        format!(
+            "Failed to copy service binary from {} to {}",
+            source.display(),
+            target.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).with_context(|| {
+            format!(
+                "Failed to set executable permissions on {}",
+                target.display()
+            )
+        })?;
+    }
+
+    if let Ok(status) = Command::new("codesign")
+        .args(["--force", "--sign", "-"])
+        .arg(&target)
+        .status()
+    {
+        if !status.success() {
+            eprintln!(
+                "⚠️  Warning: failed to ad-hoc sign launchd binary copy at {}",
+                target.display()
+            );
+        }
+    }
+
+    Ok(target)
 }
 
 fn install_linux(config: &Config, init_system: InitSystem) -> Result<()> {

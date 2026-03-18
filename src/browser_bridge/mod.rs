@@ -12,6 +12,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use tracing::debug;
 use uuid::Uuid;
 
 // ── Constants ────────────────────────────────────────────────────
@@ -161,6 +162,14 @@ impl BrowserBridge {
                 .lock()
                 .insert(instance_id.clone(), cmds);
         }
+        let stored_clients = clients.len();
+        drop(clients);
+        debug!(
+            instance_id = %instance_id,
+            active_clients = self.active_clients().len(),
+            stored_clients,
+            "browser bridge heartbeat recorded"
+        );
 
         instance_id
     }
@@ -340,12 +349,19 @@ impl BrowserBridge {
             .filter(|c| c.status == CommandStatus::Completed)
             .count();
 
-        BridgeStatus {
+        let status = BridgeStatus {
             active_clients: active.len(),
             clients: active,
             pending_commands: pending,
             completed_commands: completed,
-        }
+        };
+        debug!(
+            active_clients = status.active_clients,
+            pending_commands = status.pending_commands,
+            completed_commands = status.completed_commands,
+            "browser bridge status requested"
+        );
+        status
     }
 
     /// Set the snapshot ref map (CSS selector mappings from last DOM snapshot).
