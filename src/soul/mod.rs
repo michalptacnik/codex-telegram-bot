@@ -39,9 +39,15 @@ pub struct SoulStyle {
     pub brevity: String,
 }
 
-fn default_emoji() -> String { "light".into() }
-fn default_emphasis() -> String { "light".into() }
-fn default_brevity() -> String { "short".into() }
+fn default_emoji() -> String {
+    "light".into()
+}
+fn default_emphasis() -> String {
+    "light".into()
+}
+fn default_brevity() -> String {
+    "short".into()
+}
 
 impl Default for SoulStyle {
     fn default() -> Self {
@@ -224,25 +230,38 @@ pub fn validate_soul(profile: &SoulProfile, max_chars: Option<usize>) -> SoulVal
 
     for (i, p) in profile.principles.iter().enumerate() {
         if p.len() > SOUL_MAX_BULLET_CHARS {
-            warnings.push(format!("principle[{}] exceeds {} chars", i, SOUL_MAX_BULLET_CHARS));
+            warnings.push(format!(
+                "principle[{}] exceeds {} chars",
+                i, SOUL_MAX_BULLET_CHARS
+            ));
         }
     }
     for (i, b) in profile.boundaries.iter().enumerate() {
         if b.len() > SOUL_MAX_BULLET_CHARS {
-            warnings.push(format!("boundary[{}] exceeds {} chars", i, SOUL_MAX_BULLET_CHARS));
+            warnings.push(format!(
+                "boundary[{}] exceeds {} chars",
+                i, SOUL_MAX_BULLET_CHARS
+            ));
         }
     }
 
     let rendered = render_soul(profile);
     if rendered.len() > max {
-        warnings.push(format!("rendered soul ({} chars) exceeds max ({})", rendered.len(), max));
+        warnings.push(format!(
+            "rendered soul ({} chars) exceeds max ({})",
+            rendered.len(),
+            max
+        ));
     }
 
     if !["off", "light", "on"].contains(&profile.style.emoji.as_str()) {
         warnings.push(format!("invalid emoji value: {}", profile.style.emoji));
     }
     if !["plain", "light", "rich"].contains(&profile.style.emphasis.as_str()) {
-        warnings.push(format!("invalid emphasis value: {}", profile.style.emphasis));
+        warnings.push(format!(
+            "invalid emphasis value: {}",
+            profile.style.emphasis
+        ));
     }
     if !["short", "normal"].contains(&profile.style.brevity.as_str()) {
         warnings.push(format!("invalid brevity value: {}", profile.style.brevity));
@@ -301,8 +320,18 @@ impl SoulStore {
                     "Your name is {}. Your voice: {}.\n\nPrinciples:\n{}\n\nBoundaries:\n{}\n",
                     profile.name,
                     profile.voice,
-                    profile.principles.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
-                    profile.boundaries.iter().map(|b| format!("- {b}")).collect::<Vec<_>>().join("\n"),
+                    profile
+                        .principles
+                        .iter()
+                        .map(|p| format!("- {p}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    profile
+                        .boundaries
+                        .iter()
+                        .map(|b| format!("- {b}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 )
             }
             Err(_) => String::new(),
@@ -319,7 +348,11 @@ impl fmt::Display for SoulProfile {
 // ── Helpers ──────────────────────────────────────────────────────
 
 fn truncate(s: &str, max: usize) -> &str {
-    if s.len() <= max { s } else { &s[..max] }
+    if s.len() <= max {
+        s
+    } else {
+        &s[..max]
+    }
 }
 
 #[cfg(test)]

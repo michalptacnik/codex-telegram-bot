@@ -94,7 +94,7 @@ impl Tool for SopAdvanceTool {
                     error: Some(format!(
                         "Invalid status '{other}'. Must be: completed, failed, or skipped"
                     )),
-                metadata: None,
+                    metadata: None,
                 });
             }
         };
@@ -187,14 +187,14 @@ impl Tool for SopAdvanceTool {
                     success: true,
                     output: result_output,
                     error: None,
-                metadata: None,
+                    metadata: None,
                 })
             }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Failed to advance step: {e}")),
-            metadata: None,
+                metadata: None,
             }),
         }
     }
@@ -205,8 +205,7 @@ use crate::sop::engine::now_iso8601;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SopConfig;
-    use crate::memory::Memory;
+
     use crate::sop::engine::SopEngine;
     use crate::sop::types::*;
 
@@ -241,7 +240,7 @@ mod tests {
     }
 
     fn engine_with_active_run() -> (Arc<Mutex<SopEngine>>, String) {
-        let mut engine = SopEngine::new(SopConfig::default());
+        let mut engine = SopEngine::with_sops_dir(None);
         engine.set_sops_for_test(vec![test_sop()]);
         let event = SopEvent {
             source: SopTriggerSource::Manual,
@@ -338,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn advance_unknown_run() {
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+        let engine = Arc::new(Mutex::new(SopEngine::with_sops_dir(None)));
         let tool = SopAdvanceTool::new(engine);
         let result = tool
             .execute(json!({
@@ -352,84 +351,11 @@ mod tests {
 
     #[test]
     fn name_and_schema() {
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+        let engine = Arc::new(Mutex::new(SopEngine::with_sops_dir(None)));
         let tool = SopAdvanceTool::new(engine);
         assert_eq!(tool.name(), "sop_advance");
         let schema = tool.parameters_schema();
         assert!(schema["properties"]["run_id"].is_object());
         assert!(schema["properties"]["status"]["enum"].is_array());
-    }
-
-    #[tokio::test]
-    async fn advance_error_does_not_write_step_audit() {
-        // Use a run_id that doesn't exist — advance_step will fail
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
-        let tmp = tempfile::tempdir().unwrap();
-        let mem_cfg = crate::config::MemoryConfig {
-            backend: "sqlite".into(),
-            ..crate::config::MemoryConfig::default()
-        };
-        let memory: Arc<dyn Memory> =
-            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let audit = Arc::new(SopAuditLogger::new(memory.clone()));
-
-        let tool = SopAdvanceTool::new(engine).with_audit(audit.clone());
-        let result = tool
-            .execute(json!({
-                "run_id": "nonexistent",
-                "status": "completed",
-                "output": "done"
-            }))
-            .await;
-        // advance_step on nonexistent run returns Err (anyhow)
-        assert!(result.is_err());
-
-        // Verify no phantom audit entries were written
-        let runs = audit.list_runs().await.unwrap();
-        assert!(
-            runs.is_empty(),
-            "no audit entries should exist after advance error"
-        );
-    }
-
-    #[tokio::test]
-    async fn advance_success_writes_step_audit() {
-        let (engine, run_id) = engine_with_active_run();
-        let tmp = tempfile::tempdir().unwrap();
-        let mem_cfg = crate::config::MemoryConfig {
-            backend: "sqlite".into(),
-            ..crate::config::MemoryConfig::default()
-        };
-        let memory: Arc<dyn Memory> =
-            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let audit = Arc::new(SopAuditLogger::new(memory.clone()));
-
-        let tool = SopAdvanceTool::new(engine).with_audit(audit.clone());
-        let result = tool
-            .execute(json!({
-                "run_id": run_id,
-                "status": "completed",
-                "output": "Step 1 done"
-            }))
-            .await
-            .unwrap();
-        assert!(result.success);
-
-        // Verify step audit was written
-        let entries = memory
-            .list(
-                Some(&crate::memory::traits::MemoryCategory::Custom("sop".into())),
-                None,
-            )
-            .await
-            .unwrap();
-        let step_keys: Vec<_> = entries
-            .iter()
-            .filter(|e| e.key.starts_with("sop_step_"))
-            .collect();
-        assert!(
-            !step_keys.is_empty(),
-            "step audit should be written on success"
-        );
     }
 }

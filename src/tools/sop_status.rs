@@ -172,14 +172,14 @@ impl Tool for SopStatusTool {
                         success: true,
                         output,
                         error: None,
-                    metadata: None,
+                        metadata: None,
                     })
                 }
                 None => Ok(ToolResult {
                     success: true,
                     output: format!("No run found with ID '{run_id}'."),
                     error: None,
-                metadata: None,
+                    metadata: None,
                 }),
             };
         }
@@ -249,7 +249,7 @@ impl Tool for SopStatusTool {
             success: true,
             output,
             error: None,
-        metadata: None,
+            metadata: None,
         })
     }
 }
@@ -294,7 +294,7 @@ fn format_metric_value(val: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SopConfig;
+
     use crate::sop::engine::SopEngine;
     use crate::sop::types::*;
 
@@ -320,7 +320,7 @@ mod tests {
     }
 
     fn engine_with_sops(sops: Vec<Sop>) -> Arc<Mutex<SopEngine>> {
-        let mut engine = SopEngine::new(SopConfig::default());
+        let mut engine = SopEngine::with_sops_dir(None);
         engine.set_sops_for_test(sops);
         Arc::new(Mutex::new(engine))
     }

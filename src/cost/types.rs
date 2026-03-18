@@ -118,12 +118,16 @@ pub struct CostSummary {
     pub daily_cost_usd: f64,
     /// Total cost for the month
     pub monthly_cost_usd: f64,
-    /// Total tokens used
+    /// Total tokens used this session
     pub total_tokens: u64,
-    /// Number of requests
+    /// Total tokens used this month (for consistent cost-per-1K calculation)
+    pub monthly_tokens: u64,
+    /// Number of requests this session
     pub request_count: usize,
-    /// Breakdown by model
+    /// Breakdown by model (all-time, loaded from storage on startup)
     pub by_model: std::collections::HashMap<String, ModelStats>,
+    /// Whether cost tracking is enabled (false means all values are zero)
+    pub tracking_enabled: bool,
 }
 
 /// Statistics for a specific model.
@@ -146,8 +150,10 @@ impl Default for CostSummary {
             daily_cost_usd: 0.0,
             monthly_cost_usd: 0.0,
             total_tokens: 0,
+            monthly_tokens: 0,
             request_count: 0,
             by_model: std::collections::HashMap::new(),
+            tracking_enabled: false,
         }
     }
 }

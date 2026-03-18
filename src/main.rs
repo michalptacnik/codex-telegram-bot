@@ -81,11 +81,11 @@ mod tunnel;
 mod util;
 
 // ── Agent HQ modules (ported from codex-telegram-bot) ───────────
-mod soul;
-mod missions;
 mod browser_bridge;
+mod missions;
 mod plugins;
 mod sessions;
+mod soul;
 mod sop {
     pub use zeroclaw::sop::*;
 }
@@ -2152,7 +2152,7 @@ mod tests {
             .expect("completion generation should succeed");
         let script = String::from_utf8(output).expect("completion output should be valid utf-8");
         assert!(
-            script.contains("zeroclaw"),
+            script.contains("agent-hq") || script.contains("agent_hq"),
             "completion script should reference binary name"
         );
     }

@@ -70,8 +70,12 @@ export interface CostSummary {
   daily_cost_usd: number;
   monthly_cost_usd: number;
   total_tokens: number;
+  /** Total tokens used this month — same period as monthly_cost_usd */
+  monthly_tokens: number;
   request_count: number;
   by_model: Record<string, ModelStats>;
+  /** False when cost tracking is disabled in config — all values will be 0 */
+  tracking_enabled: boolean;
 }
 
 export interface ModelStats {

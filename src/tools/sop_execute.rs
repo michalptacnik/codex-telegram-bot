@@ -123,14 +123,14 @@ impl Tool for SopExecuteTool {
                     success: true,
                     output,
                     error: None,
-                metadata: None,
+                    metadata: None,
                 })
             }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Failed to start SOP: {e}")),
-            metadata: None,
+                metadata: None,
             }),
         }
     }
@@ -151,7 +151,6 @@ use crate::sop::engine::now_iso8601;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SopConfig;
     use crate::sop::engine::SopEngine;
     use crate::sop::types::*;
 
@@ -186,7 +185,7 @@ mod tests {
     }
 
     fn engine_with_sops(sops: Vec<Sop>) -> Arc<Mutex<SopEngine>> {
-        let mut engine = SopEngine::new(SopConfig::default());
+        let mut engine = SopEngine::with_sops_dir(None);
         engine.set_sops_for_test(sops);
         Arc::new(Mutex::new(engine))
     }

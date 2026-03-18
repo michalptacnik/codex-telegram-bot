@@ -269,7 +269,7 @@ impl Agent {
             None
         };
 
-        let tools = tools::all_tools_with_runtime(
+        let mut tools = tools::all_tools_with_runtime(
             Arc::new(config.clone()),
             &security,
             runtime,
@@ -284,6 +284,8 @@ impl Agent {
             config.api_key.as_deref(),
             config,
         );
+        // Append SOP tools (built here so crate types resolve correctly in lib context).
+        tools.extend(tools::make_sop_tools(config));
 
         let provider_name = config.default_provider.as_deref().unwrap_or("openrouter");
 

@@ -71,12 +71,12 @@ pub(crate) mod tunnel;
 pub(crate) mod util;
 
 // ── Agent HQ modules (ported from codex-telegram-bot) ───────────
-pub mod soul;
-pub mod missions;
 pub mod browser_bridge;
+pub mod missions;
 pub mod plugins;
 pub mod sessions;
 pub mod sop;
+pub mod soul;
 
 pub use config::Config;
 

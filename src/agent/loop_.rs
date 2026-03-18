@@ -1952,6 +1952,8 @@ pub(crate) async fn agent_turn(
     silent: bool,
     multimodal_config: &crate::config::MultimodalConfig,
     max_tool_iterations: usize,
+    cost_tracker: Option<&crate::cost::CostTracker>,
+    cost_prices: &std::collections::HashMap<String, crate::config::ModelPricing>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -1970,6 +1972,8 @@ pub(crate) async fn agent_turn(
         None,
         None,
         &[],
+        cost_tracker,
+        cost_prices,
     )
     .await
 }
@@ -2174,6 +2178,8 @@ pub(crate) async fn run_tool_call_loop(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    cost_tracker: Option<&crate::cost::CostTracker>,
+    cost_prices: &std::collections::HashMap<String, crate::config::ModelPricing>,
 ) -> Result<String> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
@@ -2189,6 +2195,7 @@ pub(crate) async fn run_tool_call_loop(
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
     let turn_id = Uuid::new_v4().to_string();
     let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
+    let mut tool_parse_retry_used = false;
 
     for iteration in 0..max_iterations {
         if cancellation_token
@@ -2293,6 +2300,25 @@ pub(crate) async fn run_tool_call_loop(
                         input_tokens: resp_input_tokens,
                         output_tokens: resp_output_tokens,
                     });
+
+                    // Record cost if tracker is available and we have token counts.
+                    if let (Some(tracker), Some(in_tok), Some(out_tok)) =
+                        (cost_tracker, resp_input_tokens, resp_output_tokens)
+                    {
+                        let pricing = cost_prices.get(model);
+                        let (input_price, output_price) =
+                            pricing.map(|p| (p.input, p.output)).unwrap_or((0.0, 0.0));
+                        let usage = crate::cost::TokenUsage::new(
+                            model,
+                            in_tok as u64,
+                            out_tok as u64,
+                            input_price,
+                            output_price,
+                        );
+                        if let Err(e) = tracker.record_usage(usage) {
+                            tracing::warn!("Failed to record cost usage: {e}");
+                        }
+                    }
 
                     let response_text = resp.text_or_empty().to_string();
                     // First try native structured tool calls (OpenAI-format).
@@ -2426,6 +2452,35 @@ pub(crate) async fn run_tool_call_loop(
         }
 
         if tool_calls.is_empty() {
+            // ── Recovery: if the response looks like a failed tool call, nudge
+            // the LLM to retry with correct formatting (once per turn) ───────
+            if !tool_parse_retry_used
+                && detect_tool_call_parse_issue(&response_text, &tool_calls).is_some()
+            {
+                tool_parse_retry_used = true;
+                tracing::info!(
+                    turn = %turn_id,
+                    "tool call parse issue detected — nudging LLM to retry"
+                );
+                runtime_trace::record_event(
+                    "tool_parse_retry",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    None,
+                    Some("nudging LLM to reformat tool call"),
+                    serde_json::json!({ "iteration": iteration + 1 }),
+                );
+                history.push(ChatMessage::assistant(response_text.clone()));
+                history.push(ChatMessage::user(
+                    "Your previous response contained a tool call that could not be parsed. \
+                     Please retry using the exact tool call format from the instructions."
+                        .to_string(),
+                ));
+                continue;
+            }
+
             runtime_trace::record_event(
                 "turn_final_response",
                 Some(channel_name),
@@ -2877,6 +2932,8 @@ pub async fn run(
         config.api_key.as_deref(),
         &config,
     );
+    // Append SOP tools (built here so crate types resolve correctly in lib context).
+    tools_registry.extend(tools::make_sop_tools(&config));
 
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
@@ -3131,6 +3188,8 @@ pub async fn run(
             None,
             None,
             &[],
+            None,
+            &config.cost.prices,
         )
         .await?;
         final_output = response.clone();
@@ -3253,6 +3312,8 @@ pub async fn run(
                 None,
                 None,
                 &[],
+                None,
+                &config.cost.prices,
             )
             .await
             {
@@ -3345,6 +3406,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         config.api_key.as_deref(),
         &config,
     );
+    // Append SOP tools (built here so crate types resolve correctly in lib context).
+    tools_registry.extend(tools::make_sop_tools(&config));
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
@@ -3473,6 +3536,12 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         ChatMessage::user(&enriched),
     ];
 
+    let cost_tracker = if config.cost.enabled {
+        crate::cost::CostTracker::new(config.cost.clone(), &config.workspace_dir).ok()
+    } else {
+        None
+    };
+
     agent_turn(
         provider.as_ref(),
         &mut history,
@@ -3484,6 +3553,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         true,
         &config.multimodal,
         config.agent.max_tool_iterations,
+        cost_tracker.as_ref(),
+        &config.cost.prices,
     )
     .await
 }
@@ -3799,6 +3870,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -3845,6 +3918,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect_err("oversized payload must fail");
@@ -3885,6 +3960,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -4011,6 +4088,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("parallel execution should complete");
@@ -4080,6 +4159,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -4136,6 +4217,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("native fallback id flow should complete");
@@ -5612,8 +5695,8 @@ Let me check the result."#;
             "Native prompt must list tool names"
         );
         assert!(
-            system_prompt.contains("## Your Task"),
-            "Native prompt should contain task instructions"
+            system_prompt.contains("## Behavior"),
+            "Native prompt should contain behavior/task instructions"
         );
     }
 
