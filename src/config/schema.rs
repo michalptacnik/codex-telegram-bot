@@ -6108,7 +6108,6 @@ default_temperature = 0.7
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
-            sop: SopConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -6295,7 +6294,6 @@ tool_dispatcher = "xml"
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
-            sop: SopConfig::default(),
         };
 
         config.save().await.unwrap();
