@@ -262,7 +262,7 @@ impl Default for SopConfig {
     fn default() -> Self {
         Self {
             sops_dir: None,
-            default_execution_mode: Default::default(),
+            default_execution_mode: crate::sop::types::SopExecutionMode::default(),
             max_concurrent_total: default_sop_max_concurrent(),
             approval_timeout_secs: default_sop_approval_timeout(),
             max_finished_runs: default_sop_max_finished(),
@@ -270,9 +270,15 @@ impl Default for SopConfig {
     }
 }
 
-fn default_sop_max_concurrent() -> usize { 5 }
-fn default_sop_approval_timeout() -> u64 { 300 }
-fn default_sop_max_finished() -> usize { 100 }
+fn default_sop_max_concurrent() -> usize {
+    5
+}
+fn default_sop_approval_timeout() -> u64 {
+    300
+}
+fn default_sop_max_finished() -> usize {
+    100
+}
 
 /// Named provider profile definition compatible with Codex app-server style config.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -791,8 +797,8 @@ impl Default for IdentityConfig {
 /// Cost tracking and budget enforcement configuration (`[cost]` section).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CostConfig {
-    /// Enable cost tracking (default: false)
-    #[serde(default)]
+    /// Enable cost tracking (default: true)
+    #[serde(default = "default_cost_enabled")]
     pub enabled: bool,
 
     /// Daily spending limit in USD (default: 10.00)
@@ -840,10 +846,14 @@ fn default_warn_percent() -> u8 {
     80
 }
 
+fn default_cost_enabled() -> bool {
+    true
+}
+
 impl Default for CostConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             daily_limit_usd: default_daily_limit(),
             monthly_limit_usd: default_monthly_limit(),
             warn_at_percent: default_warn_percent(),
@@ -6087,6 +6097,7 @@ default_temperature = 0.7
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
+            sop: SopConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -6272,6 +6283,7 @@ tool_dispatcher = "xml"
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
+            sop: SopConfig::default(),
         };
 
         config.save().await.unwrap();

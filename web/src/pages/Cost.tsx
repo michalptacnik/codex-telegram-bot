@@ -4,6 +4,7 @@ import {
   TrendingUp,
   Hash,
   Layers,
+  AlertCircle,
 } from 'lucide-react';
 import type { CostSummary } from '@/types/api';
 import { getCost } from '@/lib/api';
@@ -46,6 +47,20 @@ export default function Cost() {
 
   return (
     <div className="p-6 space-y-6">
+      {/* Tracking disabled notice */}
+      {!cost.tracking_enabled && (
+        <div className="flex items-start gap-3 rounded-lg bg-yellow-900/30 border border-yellow-700 p-4 text-yellow-300">
+          <AlertCircle className="h-5 w-5 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium">Cost tracking is disabled</p>
+            <p className="text-sm text-yellow-400 mt-1">
+              Add <code className="bg-yellow-900/40 px-1 rounded">cost.enabled = true</code> to your{' '}
+              <code className="bg-yellow-900/40 px-1 rounded">config.toml</code> to start tracking API
+              spend.
+            </p>
+          </div>
+        </div>
+      )}
       {/* Summary Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-gray-900 rounded-xl p-5 border border-gray-800">
@@ -118,10 +133,10 @@ export default function Cost() {
             </p>
           </div>
           <div className="bg-gray-800/50 rounded-lg p-4">
-            <p className="text-sm text-gray-400">Cost per 1K Tokens</p>
+            <p className="text-sm text-gray-400">Cost per 1K Tokens (monthly)</p>
             <p className="text-xl font-bold text-white mt-1">
-              {cost.total_tokens > 0
-                ? formatUSD((cost.monthly_cost_usd / cost.total_tokens) * 1000)
+              {cost.monthly_tokens > 0
+                ? formatUSD((cost.monthly_cost_usd / cost.monthly_tokens) * 1000)
                 : '$0.0000'}
             </p>
           </div>

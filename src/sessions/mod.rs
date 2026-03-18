@@ -8,7 +8,7 @@
 //! - Message history with auto-compaction
 //! - Session state persistence
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -264,7 +264,10 @@ impl SessionStore {
         if let Some(parent) = self.store_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&self.store_path, serde_json::to_string_pretty(&self.sessions)?)?;
+        fs::write(
+            &self.store_path,
+            serde_json::to_string_pretty(&self.sessions)?,
+        )?;
         Ok(())
     }
 }
@@ -339,11 +342,14 @@ mod tests {
         let session = store.get_or_create("chat1", "user1");
         assert_eq!(session.status, SessionStatus::Active);
 
-        store.add_message("chat1:user1", SessionMessage {
-            role: "user".into(),
-            content: "Hello".into(),
-            timestamp: Utc::now(),
-        });
+        store.add_message(
+            "chat1:user1",
+            SessionMessage {
+                role: "user".into(),
+                content: "Hello".into(),
+                timestamp: Utc::now(),
+            },
+        );
 
         let messages = store.get_messages("chat1:user1");
         assert_eq!(messages.len(), 1);

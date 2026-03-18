@@ -172,19 +172,33 @@ impl PluginLifecycleManager {
     pub fn install_plugin(&self, manifest: &PluginManifest, enable: bool) -> Result<PluginRecord> {
         let errors = validate_manifest(manifest);
         if !errors.is_empty() {
-            self.append_audit("install", &manifest.plugin_id, "failed", &[("reason", &errors.join("; "))])?;
+            self.append_audit(
+                "install",
+                &manifest.plugin_id,
+                "failed",
+                &[("reason", &errors.join("; "))],
+            )?;
             bail!("Invalid plugin manifest: {}", errors.join("; "));
         }
 
         let trust = self.evaluate_trust(manifest);
         if enable && trust != TrustStatus::Trusted {
-            self.append_audit("install", &manifest.plugin_id, "failed",
-                &[("reason", "trust_policy_block"), ("trust_status", &trust.to_string())])?;
+            self.append_audit(
+                "install",
+                &manifest.plugin_id,
+                "failed",
+                &[
+                    ("reason", "trust_policy_block"),
+                    ("trust_status", &trust.to_string()),
+                ],
+            )?;
             bail!("Plugin cannot be enabled due to trust policy");
         }
 
         // Write manifest
-        let dst = self.manifests_dir.join(format!("{}.json", manifest.plugin_id));
+        let dst = self
+            .manifests_dir
+            .join(format!("{}.json", manifest.plugin_id));
         fs::write(&dst, serde_json::to_string_pretty(manifest)?)?;
 
         let now = Utc::now();
@@ -203,11 +217,20 @@ impl PluginLifecycleManager {
         };
 
         let mut registry = self.load_registry()?;
-        registry.plugins.insert(manifest.plugin_id.clone(), record.clone());
+        registry
+            .plugins
+            .insert(manifest.plugin_id.clone(), record.clone());
         self.save_registry(&registry)?;
 
-        self.append_audit("install", &manifest.plugin_id, "success",
-            &[("enabled", &enable.to_string()), ("trust_status", &trust.to_string())])?;
+        self.append_audit(
+            "install",
+            &manifest.plugin_id,
+            "success",
+            &[
+                ("enabled", &enable.to_string()),
+                ("trust_status", &trust.to_string()),
+            ],
+        )?;
 
         Ok(record)
     }
@@ -215,10 +238,14 @@ impl PluginLifecycleManager {
     /// Enable a plugin.
     pub fn enable_plugin(&self, plugin_id: &str) -> Result<PluginRecord> {
         let mut registry = self.load_registry()?;
-        let record = registry.plugins.get_mut(plugin_id)
+        let record = registry
+            .plugins
+            .get_mut(plugin_id)
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {plugin_id}"))?;
 
-        if record.trust_status != TrustStatus::Trusted && self.trust_policy == TrustPolicy::RequireSignature {
+        if record.trust_status != TrustStatus::Trusted
+            && self.trust_policy == TrustPolicy::RequireSignature
+        {
             bail!("Cannot enable untrusted plugin under current trust policy");
         }
 
@@ -233,7 +260,9 @@ impl PluginLifecycleManager {
     /// Disable a plugin.
     pub fn disable_plugin(&self, plugin_id: &str) -> Result<PluginRecord> {
         let mut registry = self.load_registry()?;
-        let record = registry.plugins.get_mut(plugin_id)
+        let record = registry
+            .plugins
+            .get_mut(plugin_id)
             .ok_or_else(|| anyhow::anyhow!("Plugin not found: {plugin_id}"))?;
         record.enabled = false;
         record.updated_at = Utc::now();
@@ -270,9 +299,7 @@ impl PluginLifecycleManager {
         let events: Vec<PluginAuditEvent> = content
             .lines()
             .filter_map(|line| serde_json::from_str(line).ok())
-            .filter(|e: &PluginAuditEvent| {
-                plugin_id.map_or(true, |id| e.plugin_id == id)
-            })
+            .filter(|e: &PluginAuditEvent| plugin_id.map_or(true, |id| e.plugin_id == id))
             .collect();
         Ok(events)
     }
@@ -293,20 +320,27 @@ impl PluginLifecycleManager {
         if manifest.signature.is_some() {
             // In production, verify the signature against trusted keys
             TrustStatus::Trusted
-        } else if self.trust_policy == TrustPolicy::AllowLocalUnsigned {
-            TrustStatus::Unsigned
         } else {
             TrustStatus::Unsigned
         }
     }
 
-    fn append_audit(&self, action: &str, plugin_id: &str, outcome: &str, details: &[(&str, &str)]) -> Result<()> {
+    fn append_audit(
+        &self,
+        action: &str,
+        plugin_id: &str,
+        outcome: &str,
+        details: &[(&str, &str)],
+    ) -> Result<()> {
         let event = PluginAuditEvent {
             timestamp: Utc::now(),
             action: action.to_string(),
             plugin_id: plugin_id.to_string(),
             outcome: outcome.to_string(),
-            details: details.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            details: details
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
         };
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -335,11 +369,18 @@ pub fn validate_manifest(manifest: &PluginManifest) -> Vec<String> {
     if manifest.manifest_version.is_empty() {
         errors.push("manifest_version is required".into());
     } else if manifest.manifest_version != "1" {
-        errors.push(format!("unsupported manifest_version: {}", manifest.manifest_version));
+        errors.push(format!(
+            "unsupported manifest_version: {}",
+            manifest.manifest_version
+        ));
     }
 
     // Validate plugin_id format (alphanumeric + hyphens)
-    if !manifest.plugin_id.chars().all(|c| c.is_alphanumeric() || c == '-' || c == '_') {
+    if !manifest
+        .plugin_id
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
         errors.push("plugin_id must be alphanumeric with hyphens/underscores only".into());
     }
 
@@ -364,7 +405,9 @@ pub struct SkillSource {
     pub git_ref: String,
 }
 
-fn default_ref() -> String { "main".into() }
+fn default_ref() -> String {
+    "main".into()
+}
 
 /// A discoverable skill from the marketplace.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -101,6 +101,11 @@ pub use schedule::ScheduleTool;
 pub use schema::{CleaningStrategy, SchemaCleanr};
 pub use screenshot::ScreenshotTool;
 pub use shell::ShellTool;
+pub use sop_advance::SopAdvanceTool;
+pub use sop_approve::SopApproveTool;
+pub use sop_execute::SopExecuteTool;
+pub use sop_list::SopListTool;
+pub use sop_status::SopStatusTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ProofArtifact, ToolResult, ToolResultMetadata, ToolSpec};
@@ -362,6 +367,31 @@ pub fn all_tools_with_runtime(
     }
 
     boxed_registry_from_arcs(tool_arcs)
+}
+
+/// Build the five SOP agent tools backed by a freshly-initialised [`SopEngine`].
+///
+/// This is a separate function (not inline in [`all_tools_with_runtime`]) because the
+/// binary crate (`agent-hq`) re-exports the sop module from the `zeroclaw` lib crate,
+/// which would cause a type-identity mismatch when `SopEngine::new` is called with a
+/// `Config` type compiled in the binary context.  Callers in the lib (e.g. `loop_.rs`)
+/// can call this directly; callers in the binary should not construct SOP tools via
+/// `all_tools_with_runtime`.
+pub fn make_sop_tools(config: &crate::config::Config) -> Vec<Box<dyn Tool>> {
+    use crate::sop::SopEngine;
+    use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+    let mut engine = SopEngine::with_sops_dir(config.sop.sops_dir.clone());
+    engine.reload(&config.workspace_dir);
+    let arc = StdArc::new(StdMutex::new(engine));
+
+    vec![
+        Box::new(SopExecuteTool::new(arc.clone())),
+        Box::new(SopListTool::new(arc.clone())),
+        Box::new(SopAdvanceTool::new(arc.clone())),
+        Box::new(SopApproveTool::new(arc.clone())),
+        Box::new(SopStatusTool::new(arc)),
+    ]
 }
 
 #[cfg(test)]

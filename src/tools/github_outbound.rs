@@ -106,7 +106,8 @@ pub async fn list_issues(
     limit: usize,
 ) -> Result<Vec<GitHubIssue>> {
     let token = get_github_token()?;
-    let url = format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/issues?state={state}&per_page={limit}");
+    let url =
+        format!("{GITHUB_API_BASE}/repos/{owner}/{repo}/issues?state={state}&per_page={limit}");
 
     let client = reqwest::Client::new();
     let resp = client
