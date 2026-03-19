@@ -1304,9 +1304,7 @@ return {{ hovered: true }};
                 let pixels = pixels.unwrap_or(600);
                 let delta = match direction.as_str() {
                     "up" => format!("-{}", pixels),
-                    "down" => pixels.to_string(),
-                    "left" => "0".to_string(),
-                    "right" => "0".to_string(),
+                    "left" | "right" => "0".to_string(),
                     _ => pixels.to_string(),
                 };
                 let script = if direction == "left" || direction == "right" {
@@ -2951,10 +2949,10 @@ mod tests {
     }
 
     #[test]
-    fn browser_tool_default_backend_is_auto() {
+    fn browser_tool_default_backend_is_agent_browser() {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new(security, vec!["example.com".into()], None);
-        assert_eq!(tool.configured_backend().unwrap(), BrowserBackendKind::Auto);
+        assert_eq!(tool.configured_backend().unwrap(), BrowserBackendKind::AgentBrowser);
     }
 
     #[test]
