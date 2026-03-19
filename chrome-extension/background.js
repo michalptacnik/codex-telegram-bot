@@ -141,8 +141,22 @@ async function setStored(values) {
 
 async function loadConfig() {
   const stored = await getStored(["baseUrl", "token", "enabled", "instanceId"]);
+  // Auto-correct: if storage has a URL that isn't the canonical default and
+  // doesn't respond, fall back to DEFAULT_CONFIG.baseUrl so the extension
+  // self-heals after a daemon restart on a different port.
+  let baseUrl = normalizeBaseUrl(stored.baseUrl || DEFAULT_CONFIG.baseUrl);
+  if (baseUrl !== DEFAULT_CONFIG.baseUrl) {
+    const probeOk = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1500) })
+      .then((r) => r.ok)
+      .catch(() => false);
+    if (!probeOk) {
+      // Stored URL is dead; reset to default and persist so popup shows the right value.
+      baseUrl = DEFAULT_CONFIG.baseUrl;
+      await setStored({ baseUrl });
+    }
+  }
   return {
-    baseUrl: normalizeBaseUrl(stored.baseUrl || DEFAULT_CONFIG.baseUrl),
+    baseUrl,
     token: String(stored.token || DEFAULT_CONFIG.token || ""),
     enabled: stored.enabled !== undefined ? Boolean(stored.enabled) : Boolean(DEFAULT_CONFIG.enabled),
     instanceId: String(stored.instanceId || DEFAULT_CONFIG.instanceId || "")
