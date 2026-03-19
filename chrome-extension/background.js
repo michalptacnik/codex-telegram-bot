@@ -1,5 +1,8 @@
 const EXTENSION_VERSION = String((chrome.runtime.getManifest() || {}).version || "0.0.0");
-const SUPPORTED_COMMANDS = ["open_url", "navigate_url", "run_script", "snapshot", "screenshot"];
+const SUPPORTED_COMMANDS = [
+  "open_url", "navigate_url", "run_script", "snapshot", "screenshot",
+  "click", "type", "fill", "hover", "press", "scroll", "select", "wait", "get_text"
+];
 
 const DEFAULT_CONFIG = {
   baseUrl: "http://127.0.0.1:8765",
@@ -851,12 +854,112 @@ async function executeScreenshot(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// Content-script relay — sends actions to the content script in the active tab
+// ---------------------------------------------------------------------------
+
+const CONTENT_ACTIONS = new Set([
+  "click", "type", "fill", "hover", "press", "scroll", "select", "wait", "get_text"
+]);
+
+async function ensureContentScript(tabId) {
+  // Attempt to inject content.js if it wasn't auto-injected (e.g. tab loaded
+  // before extension installed).  Silently ignore errors — the static
+  // content_scripts declaration covers the common case.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"]
+    });
+  } catch (_err) {
+    // Already injected or tab not scriptable — ignore
+  }
+}
+
+async function relayToContentScript(action, payload) {
+  const tabId = await resolveTargetTabId(payload || {});
+  if (!tabId) {
+    return { ok: false, output: "No target tab available.", data: {} };
+  }
+
+  await ensureContentScript(tabId);
+
+  return new Promise((resolve) => {
+    const timeoutMs = Number(payload.timeout || 15000);
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({
+          ok: false,
+          output: `Content action '${action}' timed out on tab ${tabId}`,
+          data: { tab_id: tabId, error: "timeout" }
+        });
+      }
+    }, timeoutMs);
+
+    try {
+      chrome.tabs.sendMessage(
+        tabId,
+        { source: "agenthq-bridge", action, payload },
+        (response) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+
+          const lastErr = chrome.runtime.lastError;
+          if (lastErr) {
+            resolve({
+              ok: false,
+              output: `Content script error on tab ${tabId}: ${lastErr.message || lastErr}`,
+              data: { tab_id: tabId, error: String(lastErr.message || lastErr) }
+            });
+            return;
+          }
+
+          if (!response) {
+            resolve({
+              ok: false,
+              output: `No response from content script on tab ${tabId}`,
+              data: { tab_id: tabId, error: "no_response" }
+            });
+            return;
+          }
+
+          resolve({
+            ok: Boolean(response.ok),
+            output: String(response.output || response.error || ""),
+            data: { tab_id: tabId, ...(response.data || {}) }
+          });
+        }
+      );
+    } catch (err) {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({
+          ok: false,
+          output: `Failed to relay to content script: ${err}`,
+          data: { tab_id: tabId, error: String(err) }
+        });
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Command dispatch
 // ---------------------------------------------------------------------------
 
 async function executeCommand(command) {
   const type = String(command.command_type || "");
   const payload = command.payload || {};
+
+  // Content-script actions (click, type, fill, hover, press, scroll, select, wait, get_text)
+  if (CONTENT_ACTIONS.has(type)) {
+    return await relayToContentScript(type, payload);
+  }
+
   if (type === "open_url") {
     const url = String(payload.url || "").trim();
     if (!url) {
