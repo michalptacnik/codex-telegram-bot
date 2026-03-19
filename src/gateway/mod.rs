@@ -731,6 +731,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/plugins/{id}", delete(api::handle_api_plugin_uninstall))
         .route("/api/sessions", get(api::handle_api_sessions_list))
         .route("/api/browser-bridge/status", get(api::handle_api_browser_bridge_status))
+        // ── Browser extension bridge ──
+        .route("/api/browser/extension/register", post(api::handle_api_browser_extension_register))
+        .route("/api/browser/extension/heartbeat", post(api::handle_api_browser_extension_heartbeat))
+        .route("/api/browser/extension/commands", get(api::handle_api_browser_extension_commands))
+        .route("/api/browser/extension/commands/{command_id}/result", post(api::handle_api_browser_extension_command_result))
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──

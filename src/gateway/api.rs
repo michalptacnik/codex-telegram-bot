@@ -47,6 +47,12 @@ fn require_auth(
 // ── Query parameters ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
+pub struct ExtensionPollQuery {
+    pub instance_id: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 pub struct MemoryQuery {
     pub query: Option<String>,
     pub category: Option<String>,
@@ -1704,5 +1710,146 @@ pub async fn handle_api_browser_bridge_status(
         Json(serde_json::json!({"browser_bridge": status})).into_response()
     } else {
         Json(serde_json::json!({"browser_bridge": {"active_clients": 0, "clients": [], "pending_commands": 0, "completed_commands": 0}})).into_response()
+    }
+}
+
+// ── Browser extension bridge endpoints ───────────────────────────────────────
+//
+// These are polled by the Chrome extension's background.js service worker.
+// Auth: the extension sends an optional `x-browser-extension-token` header.
+// If pairing is disabled (default for local use) all requests pass through.
+// If pairing is enabled, the extension token is accepted alongside the
+// standard Bearer token so the agent and the extension both work.
+
+fn require_extension_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if !state.pairing.require_pairing() {
+        return Ok(());
+    }
+    // Accept standard Bearer token
+    if let Some(tok) = extract_bearer_token(headers) {
+        if state.pairing.is_authenticated(tok) {
+            return Ok(());
+        }
+    }
+    // Also accept x-browser-extension-token (sent by the Chrome extension)
+    if let Some(tok) = headers
+        .get("x-browser-extension-token")
+        .and_then(|v| v.to_str().ok())
+    {
+        if state.pairing.is_authenticated(tok) {
+            return Ok(());
+        }
+    }
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "Unauthorized"})),
+    ))
+}
+
+/// POST /api/browser/extension/register — Chrome extension registration
+pub async fn handle_api_browser_extension_register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::browser_bridge::HeartbeatMessage>,
+) -> impl IntoResponse {
+    if let Err(e) = require_extension_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if let Some(ref bridge) = state.browser_bridge {
+        let instance_id = bridge.heartbeat(body);
+        Json(serde_json::json!({
+            "ok": true,
+            "instance_id": instance_id
+        }))
+        .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Browser bridge not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/browser/extension/heartbeat — keep-alive from Chrome extension
+pub async fn handle_api_browser_extension_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::browser_bridge::HeartbeatMessage>,
+) -> impl IntoResponse {
+    if let Err(e) = require_extension_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if let Some(ref bridge) = state.browser_bridge {
+        let instance_id = bridge.heartbeat(body);
+        Json(serde_json::json!({
+            "ok": true,
+            "instance_id": instance_id
+        }))
+        .into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Browser bridge not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// GET /api/browser/extension/commands — poll pending commands for a client
+pub async fn handle_api_browser_extension_commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ExtensionPollQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_extension_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if let Some(ref bridge) = state.browser_bridge {
+        let limit = query.limit.unwrap_or(5).min(20);
+        let mut cmds = bridge.poll_commands(&query.instance_id);
+        cmds.truncate(limit);
+        Json(serde_json::json!({"items": cmds})).into_response()
+    } else {
+        Json(serde_json::json!({"items": []})).into_response()
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ExtensionCommandResultBody {
+    pub instance_id: String,
+    pub ok: bool,
+    pub output: Option<String>,
+    pub data: Option<serde_json::Value>,
+}
+
+/// POST /api/browser/extension/commands/{command_id}/result — report command completion
+pub async fn handle_api_browser_extension_command_result(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(command_id): Path<String>,
+    Json(body): Json<ExtensionCommandResultBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_extension_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let _ = body.instance_id; // accepted but not needed for routing
+    if let Some(ref bridge) = state.browser_bridge {
+        bridge.complete_command(crate::browser_bridge::CommandResult {
+            command_id,
+            ok: body.ok,
+            output: body.output,
+            data: body.data,
+        });
+        Json(serde_json::json!({"ok": true})).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Browser bridge not available"})),
+        )
+            .into_response()
     }
 }
