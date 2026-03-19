@@ -5,7 +5,7 @@ const SUPPORTED_COMMANDS = [
 ];
 
 const DEFAULT_CONFIG = {
-  baseUrl: "http://127.0.0.1:42617",
+  baseUrl: "http://127.0.0.1:8765",
   token: "",
   enabled: true,
   instanceId: ""
