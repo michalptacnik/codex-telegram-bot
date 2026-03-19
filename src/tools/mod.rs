@@ -16,6 +16,7 @@
 //! [`all_tools_with_runtime`]. See `AGENTS.md` §7.3 for the full change playbook.
 
 pub mod browser;
+pub mod browser_bridge_tool;
 pub mod browser_open;
 pub mod cli_discovery;
 pub mod composio;
@@ -65,6 +66,7 @@ pub mod sop_list;
 pub mod sop_status;
 
 pub use browser::{BrowserTool, ComputerUseConfig};
+pub use browser_bridge_tool::BrowserBridgeTool;
 pub use browser_open::BrowserOpenTool;
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
@@ -184,6 +186,7 @@ pub fn all_tools(
     agents: &HashMap<String, DelegateAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
+    browser_bridge: Option<Arc<crate::browser_bridge::BrowserBridge>>,
 ) -> Vec<Box<dyn Tool>> {
     all_tools_with_runtime(
         config,
@@ -199,6 +202,7 @@ pub fn all_tools(
         agents,
         fallback_api_key,
         root_config,
+        browser_bridge,
     )
 }
 
@@ -218,6 +222,7 @@ pub fn all_tools_with_runtime(
     agents: &HashMap<String, DelegateAgentConfig>,
     fallback_api_key: Option<&str>,
     root_config: &crate::config::Config,
+    browser_bridge: Option<Arc<crate::browser_bridge::BrowserBridge>>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ShellTool::new(security.clone(), runtime)),
@@ -280,6 +285,12 @@ pub fn all_tools_with_runtime(
                 max_coordinate_y: browser_config.computer_use.max_coordinate_y,
             },
         )));
+    }
+
+    // Browser extension bridge tool — registered whenever a bridge is connected,
+    // regardless of browser_config.enabled, since it uses the live Chrome session.
+    if let Some(bridge) = browser_bridge {
+        tool_arcs.push(Arc::new(BrowserBridgeTool::new(bridge)));
     }
 
     if http_config.enabled {
@@ -418,6 +429,7 @@ mod tests {
             &HashMap::new(),
             None,
             &cfg,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"browser_open"));
@@ -460,6 +472,7 @@ mod tests {
             &HashMap::new(),
             None,
             &cfg,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"browser_open"));
@@ -612,6 +625,7 @@ mod tests {
             &agents,
             Some("delegate-test-credential"),
             &cfg,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"delegate"));
@@ -645,6 +659,7 @@ mod tests {
             &HashMap::new(),
             None,
             &cfg,
+            None,
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(!names.contains(&"delegate"));
