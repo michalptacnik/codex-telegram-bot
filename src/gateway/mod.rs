@@ -673,7 +673,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         session_store: Some(Arc::new(Mutex::new(crate::sessions::SessionStore::new(
             &config.workspace_dir.join("sessions.json"),
         )))),
-        browser_bridge: Some(Arc::new(crate::browser_bridge::BrowserBridge::new())),
+        browser_bridge: Some(crate::browser_bridge::BrowserBridge::global()),
     };
 
     // Config PUT needs larger body limit (1MB)

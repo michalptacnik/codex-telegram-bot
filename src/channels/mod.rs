@@ -3503,7 +3503,7 @@ pub async fn start_channels(config: Config) -> Result<()> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
-        None,
+        Some(crate::browser_bridge::BrowserBridge::global()),
     ));
 
     let skills = crate::skills::load_skills_with_config(&workspace, &config);

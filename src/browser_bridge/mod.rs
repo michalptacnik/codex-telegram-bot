@@ -12,8 +12,17 @@ use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
+
+// ── Global singleton ─────────────────────────────────────────────
+//
+// A single BrowserBridge instance is shared across the gateway and all channel
+// loops so that the Chrome extension (which connects to the gateway's HTTP
+// endpoints) and standalone channel agents (Telegram, Discord, Slack…) all
+// enqueue into and read from the same command queue.
+
+static GLOBAL_BRIDGE: OnceLock<Arc<BrowserBridge>> = OnceLock::new();
 
 // ── Constants ────────────────────────────────────────────────────
 
@@ -121,6 +130,18 @@ impl BrowserBridge {
             snapshot_ref_map: Arc::new(Mutex::new(HashMap::new())),
             supported_commands: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Return the process-global shared bridge instance.
+    ///
+    /// Both the gateway (which hosts the extension HTTP endpoints) and the
+    /// channel loops (Telegram, Discord, Slack…) call this so they all share
+    /// one command queue.  The Chrome extension connects to the gateway; its
+    /// commands flow into this singleton and are visible to every agent.
+    pub fn global() -> Arc<Self> {
+        GLOBAL_BRIDGE
+            .get_or_init(|| Arc::new(Self::new()))
+            .clone()
     }
 
     /// Process a heartbeat from a Chrome extension client.
