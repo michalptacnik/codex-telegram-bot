@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
@@ -751,6 +752,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
         ))
+        // Allow Chrome extensions to reach this localhost gateway.
+        // Chrome's Private Network Access policy (enforced since Chrome 130)
+        // requires `Access-Control-Allow-Private-Network: true` on responses to
+        // localhost/127.0.0.1 from extension service workers.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .allow_private_network(true),
+        )
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback));
 
