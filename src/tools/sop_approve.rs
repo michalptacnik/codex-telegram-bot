@@ -110,14 +110,14 @@ impl Tool for SopApproveTool {
                     success: true,
                     output,
                     error: None,
-                metadata: None,
+                    metadata: None,
                 })
             }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Approval failed: {e}")),
-            metadata: None,
+                metadata: None,
             }),
         }
     }

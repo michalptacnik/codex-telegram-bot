@@ -621,12 +621,28 @@ mod tests {
     use super::*;
     use crate::sop::types::{SopEvent, SopStepResult, SopTriggerSource};
 
+    /// Return a recent ISO-8601 timestamp string (1 hour ago).
+    fn recent_timestamp() -> String {
+        chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::hours(1))
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// Return a recent ISO-8601 timestamp string (55 minutes ago).
+    fn recent_timestamp_plus_5m() -> String {
+        chrono::Utc::now()
+            .checked_sub_signed(chrono::Duration::minutes(55))
+            .unwrap()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
     fn make_event() -> SopEvent {
         SopEvent {
             source: SopTriggerSource::Manual,
             topic: None,
             payload: None,
-            timestamp: "2026-02-19T12:00:00Z".into(),
+            timestamp: recent_timestamp(),
         }
     }
 
@@ -644,8 +660,8 @@ mod tests {
             status,
             current_step: total_steps,
             total_steps,
-            started_at: "2026-02-19T12:00:00Z".into(),
-            completed_at: Some("2026-02-19T12:05:00Z".into()),
+            started_at: recent_timestamp(),
+            completed_at: Some(recent_timestamp_plus_5m()),
             step_results,
             waiting_since: None,
         }
@@ -656,8 +672,8 @@ mod tests {
             step_number: number,
             status,
             output: format!("Step {number}"),
-            started_at: "2026-02-19T12:00:00Z".into(),
-            completed_at: Some("2026-02-19T12:01:00Z".into()),
+            started_at: recent_timestamp(),
+            completed_at: Some(recent_timestamp_plus_5m()),
         }
     }
 

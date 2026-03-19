@@ -38,45 +38,47 @@
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
 
+// ── Core ZeroClaw engine modules ─────────────────────────────────
 pub mod agent;
-pub(crate) mod approval;
-pub(crate) mod auth;
+pub mod approval;
+pub mod auth;
 pub mod channels;
 pub mod config;
-pub(crate) mod cost;
-pub(crate) mod cron;
-pub(crate) mod daemon;
-pub(crate) mod doctor;
+pub mod cost;
+pub mod cron;
+pub mod daemon;
+pub mod doctor;
 pub mod gateway;
-pub(crate) mod hardware;
-pub(crate) mod health;
-pub(crate) mod heartbeat;
+pub mod hardware;
+pub mod health;
+pub mod heartbeat;
 pub mod hooks;
-pub(crate) mod identity;
-pub(crate) mod integrations;
+pub mod identity;
+pub mod integrations;
 pub mod memory;
-pub(crate) mod migration;
-pub(crate) mod multimodal;
+pub mod migration;
+pub mod multimodal;
 pub mod observability;
-pub(crate) mod onboard;
+pub mod onboard;
 pub mod peripherals;
 pub mod providers;
 pub mod rag;
 pub mod runtime;
-pub(crate) mod security;
-pub(crate) mod service;
-pub(crate) mod skills;
+pub mod security;
+pub mod service;
+pub mod skillforge;
+pub mod skills;
 pub mod tools;
-pub(crate) mod tunnel;
-pub(crate) mod util;
+pub mod tunnel;
+pub mod util;
 
-// ── Agent HQ modules (ported from codex-telegram-bot) ───────────
-pub mod soul;
-pub mod missions;
+// ── Agent HQ modules (ported from codex-telegram-bot) ────────────
 pub mod browser_bridge;
+pub mod missions;
 pub mod plugins;
 pub mod sessions;
 pub mod sop;
+pub mod soul;
 
 pub use config::Config;
 

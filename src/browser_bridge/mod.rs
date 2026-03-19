@@ -7,7 +7,6 @@
 //!
 //! Integrates with ZeroClaw's gateway (axum) for the WebSocket/HTTP bridge.
 
-use anyhow::Result;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -156,7 +155,9 @@ impl BrowserBridge {
 
         // Update supported commands
         if let Some(cmds) = msg.supported_commands {
-            self.supported_commands.lock().insert(instance_id.clone(), cmds);
+            self.supported_commands
+                .lock()
+                .insert(instance_id.clone(), cmds);
         }
 
         instance_id
@@ -279,9 +280,7 @@ impl BrowserBridge {
         let clients = self.clients.lock();
         clients
             .values()
-            .filter(|c| {
-                (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec
-            })
+            .filter(|c| (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec)
             .cloned()
             .collect()
     }
@@ -304,8 +303,14 @@ impl BrowserBridge {
     pub fn status(&self) -> BridgeStatus {
         let active = self.active_clients();
         let commands = self.commands.lock();
-        let pending = commands.values().filter(|c| c.status == CommandStatus::Queued || c.status == CommandStatus::Dispatched).count();
-        let completed = commands.values().filter(|c| c.status == CommandStatus::Completed).count();
+        let pending = commands
+            .values()
+            .filter(|c| c.status == CommandStatus::Queued || c.status == CommandStatus::Dispatched)
+            .count();
+        let completed = commands
+            .values()
+            .filter(|c| c.status == CommandStatus::Completed)
+            .count();
 
         BridgeStatus {
             active_clients: active.len(),
@@ -330,14 +335,14 @@ impl BrowserBridge {
         let now = Utc::now();
 
         // Remove expired clients
-        self.clients.lock().retain(|_, c| {
-            (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec * 3
-        });
+        self.clients
+            .lock()
+            .retain(|_, c| (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec * 3);
 
         // Remove old completed/failed commands
-        self.commands.lock().retain(|_, c| {
-            (now - c.created_at).num_seconds() < self.command_retention_sec
-        });
+        self.commands
+            .lock()
+            .retain(|_, c| (now - c.created_at).num_seconds() < self.command_retention_sec);
 
         // Clean up empty queues
         self.queue_by_client.lock().retain(|_, q| !q.is_empty());
@@ -374,7 +379,11 @@ mod tests {
         assert_eq!(bridge.active_clients().len(), 1);
 
         // Enqueue command
-        let cmd_id = bridge.enqueue_command("ext-1", "browser_open", serde_json::json!({"url": "https://test.com"}));
+        let cmd_id = bridge.enqueue_command(
+            "ext-1",
+            "browser_open",
+            serde_json::json!({"url": "https://test.com"}),
+        );
         assert!(!cmd_id.is_empty());
 
         // Poll

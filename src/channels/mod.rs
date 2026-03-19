@@ -2997,7 +2997,7 @@ fn maybe_restart_managed_daemon_service() -> Result<bool> {
     Ok(false)
 }
 
-pub(crate) async fn handle_command(command: crate::ChannelCommands, config: &Config) -> Result<()> {
+pub async fn handle_command(command: crate::ChannelCommands, config: &Config) -> Result<()> {
     match command {
         crate::ChannelCommands::Start => {
             anyhow::bail!("Start must be handled in main.rs (requires async runtime)")

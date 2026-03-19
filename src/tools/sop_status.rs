@@ -172,14 +172,14 @@ impl Tool for SopStatusTool {
                         success: true,
                         output,
                         error: None,
-                    metadata: None,
+                        metadata: None,
                     })
                 }
                 None => Ok(ToolResult {
                     success: true,
                     output: format!("No run found with ID '{run_id}'."),
                     error: None,
-                metadata: None,
+                    metadata: None,
                 }),
             };
         }
@@ -249,7 +249,7 @@ impl Tool for SopStatusTool {
             success: true,
             output,
             error: None,
-        metadata: None,
+            metadata: None,
         })
     }
 }

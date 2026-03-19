@@ -1022,6 +1022,328 @@ fn hydrate_config_for_save(
     incoming
 }
 
+// ══════════════════════════════════════════════════════════════════
+// Agent HQ Control Center API extensions
+// ══════════════════════════════════════════════════════════════════
+
+/// GET /api/soul — get current soul profile
+pub async fn handle_api_soul_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let soul_store = crate::soul::SoulStore::new(&config.workspace_dir);
+    match soul_store.load() {
+        Ok(profile) => Json(serde_json::json!({
+            "profile": profile,
+            "rendered": crate::soul::render_soul(&profile),
+        }))
+        .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to load soul: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/soul — update soul profile
+pub async fn handle_api_soul_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(profile): Json<crate::soul::SoulProfile>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let soul_store = crate::soul::SoulStore::new(&config.workspace_dir);
+
+    let validation = crate::soul::validate_soul(&profile, None);
+    if !validation.ok {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": "Validation failed", "warnings": validation.warnings}),
+            ),
+        )
+            .into_response();
+    }
+
+    match soul_store.save(&profile) {
+        Ok(()) => Json(serde_json::json!({"ok": true, "profile": profile})).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to save soul: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/missions — list all missions
+pub async fn handle_api_missions_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref runner) = state.mission_runner {
+        let missions = runner.list_missions().await;
+        Json(serde_json::json!({"missions": missions})).into_response()
+    } else {
+        Json(serde_json::json!({"missions": []})).into_response()
+    }
+}
+
+/// POST /api/missions — create a new mission
+pub async fn handle_api_mission_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let goal = body
+        .get("goal")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if goal.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "goal is required"})),
+        )
+            .into_response();
+    }
+
+    if let Some(ref runner) = state.mission_runner {
+        let mission = runner.create_mission(goal).await;
+        Json(serde_json::json!({"mission": mission})).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "Mission runner not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/missions/:id/pause — pause a mission
+pub async fn handle_api_mission_pause(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref runner) = state.mission_runner {
+        let ok = runner.pause(&id).await;
+        Json(serde_json::json!({"ok": ok})).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/missions/:id/resume — resume a mission
+pub async fn handle_api_mission_resume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref runner) = state.mission_runner {
+        let ok = runner.resume(&id).await;
+        Json(serde_json::json!({"ok": ok})).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/missions/:id/stop — stop a mission
+pub async fn handle_api_mission_stop(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref runner) = state.mission_runner {
+        let ok = runner.stop(&id).await;
+        Json(serde_json::json!({"ok": ok})).into_response()
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// GET /api/plugins — list installed plugins
+pub async fn handle_api_plugins_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref mgr) = state.plugin_manager {
+        match mgr.list_plugins() {
+            Ok(plugins) => Json(serde_json::json!({"plugins": plugins})).into_response(),
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+                .into_response(),
+        }
+    } else {
+        Json(serde_json::json!({"plugins": []})).into_response()
+    }
+}
+
+/// POST /api/plugins/:id/enable — enable a plugin
+pub async fn handle_api_plugin_enable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref mgr) = state.plugin_manager {
+        match mgr.enable_plugin(&id) {
+            Ok(record) => Json(serde_json::json!({"plugin": record})).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// POST /api/plugins/:id/disable — disable a plugin
+pub async fn handle_api_plugin_disable(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref mgr) = state.plugin_manager {
+        match mgr.disable_plugin(&id) {
+            Ok(record) => Json(serde_json::json!({"plugin": record})).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// DELETE /api/plugins/:id — uninstall a plugin
+pub async fn handle_api_plugin_uninstall(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref mgr) = state.plugin_manager {
+        match mgr.uninstall_plugin(&id) {
+            Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+            Err(e) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("{e}")})),
+            )
+                .into_response(),
+        }
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "not available"})),
+        )
+            .into_response()
+    }
+}
+
+/// GET /api/sessions — list sessions
+pub async fn handle_api_sessions_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref store) = state.session_store {
+        let sessions = store.lock().list_sessions();
+        Json(serde_json::json!({"sessions": sessions})).into_response()
+    } else {
+        Json(serde_json::json!({"sessions": []})).into_response()
+    }
+}
+
+/// GET /api/browser-bridge/status — browser bridge status
+pub async fn handle_api_browser_bridge_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if let Some(ref bridge) = state.browser_bridge {
+        let status = bridge.status();
+        Json(serde_json::json!({"browser_bridge": status})).into_response()
+    } else {
+        Json(serde_json::json!({"browser_bridge": {"active_clients": 0, "clients": [], "pending_commands": 0, "completed_commands": 0}})).into_response()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1431,278 +1753,5 @@ mod tests {
             .embedding_routes
             .iter()
             .all(|route| route.api_key.as_deref() != Some(MASKED_SECRET)));
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════
-// Agent HQ Control Center API extensions
-// ══════════════════════════════════════════════════════════════════
-
-/// GET /api/soul — get current soul profile
-pub async fn handle_api_soul_get(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let config = state.config.lock().clone();
-    let soul_store = crate::soul::SoulStore::new(&config.workspace_dir);
-    match soul_store.load() {
-        Ok(profile) => Json(serde_json::json!({
-            "profile": profile,
-            "rendered": crate::soul::render_soul(&profile),
-        })).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to load soul: {e}")})),
-        ).into_response(),
-    }
-}
-
-/// PUT /api/soul — update soul profile
-pub async fn handle_api_soul_put(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(profile): Json<crate::soul::SoulProfile>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let config = state.config.lock().clone();
-    let soul_store = crate::soul::SoulStore::new(&config.workspace_dir);
-
-    let validation = crate::soul::validate_soul(&profile, None);
-    if !validation.ok {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "Validation failed", "warnings": validation.warnings})),
-        ).into_response();
-    }
-
-    match soul_store.save(&profile) {
-        Ok(()) => Json(serde_json::json!({"ok": true, "profile": profile})).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to save soul: {e}")})),
-        ).into_response(),
-    }
-}
-
-/// GET /api/missions — list all missions
-pub async fn handle_api_missions_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref runner) = state.mission_runner {
-        let missions = runner.list_missions().await;
-        Json(serde_json::json!({"missions": missions})).into_response()
-    } else {
-        Json(serde_json::json!({"missions": []})).into_response()
-    }
-}
-
-/// POST /api/missions — create a new mission
-pub async fn handle_api_mission_create(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    let goal = body.get("goal").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    if goal.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "goal is required"})),
-        ).into_response();
-    }
-
-    if let Some(ref runner) = state.mission_runner {
-        let mission = runner.create_mission(goal).await;
-        Json(serde_json::json!({"mission": mission})).into_response()
-    } else {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"error": "Mission runner not available"})),
-        ).into_response()
-    }
-}
-
-/// POST /api/missions/:id/pause — pause a mission
-pub async fn handle_api_mission_pause(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref runner) = state.mission_runner {
-        let ok = runner.pause(&id).await;
-        Json(serde_json::json!({"ok": ok})).into_response()
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "not available"}))).into_response()
-    }
-}
-
-/// POST /api/missions/:id/resume — resume a mission
-pub async fn handle_api_mission_resume(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref runner) = state.mission_runner {
-        let ok = runner.resume(&id).await;
-        Json(serde_json::json!({"ok": ok})).into_response()
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "not available"}))).into_response()
-    }
-}
-
-/// POST /api/missions/:id/stop — stop a mission
-pub async fn handle_api_mission_stop(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref runner) = state.mission_runner {
-        let ok = runner.stop(&id).await;
-        Json(serde_json::json!({"ok": ok})).into_response()
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "not available"}))).into_response()
-    }
-}
-
-/// GET /api/plugins — list installed plugins
-pub async fn handle_api_plugins_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref mgr) = state.plugin_manager {
-        match mgr.list_plugins() {
-            Ok(plugins) => Json(serde_json::json!({"plugins": plugins})).into_response(),
-            Err(e) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": format!("{e}")})),
-            ).into_response(),
-        }
-    } else {
-        Json(serde_json::json!({"plugins": []})).into_response()
-    }
-}
-
-/// POST /api/plugins/:id/enable — enable a plugin
-pub async fn handle_api_plugin_enable(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref mgr) = state.plugin_manager {
-        match mgr.enable_plugin(&id) {
-            Ok(record) => Json(serde_json::json!({"plugin": record})).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("{e}")}))).into_response(),
-        }
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "not available"}))).into_response()
-    }
-}
-
-/// POST /api/plugins/:id/disable — disable a plugin
-pub async fn handle_api_plugin_disable(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref mgr) = state.plugin_manager {
-        match mgr.disable_plugin(&id) {
-            Ok(record) => Json(serde_json::json!({"plugin": record})).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("{e}")}))).into_response(),
-        }
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "not available"}))).into_response()
-    }
-}
-
-/// DELETE /api/plugins/:id — uninstall a plugin
-pub async fn handle_api_plugin_uninstall(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref mgr) = state.plugin_manager {
-        match mgr.uninstall_plugin(&id) {
-            Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
-            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("{e}")}))).into_response(),
-        }
-    } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "not available"}))).into_response()
-    }
-}
-
-/// GET /api/sessions — list sessions
-pub async fn handle_api_sessions_list(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref store) = state.session_store {
-        let sessions = store.lock().list_sessions();
-        Json(serde_json::json!({"sessions": sessions})).into_response()
-    } else {
-        Json(serde_json::json!({"sessions": []})).into_response()
-    }
-}
-
-/// GET /api/browser-bridge/status — browser bridge status
-pub async fn handle_api_browser_bridge_status(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
-    if let Err(e) = require_auth(&state, &headers) {
-        return e.into_response();
-    }
-
-    if let Some(ref bridge) = state.browser_bridge {
-        let status = bridge.status();
-        Json(serde_json::json!({"browser_bridge": status})).into_response()
-    } else {
-        Json(serde_json::json!({"browser_bridge": {"active_clients": 0, "clients": [], "pending_commands": 0, "completed_commands": 0}})).into_response()
     }
 }

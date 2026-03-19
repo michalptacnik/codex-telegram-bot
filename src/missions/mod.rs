@@ -153,7 +153,8 @@ impl MissionControl {
     }
 
     pub fn stop(&self) {
-        self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.stop.notify_waiters();
     }
 
@@ -285,23 +286,30 @@ impl MissionRunner {
     ) -> Result<MissionRecord> {
         // Create control handle
         let mut control = MissionControl::new(mission_id.to_string());
-        self.controls.lock().await.insert(mission_id.to_string(), MissionControl::new(mission_id.to_string()));
+        self.controls.lock().await.insert(
+            mission_id.to_string(),
+            MissionControl::new(mission_id.to_string()),
+        );
 
         // Set state to running
         {
             let mut missions = self.missions.lock().await;
-            let mission = missions.get_mut(mission_id).ok_or_else(|| anyhow::anyhow!("Mission not found"))?;
+            let mission = missions
+                .get_mut(mission_id)
+                .ok_or_else(|| anyhow::anyhow!("Mission not found"))?;
             mission.state = MissionState::Running;
             mission.updated_at = Utc::now();
         }
 
-        self.emit_event(mission_id, "started", "Mission execution started").await;
+        self.emit_event(mission_id, "started", "Mission execution started")
+            .await;
 
         // Plan phase
         let step_descriptions = match planner.plan(&self.get_goal(mission_id).await).await {
             Ok(steps) => steps,
             Err(e) => {
-                self.fail_mission(mission_id, &format!("Planning failed: {e}")).await;
+                self.fail_mission(mission_id, &format!("Planning failed: {e}"))
+                    .await;
                 bail!("Planning failed: {e}");
             }
         };
@@ -323,7 +331,16 @@ impl MissionRunner {
                     .collect();
 
                 if steps.len() > mission.max_steps {
-                    self.emit_event(mission_id, "warning", &format!("Plan has {} steps, truncating to {}", steps.len(), mission.max_steps)).await;
+                    self.emit_event(
+                        mission_id,
+                        "warning",
+                        &format!(
+                            "Plan has {} steps, truncating to {}",
+                            steps.len(),
+                            mission.max_steps
+                        ),
+                    )
+                    .await;
                 }
 
                 mission.plan = Some(MissionPlan {
@@ -334,12 +351,18 @@ impl MissionRunner {
             }
         }
 
-        self.emit_event(mission_id, "planned", &format!("{} steps planned", step_descriptions.len())).await;
+        self.emit_event(
+            mission_id,
+            "planned",
+            &format!("{} steps planned", step_descriptions.len()),
+        )
+        .await;
 
         // Execute steps
         let step_count = {
             let missions = self.missions.lock().await;
-            missions.get(mission_id)
+            missions
+                .get(mission_id)
                 .and_then(|m| m.plan.as_ref())
                 .map(|p| p.steps.len())
                 .unwrap_or(0)
@@ -364,7 +387,8 @@ impl MissionRunner {
             // Get step description
             let step_desc = {
                 let missions = self.missions.lock().await;
-                missions.get(mission_id)
+                missions
+                    .get(mission_id)
                     .and_then(|m| m.plan.as_ref())
                     .and_then(|p| p.steps.get(step_idx))
                     .map(|s| s.description.clone())
@@ -374,7 +398,8 @@ impl MissionRunner {
             // Skip already completed steps (checkpoint resume)
             {
                 let missions = self.missions.lock().await;
-                if let Some(step) = missions.get(mission_id)
+                if let Some(step) = missions
+                    .get(mission_id)
                     .and_then(|m| m.plan.as_ref())
                     .and_then(|p| p.steps.get(step_idx))
                 {
@@ -384,8 +409,14 @@ impl MissionRunner {
                 }
             }
 
-            self.set_step_status(mission_id, step_idx, StepStatus::Running, "").await;
-            self.emit_event(mission_id, "step_start", &format!("Step {}: {}", step_idx + 1, step_desc)).await;
+            self.set_step_status(mission_id, step_idx, StepStatus::Running, "")
+                .await;
+            self.emit_event(
+                mission_id,
+                "step_start",
+                &format!("Step {}: {}", step_idx + 1, step_desc),
+            )
+            .await;
 
             // Execute with retries
             let mut last_err = String::new();
@@ -393,8 +424,14 @@ impl MissionRunner {
             for retry in 0..=MAX_STEP_RETRIES {
                 match executor.execute_step(&step_desc).await {
                     Ok(output) => {
-                        self.set_step_status(mission_id, step_idx, StepStatus::Completed, &output).await;
-                        self.emit_event(mission_id, "step_done", &format!("Step {} completed", step_idx + 1)).await;
+                        self.set_step_status(mission_id, step_idx, StepStatus::Completed, &output)
+                            .await;
+                        self.emit_event(
+                            mission_id,
+                            "step_done",
+                            &format!("Step {} completed", step_idx + 1),
+                        )
+                        .await;
 
                         // Track cost
                         {
@@ -411,15 +448,36 @@ impl MissionRunner {
                     Err(e) => {
                         last_err = e.to_string();
                         if retry < MAX_STEP_RETRIES {
-                            self.emit_event(mission_id, "step_retry", &format!("Step {} retry {}/{}: {}", step_idx + 1, retry + 1, MAX_STEP_RETRIES, last_err)).await;
+                            self.emit_event(
+                                mission_id,
+                                "step_retry",
+                                &format!(
+                                    "Step {} retry {}/{}: {}",
+                                    step_idx + 1,
+                                    retry + 1,
+                                    MAX_STEP_RETRIES,
+                                    last_err
+                                ),
+                            )
+                            .await;
                         }
                     }
                 }
             }
 
             if !success {
-                self.set_step_status(mission_id, step_idx, StepStatus::Failed, &last_err).await;
-                self.fail_mission(mission_id, &format!("Step {} failed after {} retries: {}", step_idx + 1, MAX_STEP_RETRIES, last_err)).await;
+                self.set_step_status(mission_id, step_idx, StepStatus::Failed, &last_err)
+                    .await;
+                self.fail_mission(
+                    mission_id,
+                    &format!(
+                        "Step {} failed after {} retries: {}",
+                        step_idx + 1,
+                        MAX_STEP_RETRIES,
+                        last_err
+                    ),
+                )
+                .await;
                 bail!("Step {} failed: {}", step_idx + 1, last_err);
             }
         }
@@ -436,16 +494,20 @@ impl MissionRunner {
             }
         }
 
-        self.emit_event(mission_id, "completed", "Mission completed successfully").await;
+        self.emit_event(mission_id, "completed", "Mission completed successfully")
+            .await;
         self.controls.lock().await.remove(mission_id);
 
-        self.get_mission(mission_id).await
+        self.get_mission(mission_id)
+            .await
             .ok_or_else(|| anyhow::anyhow!("Mission record lost"))
     }
 
     /// Get mission events.
     pub async fn get_events(&self, mission_id: &str) -> Vec<MissionEvent> {
-        self.events.lock().await
+        self.events
+            .lock()
+            .await
             .iter()
             .filter(|e| e.mission_id == mission_id)
             .cloned()
@@ -455,11 +517,21 @@ impl MissionRunner {
     // ── Private helpers ──────────────────────────────────────────
 
     async fn get_goal(&self, id: &str) -> String {
-        self.missions.lock().await.get(id).map(|m| m.goal.clone()).unwrap_or_default()
+        self.missions
+            .lock()
+            .await
+            .get(id)
+            .map(|m| m.goal.clone())
+            .unwrap_or_default()
     }
 
     async fn is_stopped(&self, id: &str) -> bool {
-        self.controls.lock().await.get(id).map(|c| c.is_stopped()).unwrap_or(true)
+        self.controls
+            .lock()
+            .await
+            .get(id)
+            .map(|c| c.is_stopped())
+            .unwrap_or(true)
     }
 
     async fn check_budget(&self, id: &str, est_cost: f64) -> bool {
@@ -471,7 +543,13 @@ impl MissionRunner {
         }
     }
 
-    async fn set_step_status(&self, mission_id: &str, step_idx: usize, status: StepStatus, output: &str) {
+    async fn set_step_status(
+        &self,
+        mission_id: &str,
+        step_idx: usize,
+        status: StepStatus,
+        output: &str,
+    ) {
         let mut missions = self.missions.lock().await;
         if let Some(mission) = missions.get_mut(mission_id) {
             if let Some(plan) = &mut mission.plan {
@@ -540,7 +618,10 @@ mod tests {
         let mission = runner.create_mission("Test goal".into()).await;
         assert_eq!(mission.state, MissionState::Idle);
 
-        let result = runner.run(&mission.id, &MockPlanner, &MockExecutor).await.unwrap();
+        let result = runner
+            .run(&mission.id, &MockPlanner, &MockExecutor)
+            .await
+            .unwrap();
         assert_eq!(result.state, MissionState::Completed);
         assert!(result.plan.is_some());
         assert_eq!(result.plan.unwrap().steps.len(), 3);

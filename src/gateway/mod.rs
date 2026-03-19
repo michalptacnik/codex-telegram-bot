@@ -665,7 +665,8 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         plugin_manager: {
             let plugin_mgr = crate::plugins::PluginLifecycleManager::new(
                 &config.workspace_dir,
-                &std::env::var("PLUGIN_TRUST_POLICY").unwrap_or_else(|_| "require_signature".into()),
+                &std::env::var("PLUGIN_TRUST_POLICY")
+                    .unwrap_or_else(|_| "require_signature".into()),
             );
             plugin_mgr.ok().map(Arc::new)
         },
@@ -720,17 +721,44 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
         // ── Agent HQ Control Center routes ──
-        .route("/api/soul", get(api::handle_api_soul_get).put(api::handle_api_soul_put))
-        .route("/api/missions", get(api::handle_api_missions_list).post(api::handle_api_mission_create))
-        .route("/api/missions/{id}/pause", post(api::handle_api_mission_pause))
-        .route("/api/missions/{id}/resume", post(api::handle_api_mission_resume))
-        .route("/api/missions/{id}/stop", post(api::handle_api_mission_stop))
+        .route(
+            "/api/soul",
+            get(api::handle_api_soul_get).put(api::handle_api_soul_put),
+        )
+        .route(
+            "/api/missions",
+            get(api::handle_api_missions_list).post(api::handle_api_mission_create),
+        )
+        .route(
+            "/api/missions/{id}/pause",
+            post(api::handle_api_mission_pause),
+        )
+        .route(
+            "/api/missions/{id}/resume",
+            post(api::handle_api_mission_resume),
+        )
+        .route(
+            "/api/missions/{id}/stop",
+            post(api::handle_api_mission_stop),
+        )
         .route("/api/plugins", get(api::handle_api_plugins_list))
-        .route("/api/plugins/{id}/enable", post(api::handle_api_plugin_enable))
-        .route("/api/plugins/{id}/disable", post(api::handle_api_plugin_disable))
-        .route("/api/plugins/{id}", delete(api::handle_api_plugin_uninstall))
+        .route(
+            "/api/plugins/{id}/enable",
+            post(api::handle_api_plugin_enable),
+        )
+        .route(
+            "/api/plugins/{id}/disable",
+            post(api::handle_api_plugin_disable),
+        )
+        .route(
+            "/api/plugins/{id}",
+            delete(api::handle_api_plugin_uninstall),
+        )
         .route("/api/sessions", get(api::handle_api_sessions_list))
-        .route("/api/browser-bridge/status", get(api::handle_api_browser_bridge_status))
+        .route(
+            "/api/browser-bridge/status",
+            get(api::handle_api_browser_bridge_status),
+        )
         // ── SSE event stream ──
         .route("/api/events", get(sse::handle_sse_events))
         // ── WebSocket agent chat ──

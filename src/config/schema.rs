@@ -262,7 +262,7 @@ impl Default for SopConfig {
     fn default() -> Self {
         Self {
             sops_dir: None,
-            default_execution_mode: Default::default(),
+            default_execution_mode: crate::sop::types::SopExecutionMode::default(),
             max_concurrent_total: default_sop_max_concurrent(),
             approval_timeout_secs: default_sop_approval_timeout(),
             max_finished_runs: default_sop_max_finished(),
@@ -270,9 +270,15 @@ impl Default for SopConfig {
     }
 }
 
-fn default_sop_max_concurrent() -> usize { 5 }
-fn default_sop_approval_timeout() -> u64 { 300 }
-fn default_sop_max_finished() -> usize { 100 }
+fn default_sop_max_concurrent() -> usize {
+    5
+}
+fn default_sop_approval_timeout() -> u64 {
+    300
+}
+fn default_sop_max_finished() -> usize {
+    100
+}
 
 /// Named provider profile definition compatible with Codex app-server style config.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
@@ -6087,6 +6093,7 @@ default_temperature = 0.7
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
+            sop: SopConfig::default(),
         };
 
         let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -6272,6 +6279,7 @@ tool_dispatcher = "xml"
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             daemon: DaemonConfig::default(),
+            sop: SopConfig::default(),
         };
 
         config.save().await.unwrap();

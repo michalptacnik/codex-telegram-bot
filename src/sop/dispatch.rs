@@ -158,7 +158,7 @@ pub async fn dispatch_sop_event(
 /// approval timeout polling in the scheduler handles progression.
 /// For `ExecuteStep` actions, the run is started in the engine but steps
 /// cannot be executed without an agent loop — this is logged as a warning.
-pub async fn process_headless_results(results: &[DispatchResult]) {
+pub fn process_headless_results(results: &[DispatchResult]) {
     for result in results {
         match result {
             DispatchResult::Started {
