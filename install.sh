@@ -112,6 +112,7 @@ Environment:
   ZEROCLAW_MODEL             Used when --model is not provided
   ZEROCLAW_BOOTSTRAP_MIN_RAM_MB   Minimum RAM threshold for source build preflight (default: 2048)
   ZEROCLAW_BOOTSTRAP_MIN_DISK_MB  Minimum free disk threshold for source build preflight (default: 6144)
+  ZEROCLAW_SKIP_BROWSER_BOOTSTRAP Set to 1 to skip best-effort browser helper installation
   ZEROCLAW_DISABLE_ALPINE_AUTO_DEPS
                             Set to 1 to disable Alpine auto-install of missing prerequisites
 USAGE
@@ -328,6 +329,8 @@ ALPINE_PREREQ_PACKAGES=(
   pkgconf
   git
   curl
+  nodejs
+  npm
   openssl-dev
   perl
   ca-certificates
@@ -442,7 +445,7 @@ install_system_deps() {
         fi
       elif have_cmd apt-get; then
         run_privileged apt-get update -qq
-        run_privileged apt-get install -y build-essential pkg-config git curl
+        run_privileged apt-get install -y build-essential pkg-config git curl nodejs npm
       elif have_cmd dnf; then
         run_privileged dnf install -y \
           gcc \
@@ -451,6 +454,8 @@ install_system_deps() {
           pkgconf-pkg-config \
           git \
           curl \
+          nodejs \
+          npm \
           openssl-devel \
           perl
       elif have_cmd pacman; then
@@ -461,6 +466,8 @@ install_system_deps() {
           pkgconf \
           git \
           curl \
+          nodejs \
+          npm \
           openssl \
           perl \
           ca-certificates
@@ -486,6 +493,58 @@ MSG
       warn "Unsupported OS for automatic dependency install. Continuing without changes."
       ;;
   esac
+}
+
+bootstrap_browser_automation_support() {
+  if [[ "${ZEROCLAW_SKIP_BROWSER_BOOTSTRAP:-}" == "1" ]]; then
+    info "Skipping browser automation bootstrap (ZEROCLAW_SKIP_BROWSER_BOOTSTRAP=1)"
+    return 0
+  fi
+
+  if have_cmd agent-browser; then
+    info "Browser automation helper already available: $(command -v agent-browser)"
+    return 0
+  fi
+
+  local npm_bin=""
+  local npm_prefix=""
+
+  if have_cmd npm; then
+    npm_bin="$(command -v npm)"
+  elif [[ "$(uname -s)" == "Darwin" ]] && have_cmd brew; then
+    info "Installing Node.js for browser automation bootstrap"
+    if brew list node >/dev/null 2>&1 || brew install node; then
+      npm_bin="$(command -v npm || true)"
+    fi
+  fi
+
+  if [[ -z "$npm_bin" ]]; then
+    warn "npm is not available, so agent-browser was not bootstrapped."
+    warn "Browser backend remains 'auto' and can still use the extension bridge, rust-native backend, or a configured computer-use sidecar."
+    return 0
+  fi
+
+  info "Installing browser automation helper (agent-browser)"
+  if "$npm_bin" install -g agent-browser; then
+    if have_cmd agent-browser; then
+      info "Installed browser automation helper: $(command -v agent-browser)"
+      return 0
+    fi
+
+    npm_prefix="$("$npm_bin" prefix -g 2>/dev/null || true)"
+    if [[ -n "$npm_prefix" && -x "$npm_prefix/bin/agent-browser" ]]; then
+      warn "agent-browser was installed to $npm_prefix/bin/agent-browser but is not on PATH."
+      warn "Add this to PATH: export PATH=\"$npm_prefix/bin:\$PATH\""
+      return 0
+    fi
+
+    info "agent-browser installation completed"
+    return 0
+  fi
+
+  warn "Failed to install agent-browser automatically."
+  warn "Browser backend remains 'auto' and can still use the extension bridge, rust-native backend, or a configured computer-use sidecar."
+  return 0
 }
 
 install_rust_toolchain() {
@@ -1040,6 +1099,8 @@ if [[ "$SKIP_INSTALL" == false ]]; then
 else
   info "Skipping install"
 fi
+
+bootstrap_browser_automation_support
 
 ZEROCLAW_BIN=""
 if have_cmd zeroclaw; then

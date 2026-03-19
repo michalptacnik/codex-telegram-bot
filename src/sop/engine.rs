@@ -35,6 +35,19 @@ impl SopEngine {
         }
     }
 
+    /// Create a new engine using default settings, overriding only the SOPs directory.
+    ///
+    /// This constructor accepts only stdlib types so it can be called across crate
+    /// boundaries without triggering type-identity mismatches (e.g. from the binary
+    /// crate where the `sop` module is re-exported from the `zeroclaw` lib but the
+    /// `config` module is compiled directly from source).
+    pub fn with_sops_dir(sops_dir: Option<String>) -> Self {
+        Self::new(SopConfig {
+            sops_dir,
+            ..SopConfig::default()
+        })
+    }
+
     /// Load/reload SOPs from the configured directory.
     pub fn reload(&mut self, workspace_dir: &Path) {
         self.sops = load_sops(
@@ -338,9 +351,13 @@ impl SopEngine {
 
     // ── Test helpers ──────────────────────────────────────────────
 
-    /// Replace loaded SOPs (for testing from other modules).
-    #[cfg(test)]
-    pub(crate) fn set_sops_for_test(&mut self, sops: Vec<Sop>) {
+    /// Replace loaded SOPs directly.
+    ///
+    /// This is primarily a test utility (bypasses disk loading), but is kept
+    /// unconditionally public so it is accessible from binary-crate test modules
+    /// that import `SopEngine` via the `zeroclaw` re-export.
+    #[doc(hidden)]
+    pub fn set_sops_for_test(&mut self, sops: Vec<Sop>) {
         self.sops = sops;
     }
 

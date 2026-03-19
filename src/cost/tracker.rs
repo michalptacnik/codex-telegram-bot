@@ -134,10 +134,17 @@ impl CostTracker {
     }
 
     /// Get the current cost summary.
+    ///
+    /// `by_model` is all-time (loaded from JSONL), not session-only, so the Model
+    /// Breakdown table in the UI is meaningful immediately after a gateway restart.
+    /// `monthly_tokens` is also all-time for the current month so the "Cost per 1K
+    /// Tokens" metric uses a consistent numerator/denominator.
     pub fn get_summary(&self) -> Result<CostSummary> {
-        let (daily_cost, monthly_cost) = {
+        let (daily_cost, monthly_cost, monthly_tokens, by_model) = {
             let mut storage = self.lock_storage();
-            storage.get_aggregated_costs()?
+            let (daily, monthly) = storage.get_aggregated_costs()?;
+            let (mo_tokens, all_time_by_model) = storage.get_monthly_tokens_and_model_stats()?;
+            (daily, monthly, mo_tokens, all_time_by_model)
         };
 
         let session_costs = self.lock_session_costs();
@@ -150,15 +157,16 @@ impl CostTracker {
             .map(|record| record.usage.total_tokens)
             .sum();
         let request_count = session_costs.len();
-        let by_model = build_session_model_stats(&session_costs);
 
         Ok(CostSummary {
             session_cost_usd: session_cost,
             daily_cost_usd: daily_cost,
             monthly_cost_usd: monthly_cost,
             total_tokens,
+            monthly_tokens,
             request_count,
             by_model,
+            tracking_enabled: true,
         })
     }
 
@@ -373,6 +381,41 @@ impl CostStorage {
         Ok((self.daily_cost_usd, self.monthly_cost_usd))
     }
 
+    /// Scan all records and return (monthly_tokens, all_time_by_model).
+    ///
+    /// `by_model` is all-time so the UI Model Breakdown table is useful after
+    /// a restart (not blank). `monthly_tokens` is used to compute a consistent
+    /// "cost per 1K tokens" metric in the UI (same period as `monthly_cost_usd`).
+    fn get_monthly_tokens_and_model_stats(&self) -> Result<(u64, HashMap<String, ModelStats>)> {
+        let now = Utc::now();
+        let year = now.year();
+        let month = now.month();
+
+        let mut monthly_tokens: u64 = 0;
+        let mut by_model: HashMap<String, ModelStats> = HashMap::new();
+
+        self.for_each_record(|record| {
+            let ts = record.usage.timestamp.naive_utc();
+            if ts.year() == year && ts.month() == month {
+                monthly_tokens = monthly_tokens.saturating_add(record.usage.total_tokens);
+            }
+
+            let entry = by_model
+                .entry(record.usage.model.clone())
+                .or_insert_with(|| ModelStats {
+                    model: record.usage.model.clone(),
+                    cost_usd: 0.0,
+                    total_tokens: 0,
+                    request_count: 0,
+                });
+            entry.cost_usd += record.usage.cost_usd;
+            entry.total_tokens = entry.total_tokens.saturating_add(record.usage.total_tokens);
+            entry.request_count += 1;
+        })?;
+
+        Ok((monthly_tokens, by_model))
+    }
+
     /// Get cost for a specific date.
     fn get_cost_for_date(&self, date: NaiveDate) -> Result<f64> {
         let mut cost = 0.0;
@@ -467,7 +510,9 @@ mod tests {
     }
 
     #[test]
-    fn summary_by_model_is_session_scoped() {
+    fn summary_by_model_is_all_time() {
+        // by_model now loads all records from JSONL (not session-only) so the
+        // Model Breakdown table in the UI is populated immediately after restart.
         let tmp = TempDir::new().unwrap();
         let storage_path = resolve_storage_path(tmp.path()).unwrap();
         if let Some(parent) = storage_path.parent() {
@@ -492,9 +537,11 @@ mod tests {
             .unwrap();
 
         let summary = tracker.get_summary().unwrap();
-        assert_eq!(summary.by_model.len(), 1);
+        // Both the pre-existing record and the new session record should be visible.
+        assert_eq!(summary.by_model.len(), 2);
         assert!(summary.by_model.contains_key("session/model"));
-        assert!(!summary.by_model.contains_key("legacy/model"));
+        assert!(summary.by_model.contains_key("legacy/model"));
+        assert!(summary.tracking_enabled);
     }
 
     #[test]

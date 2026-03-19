@@ -44,6 +44,36 @@ fn require_auth(
     }
 }
 
+fn require_browser_extension_auth(
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let expected = std::env::var("BROWSER_EXTENSION_TOKEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+
+    let provided = headers
+        .get("x-browser-extension-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .trim();
+
+    if provided == expected {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "detail": "Unauthorized browser extension request"
+            })),
+        ))
+    }
+}
+
 // ── Query parameters ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -64,6 +94,36 @@ pub struct CronAddBody {
     pub name: Option<String>,
     pub schedule: String,
     pub command: String,
+}
+
+#[derive(Deserialize)]
+pub struct BrowserCommandBody {
+    pub command_type: String,
+    #[serde(default)]
+    pub payload: serde_json::Value,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub wait: bool,
+    #[serde(default)]
+    pub timeout_sec: Option<u64>,
+}
+
+#[derive(Deserialize)]
+pub struct BrowserExtensionCommandsQuery {
+    pub instance_id: String,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub struct BrowserExtensionCommandResultBody {
+    pub instance_id: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub output: String,
+    #[serde(default)]
+    pub data: serde_json::Value,
 }
 
 // ── Handlers ────────────────────────────────────────────────────
@@ -512,14 +572,19 @@ pub async fn handle_api_cost(
                 .into_response(),
         }
     } else {
+        // Cost tracking is disabled or failed to initialize — return explicit zeros
+        // with tracking_enabled=false so the UI can show a "tracking disabled" notice
+        // rather than silently showing $0.0000 for everything.
         Json(serde_json::json!({
             "cost": {
                 "session_cost_usd": 0.0,
                 "daily_cost_usd": 0.0,
                 "monthly_cost_usd": 0.0,
                 "total_tokens": 0,
+                "monthly_tokens": 0,
                 "request_count": 0,
                 "by_model": {},
+                "tracking_enabled": false,
             }
         }))
         .into_response()
@@ -1325,6 +1390,221 @@ pub async fn handle_api_sessions_list(
     } else {
         Json(serde_json::json!({"sessions": []})).into_response()
     }
+}
+
+/// GET /api/browser/status — browser bridge status for local diagnostics.
+pub async fn handle_api_browser_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let Some(ref bridge) = state.browser_bridge else {
+        return Json(serde_json::json!({
+            "connected": false,
+            "clients": [],
+            "supported_commands": [],
+        }))
+        .into_response();
+    };
+
+    let status = bridge.status();
+    let supported_commands = bridge
+        .pick_client(None)
+        .map(|client| bridge.supported_commands_for(&client.instance_id))
+        .unwrap_or_default();
+
+    Json(serde_json::json!({
+        "connected": status.active_clients > 0,
+        "clients": status.clients,
+        "supported_commands": supported_commands,
+        "pending_commands": status.pending_commands,
+        "completed_commands": status.completed_commands,
+    }))
+    .into_response()
+}
+
+/// POST /api/browser/command — enqueue a browser extension command.
+pub async fn handle_api_browser_command(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<BrowserCommandBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let Some(ref bridge) = state.browser_bridge else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "Browser bridge unavailable"})),
+        )
+            .into_response();
+    };
+
+    let command_type = body.command_type.trim();
+    if command_type.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"ok": false, "error": "command_type is required"})),
+        )
+            .into_response();
+    }
+
+    let client = if body.client_id.trim().is_empty() {
+        bridge.pick_client(Some(command_type))
+    } else {
+        bridge
+            .active_clients()
+            .into_iter()
+            .find(|item| item.instance_id == body.client_id)
+    };
+
+    let Some(client) = client else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ok": false, "error": "No active browser extension client available"})),
+        )
+            .into_response();
+    };
+
+    let command_id = bridge.enqueue_command(&client.instance_id, command_type, body.payload);
+    if body.wait {
+        let timeout_ms = body.timeout_sec.unwrap_or(20).saturating_mul(1000);
+        if let Some(command) = bridge.wait_for_command(&command_id, timeout_ms).await {
+            return Json(serde_json::json!({
+                "ok": command.ok.unwrap_or(false),
+                "command_id": command.command_id,
+                "client_id": command.client_id,
+                "command": command,
+            }))
+            .into_response();
+        }
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "command_id": command_id,
+        "client_id": client.instance_id,
+        "queued": true,
+    }))
+    .into_response()
+}
+
+/// POST /api/browser/extension/register — register extension client metadata.
+pub async fn handle_api_browser_extension_register(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::browser_bridge::HeartbeatMessage>,
+) -> impl IntoResponse {
+    if let Err(e) = require_browser_extension_auth(&headers) {
+        return e.into_response();
+    }
+
+    let Some(ref bridge) = state.browser_bridge else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"detail": "Browser bridge unavailable"})),
+        )
+            .into_response();
+    };
+
+    let instance_id = bridge.heartbeat(body);
+    Json(serde_json::json!({"ok": true, "instance_id": instance_id})).into_response()
+}
+
+/// POST /api/browser/extension/heartbeat — refresh extension presence and tab state.
+pub async fn handle_api_browser_extension_heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<crate::browser_bridge::HeartbeatMessage>,
+) -> impl IntoResponse {
+    if let Err(e) = require_browser_extension_auth(&headers) {
+        return e.into_response();
+    }
+
+    let Some(ref bridge) = state.browser_bridge else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"detail": "Browser bridge unavailable"})),
+        )
+            .into_response();
+    };
+
+    let instance_id = bridge.heartbeat(body);
+    Json(serde_json::json!({"ok": true, "instance_id": instance_id})).into_response()
+}
+
+/// GET /api/browser/extension/commands — poll pending commands for a client.
+pub async fn handle_api_browser_extension_commands(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<BrowserExtensionCommandsQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_browser_extension_auth(&headers) {
+        return e.into_response();
+    }
+
+    let Some(ref bridge) = state.browser_bridge else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"detail": "Browser bridge unavailable"})),
+        )
+            .into_response();
+    };
+
+    if query.instance_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail": "instance_id is required"})),
+        )
+            .into_response();
+    }
+
+    let _ = query.limit;
+    let items = bridge.poll_commands(&query.instance_id);
+
+    Json(serde_json::json!({"items": items})).into_response()
+}
+
+/// POST /api/browser/extension/commands/{command_id}/result — report command completion.
+pub async fn handle_api_browser_extension_command_result(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(command_id): Path<String>,
+    Json(body): Json<BrowserExtensionCommandResultBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_browser_extension_auth(&headers) {
+        return e.into_response();
+    }
+
+    let Some(ref bridge) = state.browser_bridge else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"detail": "Browser bridge unavailable"})),
+        )
+            .into_response();
+    };
+
+    if command_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"detail": "command_id is required"})),
+        )
+            .into_response();
+    }
+
+    let _ = &body.instance_id;
+    bridge.complete_command(crate::browser_bridge::CommandResult {
+        command_id,
+        ok: body.ok,
+        output: Some(body.output),
+        data: Some(body.data),
+    });
+
+    Json(serde_json::json!({"ok": true})).into_response()
 }
 
 /// GET /api/browser-bridge/status — browser bridge status

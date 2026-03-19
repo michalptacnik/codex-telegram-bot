@@ -1952,6 +1952,8 @@ pub(crate) async fn agent_turn(
     silent: bool,
     multimodal_config: &crate::config::MultimodalConfig,
     max_tool_iterations: usize,
+    cost_tracker: Option<&crate::cost::CostTracker>,
+    cost_prices: &std::collections::HashMap<String, crate::config::ModelPricing>,
 ) -> Result<String> {
     run_tool_call_loop(
         provider,
@@ -1970,6 +1972,8 @@ pub(crate) async fn agent_turn(
         None,
         None,
         &[],
+        cost_tracker,
+        cost_prices,
     )
     .await
 }
@@ -2174,6 +2178,8 @@ pub(crate) async fn run_tool_call_loop(
     on_delta: Option<tokio::sync::mpsc::Sender<String>>,
     hooks: Option<&crate::hooks::HookRunner>,
     excluded_tools: &[String],
+    cost_tracker: Option<&crate::cost::CostTracker>,
+    cost_prices: &std::collections::HashMap<String, crate::config::ModelPricing>,
 ) -> Result<String> {
     let max_iterations = if max_tool_iterations == 0 {
         DEFAULT_MAX_TOOL_ITERATIONS
@@ -2189,6 +2195,7 @@ pub(crate) async fn run_tool_call_loop(
     let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
     let turn_id = Uuid::new_v4().to_string();
     let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
+    let mut tool_parse_retry_used = false;
 
     for iteration in 0..max_iterations {
         if cancellation_token
@@ -2293,6 +2300,25 @@ pub(crate) async fn run_tool_call_loop(
                         input_tokens: resp_input_tokens,
                         output_tokens: resp_output_tokens,
                     });
+
+                    // Record cost if tracker is available and we have token counts.
+                    if let (Some(tracker), Some(in_tok), Some(out_tok)) =
+                        (cost_tracker, resp_input_tokens, resp_output_tokens)
+                    {
+                        let pricing = cost_prices.get(model);
+                        let (input_price, output_price) =
+                            pricing.map(|p| (p.input, p.output)).unwrap_or((0.0, 0.0));
+                        let usage = crate::cost::TokenUsage::new(
+                            model,
+                            in_tok as u64,
+                            out_tok as u64,
+                            input_price,
+                            output_price,
+                        );
+                        if let Err(e) = tracker.record_usage(usage) {
+                            tracing::warn!("Failed to record cost usage: {e}");
+                        }
+                    }
 
                     let response_text = resp.text_or_empty().to_string();
                     // First try native structured tool calls (OpenAI-format).
@@ -2426,6 +2452,35 @@ pub(crate) async fn run_tool_call_loop(
         }
 
         if tool_calls.is_empty() {
+            // ── Recovery: if the response looks like a failed tool call, nudge
+            // the LLM to retry with correct formatting (once per turn) ───────
+            if !tool_parse_retry_used
+                && detect_tool_call_parse_issue(&response_text, &tool_calls).is_some()
+            {
+                tool_parse_retry_used = true;
+                tracing::info!(
+                    turn = %turn_id,
+                    "tool call parse issue detected — nudging LLM to retry"
+                );
+                runtime_trace::record_event(
+                    "tool_parse_retry",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    None,
+                    Some("nudging LLM to reformat tool call"),
+                    serde_json::json!({ "iteration": iteration + 1 }),
+                );
+                history.push(ChatMessage::assistant(response_text.clone()));
+                history.push(ChatMessage::user(
+                    "Your previous response contained a tool call that could not be parsed. \
+                     Please retry using the exact tool call format from the instructions."
+                        .to_string(),
+                ));
+                continue;
+            }
+
             runtime_trace::record_event(
                 "turn_final_response",
                 Some(channel_name),
@@ -2784,6 +2839,9 @@ pub(crate) async fn run_tool_call_loop(
 /// how to invoke tools.
 pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
     let mut instructions = String::new();
+    let has_mail = tools_registry.iter().any(|tool| tool.name() == "mail");
+    let has_browser = tools_registry.iter().any(|tool| tool.name() == "browser");
+
     instructions.push_str("\n## Tool Use Protocol\n\n");
     instructions.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
     instructions.push_str("```\n<tool_call>\n{\"name\": \"tool_name\", \"arguments\": {\"param\": \"value\"}}\n</tool_call>\n```\n\n");
@@ -2795,6 +2853,21 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
     instructions.push_str("After tool execution, results appear in <tool_result> tags. ");
     instructions
         .push_str("Continue reasoning with the results until you can give a final answer.\n\n");
+
+    if has_mail {
+        instructions.push_str("### Email Rule\n\n");
+        instructions.push_str(
+            "For outbound email, use the `mail` tool first whenever it is available. After `mail` send succeeds, use `verify_sent` for the same attempt before claiming success. Only use browser-based webmail as a fallback when the `mail` tool fails, lacks the needed capability, or the user explicitly asks for browser/webmail automation.\n\n",
+        );
+    }
+
+    if has_browser {
+        instructions.push_str("### Browser Rule\n\n");
+        instructions.push_str(
+            "For browser tasks on websites (including Gmail, X, Slack, and other logged-in apps), prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`. Do not use `list_windows`, `focus_window`, `list_tabs`, `focus_tab`, `mouse_move`, `mouse_click`, `mouse_drag`, `key_type`, `key_press`, `screen_capture`, or `verify_artifact` unless OS-level computer-use behavior is truly required and supported by the active backend. If a browser action fails, stop and report the exact failed action and tool error instead of pretending the task completed.\n\n",
+        );
+    }
+
     instructions.push_str("### Available Tools\n\n");
 
     for tool in tools_registry {
@@ -2877,6 +2950,8 @@ pub async fn run(
         config.api_key.as_deref(),
         &config,
     );
+    // Append SOP tools (built here so crate types resolve correctly in lib context).
+    tools_registry.extend(tools::make_sop_tools(&config));
 
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
@@ -3131,6 +3206,8 @@ pub async fn run(
             None,
             None,
             &[],
+            None,
+            &config.cost.prices,
         )
         .await?;
         final_output = response.clone();
@@ -3253,6 +3330,8 @@ pub async fn run(
                 None,
                 None,
                 &[],
+                None,
+                &config.cost.prices,
             )
             .await
             {
@@ -3345,6 +3424,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         config.api_key.as_deref(),
         &config,
     );
+    // Append SOP tools (built here so crate types resolve correctly in lib context).
+    tools_registry.extend(tools::make_sop_tools(&config));
     let peripheral_tools: Vec<Box<dyn Tool>> =
         crate::peripherals::create_peripheral_tools(&config.peripherals).await?;
     tools_registry.extend(peripheral_tools);
@@ -3473,6 +3554,12 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         ChatMessage::user(&enriched),
     ];
 
+    let cost_tracker = if config.cost.enabled {
+        crate::cost::CostTracker::new(config.cost.clone(), &config.workspace_dir).ok()
+    } else {
+        None
+    };
+
     agent_turn(
         provider.as_ref(),
         &mut history,
@@ -3484,6 +3571,8 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         true,
         &config.multimodal,
         config.agent.max_tool_iterations,
+        cost_tracker.as_ref(),
+        &config.cost.prices,
     )
     .await
 }
@@ -3799,6 +3888,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect_err("provider without vision support should fail");
@@ -3845,6 +3936,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect_err("oversized payload must fail");
@@ -3885,6 +3978,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("valid multimodal payload should pass");
@@ -4011,6 +4106,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("parallel execution should complete");
@@ -4080,6 +4177,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("loop should finish after deduplicating repeated calls");
@@ -4136,6 +4235,8 @@ mod tests {
             None,
             None,
             &[],
+            None,
+            &std::collections::HashMap::new(),
         )
         .await
         .expect("native fallback id flow should complete");
@@ -4732,6 +4833,48 @@ Tail"#;
         assert!(instructions.contains("shell"));
         assert!(instructions.contains("file_read"));
         assert!(instructions.contains("file_write"));
+    }
+
+    #[test]
+    fn build_tool_instructions_prioritizes_mail_and_dom_browser_flow() {
+        use crate::channels::email_channel::EmailConfig;
+        use crate::security::SecurityPolicy;
+        use crate::tools::{browser::BrowserTool, mail::MailTool};
+
+        let security = Arc::new(SecurityPolicy::from_config(
+            &crate::config::AutonomyConfig::default(),
+            std::path::Path::new("/tmp"),
+        ));
+        let tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(MailTool::new(
+                security.clone(),
+                Some(EmailConfig {
+                    imap_host: "imap.example.com".into(),
+                    imap_port: 993,
+                    imap_folder: "INBOX".into(),
+                    smtp_host: "smtp.example.com".into(),
+                    smtp_port: 465,
+                    smtp_tls: true,
+                    username: "user@example.com".into(),
+                    password: "secret".into(),
+                    from_address: "user@example.com".into(),
+                    allowed_senders: vec!["*".into()],
+                    default_subject: "Default".into(),
+                    idle_timeout_secs: 60,
+                }),
+            )),
+            Box::new(BrowserTool::new(
+                security,
+                vec!["*".into()],
+                Some("test".into()),
+            )),
+        ];
+
+        let instructions = build_tool_instructions(&tools);
+        assert!(instructions.contains("For outbound email, use the `mail` tool first"));
+        assert!(instructions.contains("prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`"));
+        assert!(instructions
+            .contains("If a browser action fails, stop and report the exact failed action"));
     }
 
     #[test]
@@ -5612,8 +5755,8 @@ Let me check the result."#;
             "Native prompt must list tool names"
         );
         assert!(
-            system_prompt.contains("## Your Task"),
-            "Native prompt should contain task instructions"
+            system_prompt.contains("## Behavior"),
+            "Native prompt should contain behavior/task instructions"
         );
     }
 

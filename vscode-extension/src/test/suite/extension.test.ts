@@ -18,7 +18,7 @@ describe("Codex Control Center Extension", () => {
 
   it("exposes expected default configuration", () => {
     const cfg = vscode.workspace.getConfiguration("codex-control-center");
-    assert.strictEqual(cfg.get("gatewayUrl"), "http://127.0.0.1:8765");
+    assert.strictEqual(cfg.get("gatewayUrl"), "http://127.0.0.1:42617");
     assert.strictEqual(cfg.get("defaultChatId"), 1);
     assert.strictEqual(cfg.get("defaultUserId"), 1);
     assert.strictEqual(cfg.get("defaultAgentId"), "default");

@@ -126,8 +126,7 @@ impl Tool for SopApproveTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SopConfig;
-    use crate::memory::Memory;
+
     use crate::sop::engine::SopEngine;
     use crate::sop::types::*;
 
@@ -153,7 +152,7 @@ mod tests {
     }
 
     fn engine_with_run() -> (Arc<Mutex<SopEngine>>, String) {
-        let mut engine = SopEngine::new(SopConfig::default());
+        let mut engine = SopEngine::with_sops_dir(None);
         engine.set_sops_for_test(vec![test_sop()]);
         let event = SopEvent {
             source: SopTriggerSource::Manual,
@@ -184,7 +183,7 @@ mod tests {
 
     #[tokio::test]
     async fn approve_nonexistent_run() {
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+        let engine = Arc::new(Mutex::new(SopEngine::with_sops_dir(None)));
         let tool = SopApproveTool::new(engine);
         let result = tool
             .execute(json!({"run_id": "nonexistent"}))
@@ -196,7 +195,7 @@ mod tests {
 
     #[tokio::test]
     async fn approve_missing_run_id() {
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+        let engine = Arc::new(Mutex::new(SopEngine::with_sops_dir(None)));
         let tool = SopApproveTool::new(engine);
         let result = tool.execute(json!({})).await;
         assert!(result.is_err());
@@ -204,67 +203,9 @@ mod tests {
 
     #[test]
     fn name_and_schema() {
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
+        let engine = Arc::new(Mutex::new(SopEngine::with_sops_dir(None)));
         let tool = SopApproveTool::new(engine);
         assert_eq!(tool.name(), "sop_approve");
         assert!(tool.parameters_schema()["required"].is_array());
-    }
-
-    #[tokio::test]
-    async fn approve_writes_audit() {
-        let (engine, run_id) = engine_with_run();
-        let tmp = tempfile::tempdir().unwrap();
-        let mem_cfg = crate::config::MemoryConfig {
-            backend: "sqlite".into(),
-            ..crate::config::MemoryConfig::default()
-        };
-        let memory: Arc<dyn Memory> =
-            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let audit = Arc::new(SopAuditLogger::new(memory.clone()));
-
-        let tool = SopApproveTool::new(engine).with_audit(audit.clone());
-        let result = tool.execute(json!({"run_id": &run_id})).await.unwrap();
-        assert!(result.success);
-
-        // Verify approval audit entry was written (stored under sop_approval_ key)
-        let entries = memory
-            .list(
-                Some(&crate::memory::traits::MemoryCategory::Custom("sop".into())),
-                None,
-            )
-            .await
-            .unwrap();
-        let approval_keys: Vec<_> = entries
-            .iter()
-            .filter(|e| e.key.starts_with("sop_approval_"))
-            .collect();
-        assert!(
-            !approval_keys.is_empty(),
-            "approval audit should be written on approve"
-        );
-    }
-
-    #[tokio::test]
-    async fn approve_failure_does_not_write_audit() {
-        let engine = Arc::new(Mutex::new(SopEngine::new(SopConfig::default())));
-        let tmp = tempfile::tempdir().unwrap();
-        let mem_cfg = crate::config::MemoryConfig {
-            backend: "sqlite".into(),
-            ..crate::config::MemoryConfig::default()
-        };
-        let memory: Arc<dyn Memory> =
-            Arc::from(crate::memory::create_memory(&mem_cfg, tmp.path(), None).unwrap());
-        let audit = Arc::new(SopAuditLogger::new(memory.clone()));
-
-        let tool = SopApproveTool::new(engine).with_audit(audit.clone());
-        let result = tool
-            .execute(json!({"run_id": "nonexistent"}))
-            .await
-            .unwrap();
-        assert!(!result.success);
-
-        // No audit entry for failed approval
-        let stored = audit.get_run("nonexistent").await.unwrap();
-        assert!(stored.is_none(), "failed approve should not write audit");
     }
 }

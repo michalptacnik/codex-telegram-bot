@@ -673,7 +673,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         session_store: Some(Arc::new(Mutex::new(crate::sessions::SessionStore::new(
             &config.workspace_dir.join("sessions.json"),
         )))),
-        browser_bridge: Some(Arc::new(crate::browser_bridge::BrowserBridge::new())),
+        browser_bridge: Some(crate::browser_bridge::global_bridge()),
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -720,6 +720,27 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cost", get(api::handle_api_cost))
         .route("/api/cli-tools", get(api::handle_api_cli_tools))
         .route("/api/health", get(api::handle_api_health))
+        .route("/api/browser/status", get(api::handle_api_browser_status))
+        .route(
+            "/api/browser/command",
+            post(api::handle_api_browser_command),
+        )
+        .route(
+            "/api/browser/extension/register",
+            post(api::handle_api_browser_extension_register),
+        )
+        .route(
+            "/api/browser/extension/heartbeat",
+            post(api::handle_api_browser_extension_heartbeat),
+        )
+        .route(
+            "/api/browser/extension/commands",
+            get(api::handle_api_browser_extension_commands),
+        )
+        .route(
+            "/api/browser/extension/commands/{command_id}/result",
+            post(api::handle_api_browser_extension_command_result),
+        )
         // ── Agent HQ Control Center routes ──
         .route(
             "/api/soul",

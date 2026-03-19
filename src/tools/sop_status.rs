@@ -294,7 +294,7 @@ fn format_metric_value(val: &serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::SopConfig;
+
     use crate::sop::engine::SopEngine;
     use crate::sop::types::*;
 
@@ -320,7 +320,7 @@ mod tests {
     }
 
     fn engine_with_sops(sops: Vec<Sop>) -> Arc<Mutex<SopEngine>> {
-        let mut engine = SopEngine::new(SopConfig::default());
+        let mut engine = SopEngine::with_sops_dir(None);
         engine.set_sops_for_test(sops);
         Arc::new(Mutex::new(engine))
     }

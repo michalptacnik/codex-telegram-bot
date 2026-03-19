@@ -16,7 +16,7 @@
       "properties": {
         "codex-control-center.gatewayUrl": {
           "type": "string",
-          "default": "http://127.0.0.1:8765",
+          "default": "http://127.0.0.1:42617",
           "description": "Base URL of the Codex Control Center gateway"
         },
         "codex-control-center.apiKey": {

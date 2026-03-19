@@ -7,7 +7,7 @@ use chrono::Local;
 use std::fmt::Write;
 use std::path::Path;
 
-const BOOTSTRAP_MAX_CHARS: usize = 20_000;
+const BOOTSTRAP_MAX_CHARS: usize = 12_000;
 
 pub struct PromptContext<'a> {
     pub workspace_dir: &'a Path,
@@ -36,6 +36,7 @@ impl SystemPromptBuilder {
                 Box::new(IdentitySection),
                 Box::new(ToolsSection),
                 Box::new(SafetySection),
+                Box::new(BehaviorSection),
                 Box::new(SkillsSection),
                 Box::new(WorkspaceSection),
                 Box::new(DateTimeSection),
@@ -66,6 +67,7 @@ impl SystemPromptBuilder {
 pub struct IdentitySection;
 pub struct ToolsSection;
 pub struct SafetySection;
+pub struct BehaviorSection;
 pub struct SkillsSection;
 pub struct WorkspaceSection;
 pub struct RuntimeSection;
@@ -144,7 +146,32 @@ impl PromptSection for SafetySection {
     }
 
     fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        Ok("## Safety\n\n- Do not exfiltrate private data.\n- Do not run destructive commands without asking.\n- Do not bypass oversight or approval mechanisms.\n- Prefer `trash` over `rm`.\n- When in doubt, ask before acting externally.".into())
+        Ok("## Safety\n\n\
+            - Do not exfiltrate private data.\n\
+            - Do not run destructive commands without asking.\n\
+            - Do not bypass oversight or approval mechanisms.\n\
+            - Prefer `trash` over `rm`."
+            .into())
+    }
+}
+
+impl PromptSection for BehaviorSection {
+    fn name(&self) -> &str {
+        "behavior"
+    }
+
+    fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
+        Ok("## Behavior\n\n\
+            - Act decisively. Use tools immediately when the task is clear.\n\
+            - Be concise. No preamble, no restating the request, no filler.\n\
+            - Never explain what you \"could\" do — just do it.\n\
+            - If a task requires multiple tools, chain them without narration.\n\
+            - Speak naturally, like a competent human colleague.\n\
+            - Report results, not intentions.\n\
+            - If a task cannot be completed with available tools, say so in one sentence and stop.\n\
+            - Never ask for confirmation unless the action is explicitly destructive or irreversible.\n\
+            - Responses without tool calls must be ≤3 sentences unless the user asked for a long explanation."
+            .into())
     }
 }
 
@@ -235,7 +262,7 @@ fn inject_workspace_file(prompt: &mut String, workspace_dir: &Path, filename: &s
             }
         }
         Err(_) => {
-            let _ = writeln!(prompt, "### {filename}\n\n[File not found: {filename}]\n");
+            // Silently skip missing bootstrap files to save tokens.
         }
     }
 }
@@ -334,6 +361,8 @@ mod tests {
         assert!(prompt.contains("## Tools"));
         assert!(prompt.contains("test_tool"));
         assert!(prompt.contains("instr"));
+        assert!(prompt.contains("## Behavior"));
+        assert!(prompt.contains("Act decisively"));
     }
 
     #[test]

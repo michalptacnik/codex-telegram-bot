@@ -293,6 +293,8 @@ struct ChannelRuntimeContext {
     hooks: Option<Arc<crate::hooks::HookRunner>>,
     non_cli_excluded_tools: Arc<Vec<String>>,
     model_routes: Arc<Vec<crate::config::ModelRouteConfig>>,
+    cost_tracker: Option<Arc<crate::cost::CostTracker>>,
+    cost_prices: Arc<std::collections::HashMap<String, crate::config::ModelPricing>>,
 }
 
 #[derive(Clone)]
@@ -2105,6 +2107,8 @@ async fn process_channel_message(
                 } else {
                     ctx.non_cli_excluded_tools.as_ref()
                 },
+                ctx.cost_tracker.as_deref(),
+                &ctx.cost_prices,
             ),
         ) => LlmExecutionResult::Completed(result),
     };
@@ -2646,7 +2650,7 @@ pub fn build_system_prompt_with_mode(
     skills: &[crate::skills::Skill],
     identity_config: Option<&crate::config::IdentityConfig>,
     bootstrap_max_chars: Option<usize>,
-    native_tools: bool,
+    _native_tools: bool,
     skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
 ) -> String {
     use std::fmt::Write;
@@ -2683,22 +2687,19 @@ pub fn build_system_prompt_with_mode(
         );
     }
 
-    // ── 1c. Action instruction (avoid meta-summary) ───────────────
-    if native_tools {
-        prompt.push_str(
-            "## Your Task\n\n\
-             When the user sends a message, respond naturally. Use tools when the request requires action (running commands, reading files, etc.).\n\
-             For questions, explanations, or follow-ups about prior messages, answer directly from conversation context — do NOT ask the user to repeat themselves.\n\
-             Do NOT: summarize this configuration, describe your capabilities, or output step-by-step meta-commentary.\n\n",
-        );
-    } else {
-        prompt.push_str(
-            "## Your Task\n\n\
-             When the user sends a message, ACT on it. Use the tools to fulfill their request.\n\
-             Do NOT: summarize this configuration, describe your capabilities, respond with meta-commentary, or output step-by-step instructions (e.g. \"1. First... 2. Next...\").\n\
-             Instead: emit actual <tool_call> tags when you need to act. Just do what they ask.\n\n",
-        );
-    }
+    // ── 1c. Behavior (anti-blabber operational contract) ─────────
+    prompt.push_str(
+        "## Behavior\n\n\
+         - Act decisively. Use tools immediately when the task is clear.\n\
+         - Be concise. No preamble, no restating the request, no filler.\n\
+         - Never explain what you \"could\" do — just do it.\n\
+         - If a task requires multiple tools, chain them without narration.\n\
+         - Speak naturally, like a competent human colleague.\n\
+         - Report results, not intentions.\n\
+         - If a task cannot be completed with available tools, say so in one sentence and stop.\n\
+         - Never ask for confirmation unless the action is explicitly destructive or irreversible.\n\
+         - Responses without tool calls must be ≤3 sentences unless the user asked for a long explanation.\n\n",
+    );
 
     // ── 2. Safety ───────────────────────────────────────────────
     prompt.push_str("## Safety\n\n");
@@ -3743,6 +3744,14 @@ pub async fn start_channels(config: Config) -> Result<()> {
         },
         non_cli_excluded_tools: Arc::new(config.autonomy.non_cli_excluded_tools.clone()),
         model_routes: Arc::new(config.model_routes.clone()),
+        cost_tracker: if config.cost.enabled {
+            crate::cost::CostTracker::new(config.cost.clone(), &config.workspace_dir)
+                .ok()
+                .map(Arc::new)
+        } else {
+            None
+        },
+        cost_prices: Arc::new(config.cost.prices.clone()),
     });
 
     run_message_dispatch_loop(rx, Arc::clone(&runtime_ctx), max_in_flight_messages).await;
@@ -3964,6 +3973,8 @@ mod tests {
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         };
 
         assert!(compact_sender_history(&ctx, &sender));
@@ -4014,6 +4025,8 @@ mod tests {
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         };
 
         append_sender_turn(&ctx, &sender, ChatMessage::user("hello"));
@@ -4067,6 +4080,8 @@ mod tests {
             message_timeout_secs: CHANNEL_MESSAGE_TIMEOUT_SECS,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         };
 
         assert!(rollback_orphan_user_turn(&ctx, &sender, "pending"));
@@ -4545,6 +4560,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -4606,6 +4623,8 @@ BTC is currently around $65,000 based on latest tool output."#
             multimodal: crate::config::MultimodalConfig::default(),
             hooks: None,
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -4681,6 +4700,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -4741,6 +4762,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -4811,6 +4834,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -4901,6 +4926,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -4973,6 +5000,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -5060,6 +5089,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -5132,6 +5163,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -5194,6 +5227,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -5367,6 +5402,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(4);
@@ -5448,6 +5485,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5541,6 +5580,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(8);
@@ -5616,6 +5657,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -5676,6 +5719,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -6193,6 +6238,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -6279,6 +6326,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -6365,6 +6414,8 @@ BTC is currently around $65,000 based on latest tool output."#
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(
@@ -6916,6 +6967,8 @@ This is an example JSON object for profile settings."#;
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         // Simulate a photo attachment message with [IMAGE:] marker.
@@ -6983,6 +7036,8 @@ This is an example JSON object for profile settings."#;
             hooks: None,
             non_cli_excluded_tools: Arc::new(Vec::new()),
             model_routes: Arc::new(Vec::new()),
+            cost_tracker: None,
+            cost_prices: Arc::new(std::collections::HashMap::new()),
         });
 
         process_channel_message(

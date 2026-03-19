@@ -621,28 +621,12 @@ mod tests {
     use super::*;
     use crate::sop::types::{SopEvent, SopStepResult, SopTriggerSource};
 
-    /// Return a recent ISO-8601 timestamp string (1 hour ago).
-    fn recent_timestamp() -> String {
-        chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::hours(1))
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    }
-
-    /// Return a recent ISO-8601 timestamp string (55 minutes ago).
-    fn recent_timestamp_plus_5m() -> String {
-        chrono::Utc::now()
-            .checked_sub_signed(chrono::Duration::minutes(55))
-            .unwrap()
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-    }
-
     fn make_event() -> SopEvent {
         SopEvent {
             source: SopTriggerSource::Manual,
             topic: None,
             payload: None,
-            timestamp: recent_timestamp(),
+            timestamp: Utc::now().to_rfc3339(),
         }
     }
 
@@ -653,6 +637,7 @@ mod tests {
         total_steps: u32,
         step_results: Vec<SopStepResult>,
     ) -> SopRun {
+        let now = Utc::now();
         SopRun {
             run_id: run_id.into(),
             sop_name: sop_name.into(),
@@ -660,20 +645,21 @@ mod tests {
             status,
             current_step: total_steps,
             total_steps,
-            started_at: recent_timestamp(),
-            completed_at: Some(recent_timestamp_plus_5m()),
+            started_at: now.to_rfc3339(),
+            completed_at: Some(now.to_rfc3339()),
             step_results,
             waiting_since: None,
         }
     }
 
     fn make_step(number: u32, status: SopStepStatus) -> SopStepResult {
+        let now = Utc::now();
         SopStepResult {
             step_number: number,
             status,
             output: format!("Step {number}"),
-            started_at: recent_timestamp(),
-            completed_at: Some(recent_timestamp_plus_5m()),
+            started_at: now.to_rfc3339(),
+            completed_at: Some(now.to_rfc3339()),
         }
     }
 

@@ -213,7 +213,7 @@ Lưu ý:
 | `enabled` | `false` | Bật tool `browser_open` (mở URL trong trình duyệt mặc định hệ thống, không thu thập dữ liệu) |
 | `allowed_domains` | `[]` | Tên miền cho phép cho `browser_open` (khớp chính xác hoặc subdomain) |
 | `session_name` | chưa đặt | Tên phiên trình duyệt (cho tự động hóa agent-browser) |
-| `backend` | `agent_browser` | Backend tự động hóa: `"agent_browser"`, `"rust_native"`, `"computer_use"` hoặc `"auto"` |
+| `backend` | `auto` | Backend tự động hóa: `"agent_browser"`, `"rust_native"`, `"computer_use"`, `"extension_bridge"` hoặc `"auto"` |
 | `native_headless` | `true` | Chế độ headless cho backend rust-native |
 | `native_webdriver_url` | `http://127.0.0.1:9515` | URL endpoint WebDriver cho backend rust-native |
 | `native_chrome_path` | chưa đặt | Đường dẫn Chrome/Chromium tùy chọn cho backend rust-native |
@@ -232,6 +232,7 @@ Lưu ý:
 
 Lưu ý:
 
+- `backend = "auto"` sẽ ưu tiên extension bridge tích hợp sẵn, sau đó là rust-native, rồi `agent-browser`, rồi computer-use sidecar.
 - Khi `backend = "computer_use"`, agent ủy quyền hành động trình duyệt cho sidecar tại `computer_use.endpoint`.
 - `allow_remote_endpoint = false` (mặc định) từ chối mọi endpoint không phải loopback để tránh lộ ra ngoài.
 - Dùng `window_allowlist` để giới hạn cửa sổ OS mà sidecar có thể tương tác.

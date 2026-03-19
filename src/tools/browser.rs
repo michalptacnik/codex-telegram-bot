@@ -76,6 +76,7 @@ enum BrowserBackendKind {
     AgentBrowser,
     RustNative,
     ComputerUse,
+    ExtensionBridge,
     Auto,
 }
 
@@ -84,6 +85,7 @@ enum ResolvedBackend {
     AgentBrowser,
     RustNative,
     ComputerUse,
+    ExtensionBridge,
 }
 
 impl BrowserBackendKind {
@@ -93,9 +95,10 @@ impl BrowserBackendKind {
             "agent_browser" | "agentbrowser" => Ok(Self::AgentBrowser),
             "rust_native" | "native" => Ok(Self::RustNative),
             "computer_use" | "computeruse" => Ok(Self::ComputerUse),
+            "extension_bridge" | "extension" | "bridge" => Ok(Self::ExtensionBridge),
             "auto" => Ok(Self::Auto),
             _ => anyhow::bail!(
-                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', or 'auto'"
+                "Unsupported browser backend '{raw}'. Use 'agent_browser', 'rust_native', 'computer_use', 'extension_bridge', or 'auto'"
             ),
         }
     }
@@ -105,6 +108,7 @@ impl BrowserBackendKind {
             Self::AgentBrowser => "agent_browser",
             Self::RustNative => "rust_native",
             Self::ComputerUse => "computer_use",
+            Self::ExtensionBridge => "extension_bridge",
             Self::Auto => "auto",
         }
     }
@@ -279,6 +283,14 @@ impl BrowserTool {
         }
     }
 
+    fn extension_bridge(&self) -> Arc<crate::browser_bridge::BrowserBridge> {
+        crate::browser_bridge::global_bridge()
+    }
+
+    fn extension_bridge_available(&self) -> bool {
+        self.extension_bridge().pick_client(None).is_some()
+    }
+
     fn computer_use_endpoint_url(&self) -> anyhow::Result<reqwest::Url> {
         if self.computer_use.timeout_ms == 0 {
             anyhow::bail!("browser.computer_use.timeout_ms must be > 0");
@@ -353,14 +365,31 @@ impl BrowserTool {
                 Ok(ResolvedBackend::RustNative)
             }
             BrowserBackendKind::ComputerUse => {
-                if !self.computer_use_available()? {
-                    anyhow::bail!(
-                        "browser.backend='computer_use' but sidecar endpoint is unreachable. Check browser.computer_use.endpoint and sidecar status"
-                    );
+                if self.computer_use_available()? {
+                    return Ok(ResolvedBackend::ComputerUse);
                 }
-                Ok(ResolvedBackend::ComputerUse)
+
+                if self.extension_bridge_available() {
+                    return Ok(ResolvedBackend::ExtensionBridge);
+                }
+
+                anyhow::bail!(
+                    "browser.backend='computer_use' but sidecar endpoint is unreachable and no browser extension bridge is connected"
+                );
+            }
+            BrowserBackendKind::ExtensionBridge => {
+                if self.extension_bridge_available() {
+                    Ok(ResolvedBackend::ExtensionBridge)
+                } else {
+                    anyhow::bail!(
+                        "browser.backend='extension_bridge' but no active browser extension bridge client is connected"
+                    )
+                }
             }
             BrowserBackendKind::Auto => {
+                if self.extension_bridge_available() {
+                    return Ok(ResolvedBackend::ExtensionBridge);
+                }
                 if Self::rust_native_compiled() && self.rust_native_available() {
                     return Ok(ResolvedBackend::RustNative);
                 }
@@ -377,22 +406,22 @@ impl BrowserTool {
                 if Self::rust_native_compiled() {
                     if let Some(err) = computer_use_err {
                         anyhow::bail!(
-                            "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use invalid: {err})"
+                            "browser.backend='auto' found no usable backend (extension bridge unavailable, agent-browser missing, rust-native unavailable, computer-use invalid: {err})"
                         );
                     }
                     anyhow::bail!(
-                        "browser.backend='auto' found no usable backend (agent-browser missing, rust-native unavailable, computer-use sidecar unreachable)"
+                        "browser.backend='auto' found no usable backend (extension bridge unavailable, agent-browser missing, rust-native unavailable, computer-use sidecar unreachable)"
                     )
                 }
 
                 if let Some(err) = computer_use_err {
                     anyhow::bail!(
-                        "browser.backend='auto' needs agent-browser CLI, browser-native, or valid computer-use sidecar (error: {err})"
+                        "browser.backend='auto' needs a connected extension bridge, agent-browser CLI, browser-native, or valid computer-use sidecar (error: {err})"
                     );
                 }
 
                 anyhow::bail!(
-                    "browser.backend='auto' needs agent-browser CLI, browser-native, or computer-use sidecar"
+                    "browser.backend='auto' needs a connected extension bridge, agent-browser CLI, browser-native, or computer-use sidecar"
                 )
             }
         }
@@ -906,6 +935,492 @@ impl BrowserTool {
         })
     }
 
+    async fn execute_extension_command(
+        &self,
+        command_type: &str,
+        payload: Value,
+        timeout_ms: u64,
+    ) -> anyhow::Result<crate::browser_bridge::BrowserCommand> {
+        let bridge = self.extension_bridge();
+        let client = bridge
+            .pick_client(Some(command_type))
+            .or_else(|| bridge.pick_client(None))
+            .ok_or_else(|| {
+                anyhow::anyhow!("No active browser extension bridge client is connected")
+            })?;
+
+        let command_id = bridge.enqueue_command(&client.instance_id, command_type, payload);
+        bridge
+            .wait_for_command(&command_id, timeout_ms.max(1_000))
+            .await
+            .ok_or_else(|| {
+                anyhow::anyhow!("Timed out waiting for browser extension command '{command_type}'")
+            })
+    }
+
+    fn resolve_extension_selector(&self, selector: &str) -> anyhow::Result<String> {
+        let trimmed = selector.trim();
+        if let Some(ref_id) = trimmed.strip_prefix('@') {
+            let ref_id = ref_id.trim_start_matches('e');
+            let selector = self
+                .extension_bridge()
+                .get_snapshot_ref_map()
+                .get(ref_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Unknown snapshot ref '@{ref_id}'"))?;
+            return Ok(selector);
+        }
+        Ok(trimmed.to_string())
+    }
+
+    fn extension_script_resolver(selector_json: &str) -> String {
+        format!(
+            r#"
+const selector = {selector_json};
+const norm = (value) => String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+const candidateText = (el) => norm(
+  el?.innerText
+    || el?.textContent
+    || el?.value
+    || el?.getAttribute?.("aria-label")
+    || el?.getAttribute?.("placeholder")
+    || ""
+);
+const isVisible = (el) => {{
+  if (!el || !el.getBoundingClientRect) return false;
+  const rect = el.getBoundingClientRect();
+  const style = window.getComputedStyle(el);
+  return !(
+    style.display === "none"
+    || style.visibility === "hidden"
+    || (rect.width === 0 && rect.height === 0)
+  );
+}};
+const interactiveCandidates = () => Array.from(
+  document.querySelectorAll(
+    "button, a, input, textarea, select, option, [role], [contenteditable='true'], label"
+  )
+).filter(isVisible);
+const findByText = (needle) => {{
+  const want = norm(needle);
+  if (!want) return null;
+  return interactiveCandidates().find((el) => candidateText(el).includes(want)) || null;
+}};
+const findByPlaceholder = (needle) => {{
+  const want = norm(needle);
+  if (!want) return null;
+  return interactiveCandidates().find((el) => norm(el.getAttribute?.("placeholder")).includes(want)) || null;
+}};
+const findByTestId = (needle) => {{
+  const want = norm(needle);
+  if (!want) return null;
+  return interactiveCandidates().find((el) => norm(el.getAttribute?.("data-testid")).includes(want)) || null;
+}};
+const findByRole = (needle) => {{
+  const want = norm(needle);
+  if (!want) return null;
+  return interactiveCandidates().find((el) => {{
+    const explicitRole = norm(el.getAttribute?.("role"));
+    const tag = norm(el.tagName);
+    return explicitRole === want || tag === want;
+  }}) || null;
+}};
+const findByLabel = (needle) => {{
+  const want = norm(needle);
+  if (!want) return null;
+  const labels = Array.from(document.querySelectorAll("label")).filter(isVisible);
+  for (const label of labels) {{
+    if (!candidateText(label).includes(want)) continue;
+    const htmlFor = label.getAttribute("for");
+    if (htmlFor) {{
+      const target = document.getElementById(htmlFor);
+      if (target) return target;
+    }}
+    const nested = label.querySelector("input, textarea, select, [contenteditable='true']");
+    if (nested) return nested;
+    let sibling = label.nextElementSibling;
+    while (sibling) {{
+      const candidate = sibling.matches?.("input, textarea, select, [contenteditable='true']")
+        ? sibling
+        : sibling.querySelector?.("input, textarea, select, [contenteditable='true']");
+      if (candidate) return candidate;
+      sibling = sibling.nextElementSibling;
+    }}
+    return label;
+  }}
+  return interactiveCandidates().find((el) => norm(el.getAttribute?.("aria-label")).includes(want)) || null;
+}};
+let element = null;
+if (selector.startsWith("text=")) {{
+  element = findByText(selector.slice(5));
+}} else if (selector.startsWith("label=")) {{
+  element = findByLabel(selector.slice(6));
+}} else if (selector.startsWith("placeholder=")) {{
+  element = findByPlaceholder(selector.slice(12));
+}} else if (selector.startsWith("testid=")) {{
+  element = findByTestId(selector.slice(7));
+}} else if (selector.startsWith("role=")) {{
+  element = findByRole(selector.slice(5));
+}} else {{
+  element = document.querySelector(selector);
+}}
+if (!element) {{
+  return {{ ok: false, error: `No element found for selector: ${{selector}}` }};
+}}
+"#
+        )
+    }
+
+    async fn execute_extension_bridge_action(
+        &self,
+        action: BrowserAction,
+    ) -> anyhow::Result<ToolResult> {
+        match action {
+            BrowserAction::Open { url } => {
+                self.validate_url(&url)?;
+                let command = self
+                    .execute_extension_command(
+                        "navigate_url",
+                        json!({ "url": url, "active": true }),
+                        20_000,
+                    )
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Snapshot { .. } => {
+                let command = self
+                    .execute_extension_command("snapshot", json!({ "max_elements": 250 }), 20_000)
+                    .await?;
+                if command.ok.unwrap_or(false) {
+                    if let Some(ref_map) = command
+                        .data
+                        .get("result")
+                        .and_then(|value| value.get("ref_map"))
+                        .and_then(Value::as_object)
+                    {
+                        let mapped = ref_map
+                            .iter()
+                            .filter_map(|(key, value)| {
+                                value
+                                    .as_str()
+                                    .map(|selector| (key.clone(), selector.to_string()))
+                            })
+                            .collect();
+                        self.extension_bridge().set_snapshot_ref_map(mapped);
+                    }
+                }
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Click { selector } => {
+                let resolved = self.resolve_extension_selector(&selector)?;
+                let resolved_json = serde_json::to_string(&resolved)?;
+                let script = format!(
+                    r#"
+{}
+element.scrollIntoView({{ block: "center", inline: "center" }});
+element.click();
+return {{ clicked: true, tag: String(element.tagName || "").toLowerCase() }};
+"#,
+                    Self::extension_script_resolver(&resolved_json)
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Fill { selector, value } => {
+                let resolved = self.resolve_extension_selector(&selector)?;
+                let resolved_json = serde_json::to_string(&resolved)?;
+                let value_json = serde_json::to_string(&value)?;
+                let script = format!(
+                    r#"
+{}
+const nextValue = {value_json};
+element.scrollIntoView({{ block: "center", inline: "center" }});
+element.focus();
+if (element.isContentEditable) {{
+  element.textContent = nextValue;
+}} else {{
+  element.value = nextValue;
+}}
+element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+return {{ filled: true, value: nextValue }};
+"#,
+                    Self::extension_script_resolver(&resolved_json)
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Type { selector, text } => {
+                let resolved = self.resolve_extension_selector(&selector)?;
+                let resolved_json = serde_json::to_string(&resolved)?;
+                let text_json = serde_json::to_string(&text)?;
+                let script = format!(
+                    r#"
+{}
+const nextText = {text_json};
+element.scrollIntoView({{ block: "center", inline: "center" }});
+element.focus();
+if (element.isContentEditable) {{
+  element.textContent = `${{element.textContent || ""}}${{nextText}}`;
+}} else {{
+  const current = String(element.value || "");
+  element.value = current + nextText;
+}}
+element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+return {{ typed: nextText.length }};
+"#,
+                    Self::extension_script_resolver(&resolved_json)
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::GetText { selector } => {
+                let resolved = self.resolve_extension_selector(&selector)?;
+                let resolved_json = serde_json::to_string(&resolved)?;
+                let script = format!(
+                    r#"
+{}
+return {{ text: String(element.innerText || element.textContent || element.value || "") }};
+"#,
+                    Self::extension_script_resolver(&resolved_json)
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::GetTitle => {
+                let command = self
+                    .execute_extension_command(
+                        "run_script",
+                        json!({ "script": "return { title: String(document.title || \"\") };" }),
+                        10_000,
+                    )
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::GetUrl => {
+                let command = self
+                    .execute_extension_command(
+                        "run_script",
+                        json!({ "script": "return { url: String(location.href || \"\") };" }),
+                        10_000,
+                    )
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Screenshot { .. } => {
+                let command = self
+                    .execute_extension_command("screenshot", json!({ "format": "png" }), 20_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Wait { selector, ms, text } => {
+                let script = if let Some(selector) = selector {
+                    let resolved = self.resolve_extension_selector(&selector)?;
+                    let resolved_json = serde_json::to_string(&resolved)?;
+                    format!(
+                        r#"
+const selector = {resolved_json};
+const deadline = Date.now() + 10000;
+while (Date.now() < deadline) {{
+  const found = selector.startsWith("text=")
+    ? Array.from(document.querySelectorAll("*")).find((el) => String(el.innerText || el.textContent || "").includes(selector.slice(5)))
+    : document.querySelector(selector);
+  if (found) return {{ found: true }};
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}}
+throw new Error(`Timed out waiting for selector: ${{selector}}`);
+"#
+                    )
+                } else if let Some(ms) = ms {
+                    format!(
+                        "await new Promise((resolve) => setTimeout(resolve, {})); return {{ waited_ms: {} }};",
+                        ms, ms
+                    )
+                } else if let Some(text) = text {
+                    let text_json = serde_json::to_string(&text)?;
+                    format!(
+                        r#"
+const needle = {text_json};
+const deadline = Date.now() + 10000;
+while (Date.now() < deadline) {{
+  if (String(document.body?.innerText || "").includes(needle)) return {{ found_text: true }};
+  await new Promise((resolve) => setTimeout(resolve, 200));
+}}
+throw new Error(`Timed out waiting for text: ${{needle}}`);
+"#
+                    )
+                } else {
+                    "await new Promise((resolve) => setTimeout(resolve, 250)); return { waited_ms: 250 };".to_string()
+                };
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Press { key } => {
+                let key_json = serde_json::to_string(&key)?;
+                let script = format!(
+                    r#"
+const key = {key_json};
+const target = document.activeElement || document.body;
+target.dispatchEvent(new KeyboardEvent("keydown", {{ key, bubbles: true }}));
+target.dispatchEvent(new KeyboardEvent("keypress", {{ key, bubbles: true }}));
+target.dispatchEvent(new KeyboardEvent("keyup", {{ key, bubbles: true }}));
+return {{ pressed: key }};
+"#
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Hover { selector } => {
+                let resolved = self.resolve_extension_selector(&selector)?;
+                let resolved_json = serde_json::to_string(&resolved)?;
+                let script = format!(
+                    r#"
+{}
+element.dispatchEvent(new MouseEvent("mouseover", {{ bubbles: true }}));
+element.dispatchEvent(new MouseEvent("mouseenter", {{ bubbles: true }}));
+return {{ hovered: true }};
+"#,
+                    Self::extension_script_resolver(&resolved_json)
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Scroll { direction, pixels } => {
+                let pixels = pixels.unwrap_or(600);
+                let delta = match direction.as_str() {
+                    "up" => format!("-{}", pixels),
+                    "left" | "right" => "0".to_string(),
+                    _ => pixels.to_string(),
+                };
+                let script = if direction == "left" || direction == "right" {
+                    let dx = if direction == "left" {
+                        format!("-{}", pixels)
+                    } else {
+                        pixels.to_string()
+                    };
+                    format!("window.scrollBy({{ left: {}, top: 0, behavior: 'instant' }}); return {{ scrolled: true }};", dx)
+                } else {
+                    format!("window.scrollBy({{ left: 0, top: {}, behavior: 'instant' }}); return {{ scrolled: true }};", delta)
+                };
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::IsVisible { selector } => {
+                let resolved = self.resolve_extension_selector(&selector)?;
+                let resolved_json = serde_json::to_string(&resolved)?;
+                let script = format!(
+                    r#"
+{}
+const rect = element.getBoundingClientRect();
+const style = window.getComputedStyle(element);
+return {{
+  visible: !(style.display === "none" || style.visibility === "hidden" || (rect.width === 0 && rect.height === 0))
+}};
+"#,
+                    Self::extension_script_resolver(&resolved_json)
+                );
+                let command = self
+                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .await?;
+                Ok(extension_command_to_tool_result(command))
+            }
+            BrowserAction::Find {
+                by,
+                value,
+                action,
+                fill_value,
+            } => {
+                let selector = extension_selector_for_find(&by, &value);
+                match action.as_str() {
+                    "click" => {
+                        Box::pin(
+                            self.execute_extension_bridge_action(BrowserAction::Click { selector }),
+                        )
+                        .await
+                    }
+                    "fill" => {
+                        let value = fill_value.ok_or_else(|| {
+                            anyhow::anyhow!("find_action='fill' requires fill_value")
+                        })?;
+                        Box::pin(self.execute_extension_bridge_action(BrowserAction::Fill {
+                            selector,
+                            value,
+                        }))
+                        .await
+                    }
+                    "text" => {
+                        Box::pin(
+                            self.execute_extension_bridge_action(BrowserAction::GetText {
+                                selector,
+                            }),
+                        )
+                        .await
+                    }
+                    "hover" => {
+                        Box::pin(
+                            self.execute_extension_bridge_action(BrowserAction::Hover { selector }),
+                        )
+                        .await
+                    }
+                    "check" => {
+                        let resolved = self.resolve_extension_selector(&selector)?;
+                        let resolved_json = serde_json::to_string(&resolved)?;
+                        let script = format!(
+                            r#"
+{}
+const wasChecked = Boolean(element.checked);
+if (!wasChecked) {{
+  element.scrollIntoView({{ block: "center", inline: "center" }});
+  element.click();
+}}
+return {{
+  result: "checked",
+  checked_before: wasChecked,
+  checked_after: Boolean(element.checked)
+}};
+"#,
+                            Self::extension_script_resolver(&resolved_json)
+                        );
+                        let command = self
+                            .execute_extension_command(
+                                "run_script",
+                                json!({ "script": script }),
+                                15_000,
+                            )
+                            .await?;
+                        Ok(extension_command_to_tool_result(command))
+                    }
+                    _ => anyhow::bail!(
+                        "Unsupported find_action '{action}'. Use click/fill/text/hover/check"
+                    ),
+                }
+            }
+            BrowserAction::Close => Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action 'close' is unavailable for backend 'extension_bridge'".into()),
+                metadata: None,
+            }),
+        }
+    }
+
     async fn execute_action(
         &self,
         action: BrowserAction,
@@ -914,6 +1429,7 @@ impl BrowserTool {
         match backend {
             ResolvedBackend::AgentBrowser => self.execute_agent_browser_action(action).await,
             ResolvedBackend::RustNative => self.execute_rust_native_action(action).await,
+            ResolvedBackend::ExtensionBridge => self.execute_extension_bridge_action(action).await,
             ResolvedBackend::ComputerUse => anyhow::bail!(
                 "Internal error: computer_use backend must be handled before BrowserAction parsing"
             ),
@@ -952,10 +1468,12 @@ impl Tool for BrowserTool {
 
     fn description(&self) -> &str {
         concat!(
-            "Web/browser automation with pluggable backends (agent-browser, rust-native, computer_use). ",
+            "Web/browser automation with pluggable backends (agent-browser, rust-native, computer_use, extension_bridge). ",
             "Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, ",
-            "key_type, key_press, screen_capture) through a computer-use sidecar. Use 'snapshot' to map ",
-            "interactive elements to refs (@e1, @e2). Enforces browser.allowed_domains for open actions."
+            "key_type, key_press, screen_capture) through a computer-use sidecar. For normal websites and logged-in web apps, ",
+            "prefer open -> snapshot -> find/fill/click/press/get_text. Use 'snapshot' to map interactive elements to refs ",
+            "(@e1, @e2). Window/tab management and OS-level mouse/keyboard actions are only for computer_use-style backends. ",
+            "Enforces browser.allowed_domains for open actions."
         )
     }
 
@@ -971,7 +1489,7 @@ impl Tool for BrowserTool {
                              "list_windows", "focus_window", "list_tabs", "focus_tab", "verify_artifact",
                              "mouse_move", "mouse_click", "mouse_drag", "key_type",
                              "key_press", "screen_capture"],
-                    "description": "Browser action to perform (OS-level actions require backend=computer_use)"
+                    "description": "Browser action to perform. For websites use open/snapshot/find/fill/click/press/get_text. Window/tab management and OS-level actions require backend=computer_use."
                 },
                 "url": {
                     "type": "string",
@@ -979,7 +1497,7 @@ impl Tool for BrowserTool {
                 },
                 "selector": {
                     "type": "string",
-                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or text=..."
+                    "description": "Element selector: @ref (e.g. @e1), CSS (#id, .class), or semantic selectors like text=..., label=..., placeholder=..., role=..., testid=..."
                 },
                 "value": {
                     "type": "string",
@@ -2059,11 +2577,58 @@ fn is_computer_use_only_action(action: &str) -> bool {
     )
 }
 
+fn extension_selector_for_find(by: &str, value: &str) -> String {
+    match by {
+        "role" => format!("role={value}"),
+        "label" => format!("label={value}"),
+        "placeholder" => format!("placeholder={value}"),
+        "testid" => format!("testid={value}"),
+        _ => format!("text={value}"),
+    }
+}
+
 fn backend_name(backend: ResolvedBackend) -> &'static str {
     match backend {
         ResolvedBackend::AgentBrowser => "agent_browser",
         ResolvedBackend::RustNative => "rust_native",
         ResolvedBackend::ComputerUse => "computer_use",
+        ResolvedBackend::ExtensionBridge => "extension_bridge",
+    }
+}
+
+fn extension_command_to_tool_result(command: crate::browser_bridge::BrowserCommand) -> ToolResult {
+    if command.ok.unwrap_or(false) {
+        let output = if command.data.is_null() {
+            serde_json::to_string_pretty(&json!({
+                "backend": "extension_bridge",
+                "command_type": command.command_type,
+                "output": command.output,
+            }))
+            .unwrap_or_default()
+        } else {
+            serde_json::to_string_pretty(&command.data).unwrap_or_default()
+        };
+
+        ToolResult {
+            success: true,
+            output,
+            error: None,
+            metadata: None,
+        }
+    } else {
+        ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some(if command.output.trim().is_empty() {
+                format!(
+                    "Browser extension command '{}' failed",
+                    command.command_type
+                )
+            } else {
+                command.output
+            }),
+            metadata: None,
+        }
     }
 }
 
@@ -2369,6 +2934,10 @@ mod tests {
             BrowserBackendKind::ComputerUse
         );
         assert_eq!(
+            BrowserBackendKind::parse("extension_bridge").unwrap(),
+            BrowserBackendKind::ExtensionBridge
+        );
+        assert_eq!(
             BrowserBackendKind::parse("auto").unwrap(),
             BrowserBackendKind::Auto
         );
@@ -2383,10 +2952,7 @@ mod tests {
     fn browser_tool_default_backend_is_agent_browser() {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new(security, vec!["example.com".into()], None);
-        assert_eq!(
-            tool.configured_backend().unwrap(),
-            BrowserBackendKind::AgentBrowser
-        );
+        assert_eq!(tool.configured_backend().unwrap(), BrowserBackendKind::AgentBrowser);
     }
 
     #[test]
@@ -2421,6 +2987,25 @@ mod tests {
         assert_eq!(
             tool.configured_backend().unwrap(),
             BrowserBackendKind::ComputerUse
+        );
+    }
+
+    #[test]
+    fn browser_tool_accepts_extension_bridge_backend_config() {
+        let security = Arc::new(SecurityPolicy::default());
+        let tool = BrowserTool::new_with_backend(
+            security,
+            vec!["example.com".into()],
+            None,
+            "extension_bridge".into(),
+            true,
+            "http://127.0.0.1:9515".into(),
+            None,
+            ComputerUseConfig::default(),
+        );
+        assert_eq!(
+            tool.configured_backend().unwrap(),
+            BrowserBackendKind::ExtensionBridge
         );
     }
 
@@ -2558,6 +3143,47 @@ mod tests {
             unavailable_action_for_backend_error("mouse_move", ResolvedBackend::RustNative),
             "Action 'mouse_move' is unavailable for backend 'rust_native'"
         );
+        assert_eq!(
+            unavailable_action_for_backend_error("mouse_move", ResolvedBackend::ExtensionBridge),
+            "Action 'mouse_move' is unavailable for backend 'extension_bridge'"
+        );
+    }
+
+    #[test]
+    fn extension_selector_for_find_supports_semantic_locators() {
+        assert_eq!(extension_selector_for_find("text", "Post"), "text=Post");
+        assert_eq!(extension_selector_for_find("label", "Email"), "label=Email");
+        assert_eq!(
+            extension_selector_for_find("placeholder", "What is happening?"),
+            "placeholder=What is happening?"
+        );
+        assert_eq!(extension_selector_for_find("role", "button"), "role=button");
+        assert_eq!(
+            extension_selector_for_find("testid", "tweetButton"),
+            "testid=tweetButton"
+        );
+    }
+
+    #[test]
+    fn browser_tool_schema_guides_dom_actions_for_websites() {
+        let tool = BrowserTool::new(
+            Arc::new(SecurityPolicy::default()),
+            vec!["*".into()],
+            Some("test".into()),
+        );
+
+        let schema = tool.parameters_schema();
+        assert!(tool
+            .description()
+            .contains("prefer open -> snapshot -> find/fill/click/press/get_text"));
+        assert!(schema["properties"]["action"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("For websites use open/snapshot/find/fill/click/press/get_text"));
+        assert!(schema["properties"]["selector"]["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("label=..., placeholder=..., role=..., testid=..."));
     }
 
     #[test]

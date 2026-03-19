@@ -422,6 +422,8 @@ impl DelegateTool {
                 None,
                 None,
                 &[],
+                None,
+                &std::collections::HashMap::new(),
             ),
         )
         .await;
