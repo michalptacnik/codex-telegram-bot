@@ -74,13 +74,25 @@ function renderStatus(response) {
 }
 
 async function refresh() {
+  // Don't overwrite fields the user is actively editing.
+  const focused = document.activeElement;
+  const editingFields = focused === els.baseUrl || focused === els.token;
+
   const response = await askBackground({ type: "bridge_status" });
   if (!response || !response.ok) {
     setStatus(false, "state: inactive");
     setError(response && response.error ? response.error : "Failed to read bridge state.");
     return;
   }
-  renderStatus(response);
+  if (!editingFields) {
+    renderStatus(response);
+  } else {
+    // Only update status/error display; leave input fields alone.
+    const cfg = (response && response.config) || {};
+    const state = (response && response.state) || {};
+    const active = String(state.bridgeStatus || "inactive") === "active";
+    setStatus(active, `state: ${state.bridgeStatus || "inactive"}`);
+  }
 }
 
 async function saveSettings() {
@@ -88,13 +100,23 @@ async function saveSettings() {
   const token = String(els.token.value || "").trim();
   const enabled = Boolean(els.enabled.checked);
 
+  // Write to storage first, then immediately reflect the saved values in the
+  // UI from storage (not from the background response, which may be stale or
+  // mid-cycle from an old URL and would race with the refresh() timer to
+  // revert the field back to the old value).
   await setStorage({ baseUrl, token, enabled });
-  const response = await askBackground({ type: "bridge_config_updated" });
-  if (!response || !response.ok) {
-    setError(response && response.error ? response.error : "Failed to apply settings.");
-    return;
-  }
-  renderStatus(response);
+  els.baseUrl.value = baseUrl;
+  els.token.value = token;
+  els.enabled.checked = enabled;
+  setError("");
+
+  // Notify background to pick up the new config; ignore failures — the next
+  // alarm-driven heartbeat will use the freshly saved URL anyway.
+  askBackground({ type: "bridge_config_updated" }).then((response) => {
+    if (response && response.ok) {
+      renderStatus(response);
+    }
+  }).catch(() => {});
 }
 
 async function pingNow() {

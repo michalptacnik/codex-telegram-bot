@@ -125,6 +125,12 @@ fn browser_bridge_status_payload(
 // ── Query parameters ─────────────────────────────────────────────
 
 #[derive(Deserialize)]
+pub struct ExtensionPollQuery {
+    pub instance_id: String,
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
 pub struct MemoryQuery {
     pub query: Option<String>,
     pub category: Option<String>,

@@ -2949,6 +2949,7 @@ pub async fn run(
         &config.agents,
         config.api_key.as_deref(),
         &config,
+        None, // CLI run() has no bridge; bridge is only available in gateway context
     );
     // Append SOP tools (built here so crate types resolve correctly in lib context).
     tools_registry.extend(tools::make_sop_tools(&config));
@@ -3385,7 +3386,11 @@ pub async fn run(
 
 /// Process a single message through the full agent (with tools, peripherals, memory).
 /// Used by channels (Telegram, Discord, etc.) to enable hardware and tool use.
-pub async fn process_message(config: Config, message: &str) -> Result<String> {
+pub async fn process_message(
+    config: Config,
+    message: &str,
+    browser_bridge: Option<std::sync::Arc<crate::browser_bridge::BrowserBridge>>,
+) -> Result<String> {
     let observer: Arc<dyn Observer> =
         Arc::from(observability::create_observer(&config.observability));
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
@@ -3423,6 +3428,7 @@ pub async fn process_message(config: Config, message: &str) -> Result<String> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
+        browser_bridge,
     );
     // Append SOP tools (built here so crate types resolve correctly in lib context).
     tools_registry.extend(tools::make_sop_tools(&config));

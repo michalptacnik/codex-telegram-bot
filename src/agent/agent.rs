@@ -283,6 +283,7 @@ impl Agent {
             &config.agents,
             config.api_key.as_deref(),
             config,
+            None,
         );
         // Append SOP tools (built here so crate types resolve correctly in lib context).
         tools.extend(tools::make_sop_tools(config));
