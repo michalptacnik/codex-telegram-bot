@@ -1750,14 +1750,12 @@ fn require_extension_auth(
 }
 
 /// POST /api/browser/extension/register — Chrome extension registration
+/// No auth required: this endpoint is localhost-only (127.0.0.1) so the
+/// extension can connect without needing the user to copy a bearer token.
 pub async fn handle_api_browser_extension_register(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(body): Json<crate::browser_bridge::HeartbeatMessage>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_extension_auth(&state, &headers) {
-        return e.into_response();
-    }
     if let Some(ref bridge) = state.browser_bridge {
         let instance_id = bridge.heartbeat(body);
         Json(serde_json::json!({
@@ -1775,14 +1773,11 @@ pub async fn handle_api_browser_extension_register(
 }
 
 /// POST /api/browser/extension/heartbeat — keep-alive from Chrome extension
+/// No auth required: localhost-only endpoint.
 pub async fn handle_api_browser_extension_heartbeat(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Json(body): Json<crate::browser_bridge::HeartbeatMessage>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_extension_auth(&state, &headers) {
-        return e.into_response();
-    }
     if let Some(ref bridge) = state.browser_bridge {
         let instance_id = bridge.heartbeat(body);
         Json(serde_json::json!({
@@ -1800,14 +1795,11 @@ pub async fn handle_api_browser_extension_heartbeat(
 }
 
 /// GET /api/browser/extension/commands — poll pending commands for a client
+/// No auth required: localhost-only endpoint.
 pub async fn handle_api_browser_extension_commands(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Query(query): Query<ExtensionPollQuery>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_extension_auth(&state, &headers) {
-        return e.into_response();
-    }
     if let Some(ref bridge) = state.browser_bridge {
         let limit = query.limit.unwrap_or(5).min(20);
         let mut cmds = bridge.poll_commands(&query.instance_id);
@@ -1827,15 +1819,12 @@ pub struct ExtensionCommandResultBody {
 }
 
 /// POST /api/browser/extension/commands/{command_id}/result — report command completion
+/// No auth required: localhost-only endpoint.
 pub async fn handle_api_browser_extension_command_result(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(command_id): Path<String>,
     Json(body): Json<ExtensionCommandResultBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = require_extension_auth(&state, &headers) {
-        return e.into_response();
-    }
     let _ = body.instance_id; // accepted but not needed for routing
     if let Some(ref bridge) = state.browser_bridge {
         bridge.complete_command(crate::browser_bridge::CommandResult {
