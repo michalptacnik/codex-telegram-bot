@@ -1,14 +1,36 @@
+# Rust build artifacts
+target/
+**/*.rs.bk
+
+# Environment and secrets
+.env
+.env.*
+
+# macOS
+.DS_Store
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Runtime data (created at runtime, not committed)
+.codex-telegram-bot/
+.session_workspaces/
+.runtime-config/
+.runtime-workspace/
+
+# Database files (local state)
+*.db
+*.db-journal
+
+# Python legacy (safe to keep until fully purged)
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
 venv/
-.env
 .pytest_cache/
 .mypy_cache/
-.DS_Store
 dist/
-.codex-telegram-bot/
-.session_workspaces/
-.runtime-config/
-.runtime-workspace/

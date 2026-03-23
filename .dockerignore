@@ -1,0 +1,44 @@
+# Build artifacts
+target
+
+# Version control
+.git
+.githooks
+.github
+
+# Documentation and media (not needed in container)
+docs
+examples
+tests
+*.md
+*.png
+LICENSE
+deny.toml
+
+# Database files
+*.db
+*.db-journal
+
+# Environment and secrets
+.env
+.env.*
+.tmp_*
+
+# macOS artifacts
+.DS_Store
+
+# IDE / editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Claude worktrees and config
+.claude
+
+# Keep build essentials:
+# - Cargo.toml
+# - Cargo.lock
+# - src/
+# - build.rs (if any)
+# - crates/ (workspace members)

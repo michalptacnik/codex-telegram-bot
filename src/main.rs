@@ -45,55 +45,16 @@ fn parse_temperature(s: &str) -> std::result::Result<f64, String> {
     config::schema::validate_temperature(t)
 }
 
-mod agent;
-mod approval;
-mod auth;
-mod channels;
-mod rag {
-    pub use zeroclaw::rag::*;
-}
-mod config;
-mod cost;
-mod cron;
-mod daemon;
-mod doctor;
-mod gateway;
-mod hardware;
-mod health;
-mod heartbeat;
-mod hooks;
-mod identity;
-mod integrations;
-mod memory;
-mod migration;
-mod multimodal;
-mod observability;
-mod onboard;
-mod peripherals;
-mod providers;
-mod runtime;
-mod security;
-mod service;
-mod skillforge;
-mod skills;
-mod tools;
-mod tunnel;
-mod util;
-
-// ── Agent HQ modules (ported from codex-telegram-bot) ───────────
-mod browser_bridge;
-mod missions;
-mod plugins;
-mod sessions;
-mod sop;
-mod soul;
-
-use config::Config;
-
-// Re-export so binary modules can use crate::<CommandEnum> while keeping a single source of truth.
-pub use zeroclaw::{
-    ChannelCommands, CronCommands, GatewayCommands, HardwareCommands, IntegrationCommands,
-    MigrateCommands, PeripheralCommands, ServiceCommands, SkillCommands, SopCommands,
+// ── Import all modules from the ZeroClaw library ─────────────────
+// The binary is a thin CLI dispatcher; all logic lives in the library.
+use zeroclaw::config::Config;
+use zeroclaw::{
+    agent, auth, channels, config, cron, daemon, doctor, gateway, hardware, integrations, memory,
+    migration, observability, onboard, peripherals, providers, security, service, skills,
+};
+use zeroclaw::{
+    ChannelCommands, CronCommands, IntegrationCommands, MemoryCommands, MigrateCommands,
+    ServiceCommands, SkillCommands,
 };
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, ValueEnum)]
@@ -629,35 +590,7 @@ enum DoctorCommands {
     },
 }
 
-#[derive(Subcommand, Debug)]
-enum MemoryCommands {
-    /// List memory entries with optional filters
-    List {
-        #[arg(long)]
-        category: Option<String>,
-        #[arg(long)]
-        session: Option<String>,
-        #[arg(long, default_value = "50")]
-        limit: usize,
-        #[arg(long, default_value = "0")]
-        offset: usize,
-    },
-    /// Get a specific memory entry by key
-    Get { key: String },
-    /// Show memory backend statistics and health
-    Stats,
-    /// Clear memories by category, by key, or clear all
-    Clear {
-        /// Delete a single entry by key (supports prefix match)
-        #[arg(long)]
-        key: Option<String>,
-        #[arg(long)]
-        category: Option<String>,
-        /// Skip confirmation prompt
-        #[arg(long)]
-        yes: bool,
-    },
-}
+// MemoryCommands is imported from zeroclaw::MemoryCommands (defined in lib.rs)
 
 #[tokio::main]
 #[allow(clippy::too_many_lines)]
@@ -739,8 +672,7 @@ async fn main() -> Result<()> {
 
         // Handle --reinit: backup and reset configuration
         if reinit {
-            let (zeroclaw_dir, _) =
-                crate::config::schema::resolve_runtime_dirs_for_onboarding().await?;
+            let (zeroclaw_dir, _) = config::schema::resolve_runtime_dirs_for_onboarding().await?;
 
             if zeroclaw_dir.exists() {
                 let timestamp = chrono::Local::now().format("%Y%m%d%H%M%S");
@@ -2052,7 +1984,7 @@ async fn handle_auth_command(auth_command: AuthCommands, config: &Config) -> Res
                     marker,
                     id,
                     profile.kind,
-                    crate::security::redact(profile.account_id.as_deref().unwrap_or("unknown")),
+                    security::redact(profile.account_id.as_deref().unwrap_or("unknown")),
                     format_expiry(profile)
                 );
             }
