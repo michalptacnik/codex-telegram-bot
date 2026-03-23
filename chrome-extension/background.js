@@ -1,8 +1,11 @@
 const EXTENSION_VERSION = String((chrome.runtime.getManifest() || {}).version || "0.0.0");
-const SUPPORTED_COMMANDS = ["open_url", "navigate_url", "run_script", "snapshot", "screenshot"];
+const SUPPORTED_COMMANDS = [
+  "open_url", "navigate_url", "run_script", "snapshot", "screenshot",
+  "click", "type", "fill", "hover", "press", "scroll", "select", "wait", "get_text"
+];
 
 const DEFAULT_CONFIG = {
-  baseUrl: "http://127.0.0.1:42617",
+  baseUrl: "http://127.0.0.1:8765",
   token: "",
   enabled: true,
   instanceId: ""
@@ -142,9 +145,19 @@ async function setStored(values) {
 
 async function loadConfig() {
   const stored = await getStored(["baseUrl", "token", "enabled", "instanceId"]);
-  const baseUrl = normalizeBaseUrl(stored.baseUrl || DEFAULT_CONFIG.baseUrl);
-  if (baseUrl !== String(stored.baseUrl || "").trim()) {
-    await setStored({ baseUrl });
+  // Auto-correct: if storage has a URL that isn't the canonical default and
+  // doesn't respond, fall back to DEFAULT_CONFIG.baseUrl so the extension
+  // self-heals after a daemon restart on a different port.
+  let baseUrl = normalizeBaseUrl(stored.baseUrl || DEFAULT_CONFIG.baseUrl);
+  if (baseUrl !== DEFAULT_CONFIG.baseUrl) {
+    const probeOk = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(1500) })
+      .then((r) => r.ok)
+      .catch(() => false);
+    if (!probeOk) {
+      // Stored URL is dead; reset to default and persist so popup shows the right value.
+      baseUrl = DEFAULT_CONFIG.baseUrl;
+      await setStored({ baseUrl });
+    }
   }
   return {
     baseUrl,
@@ -587,6 +600,186 @@ async function executeScriptViaDebugger(tabId, script) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Type via CDP — uses Input.insertText which sends fully-trusted text input.
+// Required for React/Draft.js editors (e.g. X/Twitter compose) in Chrome 86+
+// where programmatic execCommand/beforeinput events are ignored by the editor.
+// ---------------------------------------------------------------------------
+async function typeViaCDP(payload) {
+  const selector = String(payload.selector || "").trim();
+  const text = String(payload.text || payload.value || "").trim();
+  if (!text) {
+    return { ok: false, output: "type_cdp: missing text/value", data: {} };
+  }
+
+  const tabId = await resolveTargetTabId(payload);
+  if (!tabId) {
+    return { ok: false, output: "type_cdp: no active tab", data: {} };
+  }
+
+  let attached = false;
+  try {
+    await _debuggerAttach(tabId);
+    attached = true;
+
+    // Use a trusted CDP mouse click to focus the element (isTrusted: true).
+    // el.focus() via Runtime.evaluate produces isTrusted:false which Draft.js
+    // ignores, leaving editorState empty and the Post button disabled.
+    if (selector) {
+      const boundsResult = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+        expression: `JSON.stringify((function(){
+          var el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return null;
+          var r = el.getBoundingClientRect();
+          return {left: r.left, top: r.top, width: r.width, height: r.height, found: true};
+        })())`,
+        returnByValue: true
+      });
+      const boundsStr = boundsResult && boundsResult.result && boundsResult.result.value;
+      const bounds = boundsStr ? JSON.parse(boundsStr) : null;
+
+      if (bounds && bounds.found && bounds.width > 0) {
+        const x = Math.round(bounds.left + bounds.width / 2);
+        const y = Math.round(bounds.top + bounds.height / 2);
+        // Trusted mouse press+release = trusted focus event that Draft.js accepts
+        await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mousePressed", x, y, button: "left", clickCount: 1, buttons: 1
+        });
+        await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseReleased", x, y, button: "left", clickCount: 1, buttons: 0
+        });
+        // Give Draft.js time to register focus and initialise editor state
+        await new Promise(r => setTimeout(r, 150));
+      } else {
+        return { ok: false, output: `type_cdp: element not found: ${selector}`, data: {} };
+      }
+    }
+
+    // Select all existing text + delete, then insert fresh text
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyDown", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyUp", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8
+    });
+
+    // Insert text as trusted OS-level input (isTrusted: true, fires beforeinput+input)
+    await _debuggerSendCommand(tabId, "Input.insertText", { text });
+
+    // Small pause then verify button is enabled
+    await new Promise(r => setTimeout(r, 200));
+    const btnCheck = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: `(function(){
+        var btn = document.querySelector('[data-testid="tweetButtonInline"]');
+        if (!btn) return "btn_not_found";
+        var disabled = btn.getAttribute("aria-disabled") || btn.disabled;
+        return disabled ? "disabled" : "enabled";
+      })()`,
+      returnByValue: true
+    });
+    const btnState = btnCheck && btnCheck.result && btnCheck.result.value || "unknown";
+
+    return {
+      ok: true,
+      output: `Typed ${text.length} chars into: ${selector || "(active element)"} | post_button=${btnState}`,
+      data: { tab_id: tabId, engine: "cdp", post_button: btnState }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return { ok: false, output: `type_cdp failed: ${msg}`, data: { error: msg } };
+  } finally {
+    if (attached) {
+      try { await _debuggerDetach(tabId); } catch (_) {}
+    }
+  }
+}
+
+async function clickViaCDP(payload) {
+  const selector = String(payload.selector || "").trim();
+  if (!selector) {
+    return { ok: false, output: "click_cdp: missing selector", data: {} };
+  }
+
+  const tabId = await resolveTargetTabId(payload);
+  if (!tabId) {
+    return { ok: false, output: "click_cdp: no active tab", data: {} };
+  }
+
+  let attached = false;
+  try {
+    await _debuggerAttach(tabId);
+    attached = true;
+
+    const boundsResult = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: `JSON.stringify((function(){
+        var el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null;
+        var r = el.getBoundingClientRect();
+        return {
+          left: r.left,
+          top: r.top,
+          width: r.width,
+          height: r.height,
+          found: true
+        };
+      })())`,
+      returnByValue: true
+    });
+    const boundsStr = boundsResult && boundsResult.result && boundsResult.result.value;
+    const bounds = boundsStr ? JSON.parse(boundsStr) : null;
+
+    if (!(bounds && bounds.found && bounds.width > 0 && bounds.height > 0)) {
+      return { ok: false, output: `click_cdp: element not found: ${selector}`, data: {} };
+    }
+
+    const x = Math.round(bounds.left + bounds.width / 2);
+    const y = Math.round(bounds.top + bounds.height / 2);
+
+    await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+      button: "none",
+      buttons: 0
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+      buttons: 1
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+      buttons: 0
+    });
+
+    return {
+      ok: true,
+      output: `Clicked: ${selector}`,
+      data: { tab_id: tabId, engine: "cdp" }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return { ok: false, output: `click_cdp failed: ${msg}`, data: { error: msg } };
+  } finally {
+    if (attached) {
+      try { await _debuggerDetach(tabId); } catch (_) {}
+    }
+  }
+}
+
 async function resolveTargetTabId(payload) {
   const explicit = Number(payload.tab_id || payload.tabId || 0);
   if (Number.isInteger(explicit) && explicit > 0) {
@@ -859,12 +1052,124 @@ async function executeScreenshot(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// Content-script relay — sends actions to the content script in the active tab
+// ---------------------------------------------------------------------------
+
+const CONTENT_ACTIONS = new Set([
+  "click", "type", "fill", "hover", "press", "scroll", "select", "wait", "get_text"
+]);
+
+async function ensureContentScript(tabId) {
+  // Attempt to inject content.js if it wasn't auto-injected (e.g. tab loaded
+  // before extension installed).  Silently ignore errors — the static
+  // content_scripts declaration covers the common case.
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ["content.js"]
+    });
+  } catch (_err) {
+    // Already injected or tab not scriptable — ignore
+  }
+}
+
+async function relayToContentScript(action, payload) {
+  const tabId = await resolveTargetTabId(payload || {});
+  if (!tabId) {
+    return { ok: false, output: "No target tab available.", data: {} };
+  }
+
+  await ensureContentScript(tabId);
+
+  return new Promise((resolve) => {
+    const timeoutMs = Number(payload.timeout || 15000);
+    let settled = false;
+
+    const timer = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve({
+          ok: false,
+          output: `Content action '${action}' timed out on tab ${tabId}`,
+          data: { tab_id: tabId, error: "timeout" }
+        });
+      }
+    }, timeoutMs);
+
+    try {
+      chrome.tabs.sendMessage(
+        tabId,
+        { source: "agenthq-bridge", action, payload },
+        (response) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+
+          const lastErr = chrome.runtime.lastError;
+          if (lastErr) {
+            resolve({
+              ok: false,
+              output: `Content script error on tab ${tabId}: ${lastErr.message || lastErr}`,
+              data: { tab_id: tabId, error: String(lastErr.message || lastErr) }
+            });
+            return;
+          }
+
+          if (!response) {
+            resolve({
+              ok: false,
+              output: `No response from content script on tab ${tabId}`,
+              data: { tab_id: tabId, error: "no_response" }
+            });
+            return;
+          }
+
+          resolve({
+            ok: Boolean(response.ok),
+            output: String(response.output || response.error || ""),
+            data: { tab_id: tabId, ...(response.data || {}) }
+          });
+        }
+      );
+    } catch (err) {
+      if (!settled) {
+        settled = true;
+        clearTimeout(timer);
+        resolve({
+          ok: false,
+          output: `Failed to relay to content script: ${err}`,
+          data: { tab_id: tabId, error: String(err) }
+        });
+      }
+    }
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Command dispatch
 // ---------------------------------------------------------------------------
 
 async function executeCommand(command) {
   const type = String(command.command_type || "");
   const payload = command.payload || {};
+
+  // type uses CDP Input.insertText for trusted text entry (required for React/Draft.js editors)
+  if (type === "type") {
+    return await typeViaCDP(payload);
+  }
+
+  if (type === "click") {
+    const trustedClick = await clickViaCDP(payload);
+    if (trustedClick.ok) {
+      return trustedClick;
+    }
+  }
+
+  // Content-script actions (click, fill, hover, press, scroll, select, wait, get_text)
+  if (CONTENT_ACTIONS.has(type)) {
+    return await relayToContentScript(type, payload);
+  }
+
   if (type === "open_url") {
     const url = String(payload.url || "").trim();
     if (!url) {

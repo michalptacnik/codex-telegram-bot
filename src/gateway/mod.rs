@@ -39,6 +39,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tower_http::cors::{Any, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
@@ -404,6 +405,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         &config.agents,
         config.api_key.as_deref(),
         &config,
+        None, // bridge not yet created at spec-build time; populated per-request in process_message
     );
     let tools_registry: Arc<Vec<ToolSpec>> =
         Arc::new(tools_registry_raw.iter().map(|t| t.spec()).collect());
@@ -673,7 +675,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         session_store: Some(Arc::new(Mutex::new(crate::sessions::SessionStore::new(
             &config.workspace_dir.join("sessions.json"),
         )))),
-        browser_bridge: Some(crate::browser_bridge::global_bridge()),
+        browser_bridge: Some(crate::browser_bridge::BrowserBridge::global()),
     };
 
     // Config PUT needs larger body limit (1MB)
@@ -794,6 +796,17 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(REQUEST_TIMEOUT_SECS),
         ))
+        // Allow Chrome extensions to reach this localhost gateway.
+        // Chrome's Private Network Access policy (enforced since Chrome 130)
+        // requires `Access-Control-Allow-Private-Network: true` on responses to
+        // localhost/127.0.0.1 from extension service workers.
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .allow_private_network(true),
+        )
         // ── SPA fallback: non-API GET requests serve index.html ──
         .fallback(get(static_files::handle_spa_fallback));
 
@@ -963,7 +976,7 @@ async fn run_gateway_chat_simple(state: &AppState, message: &str) -> anyhow::Res
 /// Full-featured chat with tools for channel handlers (WhatsApp, Linq, Nextcloud Talk).
 async fn run_gateway_chat_with_tools(state: &AppState, message: &str) -> anyhow::Result<String> {
     let config = state.config.lock().clone();
-    crate::agent::process_message(config, message).await
+    crate::agent::process_message(config, message, state.browser_bridge.clone()).await
 }
 
 /// Webhook request body
@@ -1087,7 +1100,7 @@ async fn handle_webhook(
             messages_count: 1,
         });
 
-    match run_gateway_chat_simple(&state, message).await {
+    match run_gateway_chat_with_tools(&state, message).await {
         Ok(response) => {
             let duration = started_at.elapsed();
             state

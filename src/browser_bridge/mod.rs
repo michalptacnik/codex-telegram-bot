@@ -12,7 +12,17 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
+use tracing::debug;
 use uuid::Uuid;
+
+// ── Global singleton ─────────────────────────────────────────────
+//
+// A single BrowserBridge instance is shared across the gateway and all channel
+// loops so that the Chrome extension (which connects to the gateway's HTTP
+// endpoints) and standalone channel agents (Telegram, Discord, Slack…) all
+// enqueue into and read from the same command queue.
+
+static GLOBAL_BRIDGE: OnceLock<Arc<BrowserBridge>> = OnceLock::new();
 
 // ── Constants ────────────────────────────────────────────────────
 
@@ -124,6 +134,18 @@ impl BrowserBridge {
         }
     }
 
+    /// Return the process-global shared bridge instance.
+    ///
+    /// Both the gateway (which hosts the extension HTTP endpoints) and the
+    /// channel loops (Telegram, Discord, Slack…) call this so they all share
+    /// one command queue.  The Chrome extension connects to the gateway; its
+    /// commands flow into this singleton and are visible to every agent.
+    pub fn global() -> Arc<Self> {
+        GLOBAL_BRIDGE
+            .get_or_init(|| Arc::new(Self::new()))
+            .clone()
+    }
+
     /// Process a heartbeat from a Chrome extension client.
     pub fn heartbeat(&self, msg: HeartbeatMessage) -> String {
         let now = Utc::now();
@@ -161,6 +183,14 @@ impl BrowserBridge {
                 .lock()
                 .insert(instance_id.clone(), cmds);
         }
+        let stored_clients = clients.len();
+        drop(clients);
+        debug!(
+            instance_id = %instance_id,
+            active_clients = self.active_clients().len(),
+            stored_clients,
+            "browser bridge heartbeat recorded"
+        );
 
         instance_id
     }
@@ -285,7 +315,11 @@ impl BrowserBridge {
             .filter(|c| (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec)
             .cloned()
             .collect();
-        active.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+        // Sort oldest-first so the earliest-registered client (the user's
+        // primary Chrome window) is always preferred over later-joined
+        // sidecars (e.g. Atlas/OpenAI). last_seen_at ordering is
+        // non-deterministic when multiple clients heartbeat at similar rates.
+        active.sort_by_key(|c| c.created_at);
         active
     }
 
@@ -340,12 +374,19 @@ impl BrowserBridge {
             .filter(|c| c.status == CommandStatus::Completed)
             .count();
 
-        BridgeStatus {
+        let status = BridgeStatus {
             active_clients: active.len(),
             clients: active,
             pending_commands: pending,
             completed_commands: completed,
-        }
+        };
+        debug!(
+            active_clients = status.active_clients,
+            pending_commands = status.pending_commands,
+            completed_commands = status.completed_commands,
+            "browser bridge status requested"
+        );
+        status
     }
 
     /// Set the snapshot ref map (CSS selector mappings from last DOM snapshot).
