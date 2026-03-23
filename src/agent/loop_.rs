@@ -3490,6 +3490,14 @@ pub async fn process_message(
     ];
     if config.browser.enabled {
         tool_descs.push(("browser_open", "Open approved URLs in browser."));
+        tool_descs.push((
+            "browser",
+            "Automate websites and logged-in web apps with open, snapshot, type, click, and proof-oriented browser actions.",
+        ));
+        tool_descs.push((
+            "browser_ext",
+            "Control the live browser extension session for logged-in sites; supports browser selection when multiple clients are connected.",
+        ));
     }
     if config.composio.enabled {
         tool_descs.push(("composio", "Execute actions on 1000+ apps via Composio."));

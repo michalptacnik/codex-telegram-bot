@@ -1134,86 +1134,37 @@ if (!element) {{
             }
             BrowserAction::Click { selector } => {
                 let resolved = self.resolve_extension_selector(&selector)?;
-                let resolved_json = serde_json::to_string(&resolved)?;
-                let script = format!(
-                    r#"
-{}
-element.scrollIntoView({{ block: "center", inline: "center" }});
-element.click();
-return {{ clicked: true, tag: String(element.tagName || "").toLowerCase() }};
-"#,
-                    Self::extension_script_resolver(&resolved_json)
-                );
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .execute_extension_command("click", json!({ "selector": resolved }), 15_000)
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::Fill { selector, value } => {
                 let resolved = self.resolve_extension_selector(&selector)?;
-                let resolved_json = serde_json::to_string(&resolved)?;
-                let value_json = serde_json::to_string(&value)?;
-                let script = format!(
-                    r#"
-{}
-const nextValue = {value_json};
-element.scrollIntoView({{ block: "center", inline: "center" }});
-element.focus();
-if (element.isContentEditable) {{
-  element.textContent = nextValue;
-}} else {{
-  element.value = nextValue;
-}}
-element.dispatchEvent(new Event("input", {{ bubbles: true }}));
-element.dispatchEvent(new Event("change", {{ bubbles: true }}));
-return {{ filled: true, value: nextValue }};
-"#,
-                    Self::extension_script_resolver(&resolved_json)
-                );
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .execute_extension_command(
+                        "fill",
+                        json!({ "selector": resolved, "value": value }),
+                        15_000,
+                    )
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::Type { selector, text } => {
                 let resolved = self.resolve_extension_selector(&selector)?;
-                let resolved_json = serde_json::to_string(&resolved)?;
-                let text_json = serde_json::to_string(&text)?;
-                let script = format!(
-                    r#"
-{}
-const nextText = {text_json};
-element.scrollIntoView({{ block: "center", inline: "center" }});
-element.focus();
-if (element.isContentEditable) {{
-  element.textContent = `${{element.textContent || ""}}${{nextText}}`;
-}} else {{
-  const current = String(element.value || "");
-  element.value = current + nextText;
-}}
-element.dispatchEvent(new Event("input", {{ bubbles: true }}));
-element.dispatchEvent(new Event("change", {{ bubbles: true }}));
-return {{ typed: nextText.length }};
-"#,
-                    Self::extension_script_resolver(&resolved_json)
-                );
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .execute_extension_command(
+                        "type",
+                        json!({ "selector": resolved, "text": text }),
+                        15_000,
+                    )
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::GetText { selector } => {
                 let resolved = self.resolve_extension_selector(&selector)?;
-                let resolved_json = serde_json::to_string(&resolved)?;
-                let script = format!(
-                    r#"
-{}
-return {{ text: String(element.innerText || element.textContent || element.value || "") }};
-"#,
-                    Self::extension_script_resolver(&resolved_json)
-                );
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .execute_extension_command("get_text", json!({ "selector": resolved }), 10_000)
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
@@ -1244,104 +1195,45 @@ return {{ text: String(element.innerText || element.textContent || element.value
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::Wait { selector, ms, text } => {
-                let script = if let Some(selector) = selector {
-                    let resolved = self.resolve_extension_selector(&selector)?;
-                    let resolved_json = serde_json::to_string(&resolved)?;
-                    format!(
-                        r#"
-const selector = {resolved_json};
-const deadline = Date.now() + 10000;
-while (Date.now() < deadline) {{
-  const found = selector.startsWith("text=")
-    ? Array.from(document.querySelectorAll("*")).find((el) => String(el.innerText || el.textContent || "").includes(selector.slice(5)))
-    : document.querySelector(selector);
-  if (found) return {{ found: true }};
-  await new Promise((resolve) => setTimeout(resolve, 200));
-}}
-throw new Error(`Timed out waiting for selector: ${{selector}}`);
-"#
-                    )
-                } else if let Some(ms) = ms {
-                    format!(
-                        "await new Promise((resolve) => setTimeout(resolve, {})); return {{ waited_ms: {} }};",
-                        ms, ms
-                    )
-                } else if let Some(text) = text {
-                    let text_json = serde_json::to_string(&text)?;
-                    format!(
-                        r#"
-const needle = {text_json};
-const deadline = Date.now() + 10000;
-while (Date.now() < deadline) {{
-  if (String(document.body?.innerText || "").includes(needle)) return {{ found_text: true }};
-  await new Promise((resolve) => setTimeout(resolve, 200));
-}}
-throw new Error(`Timed out waiting for text: ${{needle}}`);
-"#
-                    )
-                } else {
-                    "await new Promise((resolve) => setTimeout(resolve, 250)); return { waited_ms: 250 };".to_string()
-                };
+                let selector = selector
+                    .as_deref()
+                    .map(|value| self.resolve_extension_selector(value))
+                    .transpose()?;
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 15_000)
+                    .execute_extension_command(
+                        "wait",
+                        json!({
+                            "selector": selector,
+                            "ms": ms,
+                            "text": text,
+                            "timeout": 10_000
+                        }),
+                        15_000,
+                    )
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::Press { key } => {
-                let key_json = serde_json::to_string(&key)?;
-                let script = format!(
-                    r#"
-const key = {key_json};
-const target = document.activeElement || document.body;
-target.dispatchEvent(new KeyboardEvent("keydown", {{ key, bubbles: true }}));
-target.dispatchEvent(new KeyboardEvent("keypress", {{ key, bubbles: true }}));
-target.dispatchEvent(new KeyboardEvent("keyup", {{ key, bubbles: true }}));
-return {{ pressed: key }};
-"#
-                );
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .execute_extension_command("press", json!({ "key": key }), 10_000)
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::Hover { selector } => {
                 let resolved = self.resolve_extension_selector(&selector)?;
-                let resolved_json = serde_json::to_string(&resolved)?;
-                let script = format!(
-                    r#"
-{}
-element.dispatchEvent(new MouseEvent("mouseover", {{ bubbles: true }}));
-element.dispatchEvent(new MouseEvent("mouseenter", {{ bubbles: true }}));
-return {{ hovered: true }};
-"#,
-                    Self::extension_script_resolver(&resolved_json)
-                );
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .execute_extension_command("hover", json!({ "selector": resolved }), 10_000)
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }
             BrowserAction::Scroll { direction, pixels } => {
                 let pixels = pixels.unwrap_or(600);
-                let delta = match direction.as_str() {
-                    "up" => format!("-{}", pixels),
-                    "down" => pixels.to_string(),
-                    "left" => "0".to_string(),
-                    "right" => "0".to_string(),
-                    _ => pixels.to_string(),
-                };
-                let script = if direction == "left" || direction == "right" {
-                    let dx = if direction == "left" {
-                        format!("-{}", pixels)
-                    } else {
-                        pixels.to_string()
-                    };
-                    format!("window.scrollBy({{ left: {}, top: 0, behavior: 'instant' }}); return {{ scrolled: true }};", dx)
-                } else {
-                    format!("window.scrollBy({{ left: 0, top: {}, behavior: 'instant' }}); return {{ scrolled: true }};", delta)
-                };
                 let command = self
-                    .execute_extension_command("run_script", json!({ "script": script }), 10_000)
+                    .execute_extension_command(
+                        "scroll",
+                        json!({ "direction": direction, "pixels": pixels }),
+                        10_000,
+                    )
                     .await?;
                 Ok(extension_command_to_tool_result(command))
             }

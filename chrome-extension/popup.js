@@ -12,10 +12,8 @@ const els = {
 
 function normalizeBaseUrl(raw) {
   const text = String(raw || "").trim();
-  if (!text) return "http://127.0.0.1:42617";
-  const normalized = text.replace(/\/$/, "");
-  if (normalized === "http://127.0.0.1:8765") return "http://127.0.0.1:42617";
-  return normalized;
+  if (!text) return "http://127.0.0.1:8765";
+  return text.replace(/\/$/, "");
 }
 
 function setStatus(active, detail) {

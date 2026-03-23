@@ -141,11 +141,48 @@
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } else if (isContentEditable) {
-      // Clear existing content and insert new text
-      el.textContent = "";
-      // Use execCommand for proper undo support and framework detection
-      document.execCommand("insertText", false, value);
-      el.dispatchEvent(new Event("input", { bubbles: true }));
+      // Strategy 1: execCommand selectAll+delete+insertText (works in most browsers).
+      // Strategy 2: DataTransfer paste simulation (fallback for Chrome 146+ where
+      // execCommand("insertText") may silently fail on React/Draft.js editors).
+      // After each attempt, verify the text was actually set by reading textContent.
+      el.focus();
+
+      // Use beforeinput + input events — Draft.js v0.14+ (X/Twitter) handles
+      // these natively. execCommand("insertText") is unreliable in Chrome 146+.
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      // Clear
+      el.dispatchEvent(new InputEvent("beforeinput", {
+        inputType: "deleteContentBackward",
+        bubbles: true,
+        cancelable: true
+      }));
+      // Insert
+      el.dispatchEvent(new InputEvent("beforeinput", {
+        inputType: "insertText",
+        data: value,
+        bubbles: true,
+        cancelable: true
+      }));
+      el.dispatchEvent(new InputEvent("input", {
+        inputType: "insertText",
+        data: value,
+        bubbles: true
+      }));
+      // Fallback: if beforeinput left field empty, try execCommand
+      const textAfter = (el.textContent || el.innerText || "").trim();
+      if (!textAfter) {
+        sel.removeAllRanges();
+        const r2 = document.createRange();
+        r2.selectNodeContents(el);
+        sel.addRange(r2);
+        document.execCommand("delete", false, null);
+        document.execCommand("insertText", false, value);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+      }
     } else {
       return { ok: false, error: `Element is not fillable: ${payload.selector}` };
     }
@@ -166,13 +203,45 @@
       el.hasAttribute("contenteditable") && el.getAttribute("contenteditable") !== "false";
 
     if (isContentEditable) {
-      // Type character by character with key events for contenteditable
-      for (const char of text) {
-        dispatchKeyEvent(el, "keydown", char, "");
-        document.execCommand("insertText", false, char);
-        dispatchKeyEvent(el, "keyup", char, "");
+      // Chrome 86+ / React 16+ Draft.js editors no longer respond reliably to
+      // execCommand("insertText"). Instead, dispatch beforeinput + input events
+      // with inputType="insertText" which Draft.js v0.14+ handles natively.
+      //
+      // Step 1: clear existing content via selection + deleteContent beforeinput
+      el.focus();
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      sel.removeAllRanges();
+      sel.addRange(range);
+      el.dispatchEvent(new InputEvent("beforeinput", {
+        inputType: "deleteContentBackward",
+        bubbles: true,
+        cancelable: true
+      }));
+      // Step 2: insert the full text in one beforeinput event
+      el.dispatchEvent(new InputEvent("beforeinput", {
+        inputType: "insertText",
+        data: text,
+        bubbles: true,
+        cancelable: true
+      }));
+      el.dispatchEvent(new InputEvent("input", {
+        inputType: "insertText",
+        data: text,
+        bubbles: true
+      }));
+      // Step 3: fallback — if beforeinput approach left content empty, try execCommand
+      const inserted = (el.textContent || el.innerText || "").trim();
+      if (!inserted) {
+        sel.removeAllRanges();
+        const r2 = document.createRange();
+        r2.selectNodeContents(el);
+        sel.addRange(r2);
+        document.execCommand("delete", false, null);
+        document.execCommand("insertText", false, text);
+        el.dispatchEvent(new Event("input", { bubbles: true }));
       }
-      el.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
       // For regular inputs, type char by char with proper events
       for (const char of text) {

@@ -600,6 +600,186 @@ async function executeScriptViaDebugger(tabId, script) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Type via CDP — uses Input.insertText which sends fully-trusted text input.
+// Required for React/Draft.js editors (e.g. X/Twitter compose) in Chrome 86+
+// where programmatic execCommand/beforeinput events are ignored by the editor.
+// ---------------------------------------------------------------------------
+async function typeViaCDP(payload) {
+  const selector = String(payload.selector || "").trim();
+  const text = String(payload.text || payload.value || "").trim();
+  if (!text) {
+    return { ok: false, output: "type_cdp: missing text/value", data: {} };
+  }
+
+  const tabId = await resolveTargetTabId(payload);
+  if (!tabId) {
+    return { ok: false, output: "type_cdp: no active tab", data: {} };
+  }
+
+  let attached = false;
+  try {
+    await _debuggerAttach(tabId);
+    attached = true;
+
+    // Use a trusted CDP mouse click to focus the element (isTrusted: true).
+    // el.focus() via Runtime.evaluate produces isTrusted:false which Draft.js
+    // ignores, leaving editorState empty and the Post button disabled.
+    if (selector) {
+      const boundsResult = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+        expression: `JSON.stringify((function(){
+          var el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return null;
+          var r = el.getBoundingClientRect();
+          return {left: r.left, top: r.top, width: r.width, height: r.height, found: true};
+        })())`,
+        returnByValue: true
+      });
+      const boundsStr = boundsResult && boundsResult.result && boundsResult.result.value;
+      const bounds = boundsStr ? JSON.parse(boundsStr) : null;
+
+      if (bounds && bounds.found && bounds.width > 0) {
+        const x = Math.round(bounds.left + bounds.width / 2);
+        const y = Math.round(bounds.top + bounds.height / 2);
+        // Trusted mouse press+release = trusted focus event that Draft.js accepts
+        await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mousePressed", x, y, button: "left", clickCount: 1, buttons: 1
+        });
+        await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+          type: "mouseReleased", x, y, button: "left", clickCount: 1, buttons: 0
+        });
+        // Give Draft.js time to register focus and initialise editor state
+        await new Promise(r => setTimeout(r, 150));
+      } else {
+        return { ok: false, output: `type_cdp: element not found: ${selector}`, data: {} };
+      }
+    }
+
+    // Select all existing text + delete, then insert fresh text
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyDown", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyUp", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+      type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8
+    });
+
+    // Insert text as trusted OS-level input (isTrusted: true, fires beforeinput+input)
+    await _debuggerSendCommand(tabId, "Input.insertText", { text });
+
+    // Small pause then verify button is enabled
+    await new Promise(r => setTimeout(r, 200));
+    const btnCheck = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: `(function(){
+        var btn = document.querySelector('[data-testid="tweetButtonInline"]');
+        if (!btn) return "btn_not_found";
+        var disabled = btn.getAttribute("aria-disabled") || btn.disabled;
+        return disabled ? "disabled" : "enabled";
+      })()`,
+      returnByValue: true
+    });
+    const btnState = btnCheck && btnCheck.result && btnCheck.result.value || "unknown";
+
+    return {
+      ok: true,
+      output: `Typed ${text.length} chars into: ${selector || "(active element)"} | post_button=${btnState}`,
+      data: { tab_id: tabId, engine: "cdp", post_button: btnState }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return { ok: false, output: `type_cdp failed: ${msg}`, data: { error: msg } };
+  } finally {
+    if (attached) {
+      try { await _debuggerDetach(tabId); } catch (_) {}
+    }
+  }
+}
+
+async function clickViaCDP(payload) {
+  const selector = String(payload.selector || "").trim();
+  if (!selector) {
+    return { ok: false, output: "click_cdp: missing selector", data: {} };
+  }
+
+  const tabId = await resolveTargetTabId(payload);
+  if (!tabId) {
+    return { ok: false, output: "click_cdp: no active tab", data: {} };
+  }
+
+  let attached = false;
+  try {
+    await _debuggerAttach(tabId);
+    attached = true;
+
+    const boundsResult = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: `JSON.stringify((function(){
+        var el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return null;
+        var r = el.getBoundingClientRect();
+        return {
+          left: r.left,
+          top: r.top,
+          width: r.width,
+          height: r.height,
+          found: true
+        };
+      })())`,
+      returnByValue: true
+    });
+    const boundsStr = boundsResult && boundsResult.result && boundsResult.result.value;
+    const bounds = boundsStr ? JSON.parse(boundsStr) : null;
+
+    if (!(bounds && bounds.found && bounds.width > 0 && bounds.height > 0)) {
+      return { ok: false, output: `click_cdp: element not found: ${selector}`, data: {} };
+    }
+
+    const x = Math.round(bounds.left + bounds.width / 2);
+    const y = Math.round(bounds.top + bounds.height / 2);
+
+    await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseMoved",
+      x,
+      y,
+      button: "none",
+      buttons: 0
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mousePressed",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+      buttons: 1
+    });
+    await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
+      type: "mouseReleased",
+      x,
+      y,
+      button: "left",
+      clickCount: 1,
+      buttons: 0
+    });
+
+    return {
+      ok: true,
+      output: `Clicked: ${selector}`,
+      data: { tab_id: tabId, engine: "cdp" }
+    };
+  } catch (err) {
+    const msg = String(err && err.message ? err.message : err);
+    return { ok: false, output: `click_cdp failed: ${msg}`, data: { error: msg } };
+  } finally {
+    if (attached) {
+      try { await _debuggerDetach(tabId); } catch (_) {}
+    }
+  }
+}
+
 async function resolveTargetTabId(payload) {
   const explicit = Number(payload.tab_id || payload.tabId || 0);
   if (Number.isInteger(explicit) && explicit > 0) {
@@ -973,7 +1153,19 @@ async function executeCommand(command) {
   const type = String(command.command_type || "");
   const payload = command.payload || {};
 
-  // Content-script actions (click, type, fill, hover, press, scroll, select, wait, get_text)
+  // type uses CDP Input.insertText for trusted text entry (required for React/Draft.js editors)
+  if (type === "type") {
+    return await typeViaCDP(payload);
+  }
+
+  if (type === "click") {
+    const trustedClick = await clickViaCDP(payload);
+    if (trustedClick.ok) {
+      return trustedClick;
+    }
+  }
+
+  // Content-script actions (click, fill, hover, press, scroll, select, wait, get_text)
   if (CONTENT_ACTIONS.has(type)) {
     return await relayToContentScript(type, payload);
   }
