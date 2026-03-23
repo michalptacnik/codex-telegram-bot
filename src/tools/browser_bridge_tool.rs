@@ -31,15 +31,22 @@ impl BrowserBridgeTool {
     }
 
     fn pick_client(&self) -> Option<String> {
+        // Sort by created_at ascending so the oldest registered client (Chrome)
+        // is always preferred over newer ones (e.g. Atlas/OpenAI sidecars).
+        // HashMap iteration order is non-deterministic, so without sorting
+        // commands could silently land on the wrong browser.
         self.bridge
             .active_clients()
             .into_iter()
-            .next()
+            .min_by_key(|c| c.created_at)
             .map(|c| c.instance_id)
     }
 
     async fn dispatch(&self, command_type: &str, payload: Value) -> anyhow::Result<ToolResult> {
+        let clients = self.bridge.active_clients();
+        tracing::info!(command = %command_type, connected_clients = %clients.len(), "browser_ext dispatch");
         let client_id = self.pick_client().ok_or_else(|| {
+            tracing::warn!("browser_ext: no connected extension clients");
             anyhow::anyhow!(
                 "No active Chrome extension connected. Install the AgentHQ Chrome extension and make sure it shows ON (green badge)."
             )

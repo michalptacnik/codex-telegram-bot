@@ -141,9 +141,13 @@
       el.dispatchEvent(new Event("input", { bubbles: true }));
       el.dispatchEvent(new Event("change", { bubbles: true }));
     } else if (isContentEditable) {
-      // Clear existing content and insert new text
-      el.textContent = "";
-      // Use execCommand for proper undo support and framework detection
+      // Use selectAll+delete+insertText so React/Draft.js state is properly
+      // updated. Setting el.textContent directly bypasses the framework's
+      // mutation observers and leaves stale state, causing the old text to
+      // persist even after the DOM is cleared.
+      el.focus();
+      document.execCommand("selectAll", false, null);
+      document.execCommand("delete", false, null);
       document.execCommand("insertText", false, value);
       el.dispatchEvent(new Event("input", { bubbles: true }));
     } else {
