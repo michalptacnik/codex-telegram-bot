@@ -315,7 +315,11 @@ impl BrowserBridge {
             .filter(|c| (now - c.last_seen_at).num_seconds() < self.heartbeat_ttl_sec)
             .cloned()
             .collect();
-        active.sort_by(|a, b| b.last_seen_at.cmp(&a.last_seen_at));
+        // Sort oldest-first so the earliest-registered client (the user's
+        // primary Chrome window) is always preferred over later-joined
+        // sidecars (e.g. Atlas/OpenAI). last_seen_at ordering is
+        // non-deterministic when multiple clients heartbeat at similar rates.
+        active.sort_by_key(|c| c.created_at);
         active
     }
 
