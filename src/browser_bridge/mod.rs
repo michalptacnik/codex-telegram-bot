@@ -141,9 +141,7 @@ impl BrowserBridge {
     /// one command queue.  The Chrome extension connects to the gateway; its
     /// commands flow into this singleton and are visible to every agent.
     pub fn global() -> Arc<Self> {
-        GLOBAL_BRIDGE
-            .get_or_init(|| Arc::new(Self::new()))
-            .clone()
+        GLOBAL_BRIDGE.get_or_init(|| Arc::new(Self::new())).clone()
     }
 
     /// Process a heartbeat from a Chrome extension client.

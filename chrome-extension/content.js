@@ -418,7 +418,37 @@
       return { ok: false, error: `Element not found: ${payload.selector}` };
     }
     const text = (el.innerText || el.textContent || "").trim();
-    return { ok: true, output: text, data: { text: text } };
+    const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    const visible = Boolean(
+      rect &&
+      (rect.width > 0 || rect.height > 0) &&
+      style &&
+      style.display !== "none" &&
+      style.visibility !== "hidden"
+    );
+    return {
+      ok: true,
+      output: text,
+      data: {
+        text: text,
+        tag: (el.tagName || "").toLowerCase(),
+        role: el.getAttribute("role") || "",
+        aria_label: el.getAttribute("aria-label") || "",
+        aria_disabled: el.getAttribute("aria-disabled") || "",
+        disabled: Boolean(el.disabled),
+        contenteditable: el.getAttribute("contenteditable") || "",
+        visible: visible,
+        rect: rect
+          ? {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height)
+            }
+          : null
+      }
+    };
   }
 
   // ── Message listener ─────────────────────────────────────────────

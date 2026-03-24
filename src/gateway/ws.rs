@@ -96,7 +96,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
             continue;
         }
 
-        // Process message with the LLM provider
+        // Process message with the full agent pipeline so authenticated WS chat
+        // exercises the same skills/tools path as channel-driven Tanith turns.
         let provider_label = state
             .config
             .lock()
@@ -111,45 +112,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, _session_id: Option<S
             "model": state.model,
         }));
 
-        // Simple single-turn chat (no streaming for now — use provider.chat_with_system)
-        let system_prompt = {
-            let config_guard = state.config.lock();
-            crate::channels::build_system_prompt(
-                &config_guard.workspace_dir,
-                &state.model,
-                &[],
-                &[],
-                Some(&config_guard.identity),
-                None,
-            )
-        };
-
-        let messages = vec![
-            crate::providers::ChatMessage::system(system_prompt),
-            crate::providers::ChatMessage::user(&content),
-        ];
-
-        let multimodal_config = state.config.lock().multimodal.clone();
-        let prepared =
-            match crate::multimodal::prepare_messages_for_provider(&messages, &multimodal_config)
-                .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    let err = serde_json::json!({
-                        "type": "error",
-                        "message": format!("Multimodal prep failed: {e}")
-                    });
-                    let _ = sender.send(Message::Text(err.to_string().into())).await;
-                    continue;
-                }
-            };
-
-        match state
-            .provider
-            .chat_with_history(&prepared.messages, &state.model, state.temperature)
-            .await
-        {
+        let config = state.config.lock().clone();
+        match crate::agent::process_message(config, &content, state.browser_bridge.clone()).await {
             Ok(response) => {
                 // Send the full response as a done message
                 let done = serde_json::json!({

@@ -1648,7 +1648,10 @@ pub async fn handle_api_browser_bridge_status(
         return e.into_response();
     }
 
-    Json(browser_bridge_status_payload(state.browser_bridge.as_deref())).into_response()
+    Json(browser_bridge_status_payload(
+        state.browser_bridge.as_deref(),
+    ))
+    .into_response()
 }
 
 #[cfg(test)]
@@ -1793,9 +1796,18 @@ mod tests {
             extension_version: Some("2.0.0".into()),
         });
 
-        let browser = json_body(handle_api_browser_status(State(state.clone()), HeaderMap::new()).await.into_response()).await;
-        let bridge_status =
-            json_body(handle_api_browser_bridge_status(State(state), HeaderMap::new()).await.into_response()).await;
+        let browser = json_body(
+            handle_api_browser_status(State(state.clone()), HeaderMap::new())
+                .await
+                .into_response(),
+        )
+        .await;
+        let bridge_status = json_body(
+            handle_api_browser_bridge_status(State(state), HeaderMap::new())
+                .await
+                .into_response(),
+        )
+        .await;
 
         assert_eq!(browser["connected"], Value::Bool(true));
         assert_eq!(browser["clients"].as_array().map(Vec::len), Some(1));
@@ -1803,7 +1815,10 @@ mod tests {
             browser["supported_commands"],
             serde_json::json!(["open_url", "snapshot"])
         );
-        assert_eq!(bridge_status["browser_bridge"]["active_clients"], Value::from(1));
+        assert_eq!(
+            bridge_status["browser_bridge"]["active_clients"],
+            Value::from(1)
+        );
         assert_eq!(
             bridge_status["browser_bridge"]["clients"],
             browser["clients"]

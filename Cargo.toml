@@ -217,6 +217,18 @@ rag-pdf = ["dep:pdf-extract"]
 # whatsapp-web = Native WhatsApp Web client with custom rusqlite storage backend
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
 
+[profile.dev]
+# Keep everyday local builds small enough that target/ does not balloon.
+debug = 0
+incremental = false
+split-debuginfo = "packed"
+
+[profile.test]
+# Tests inherit dev-like ergonomics, but they do not need multi-gigabyte debug artifacts.
+debug = 0
+incremental = false
+split-debuginfo = "packed"
+
 [profile.release]
 opt-level = "z"      # Optimize for size
 lto = "fat"          # Maximum cross-crate optimization for smaller binaries

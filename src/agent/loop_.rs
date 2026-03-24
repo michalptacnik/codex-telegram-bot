@@ -382,6 +382,61 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
     (name.trim().to_ascii_lowercase(), args_json)
 }
 
+fn allow_duplicate_tool_call(name: &str, arguments: &serde_json::Value) -> bool {
+    if !name.eq_ignore_ascii_case("browser_ext") {
+        return false;
+    }
+
+    let Some(action) = arguments.get("action").and_then(|value| value.as_str()) else {
+        return false;
+    };
+
+    matches!(
+        action.trim().to_ascii_lowercase().as_str(),
+        // Observational browser steps often need legitimate retries after DOM churn,
+        // timeouts, or page transitions within the same turn.
+        "snapshot" | "wait" | "get_text" | "run_script" | "press"
+    )
+}
+
+fn message_requires_logged_in_browser_ext(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+
+    let mentions_platform = lower.contains("x.com")
+        || lower.contains("twitter")
+        || lower.contains("linkedin")
+        || lower.contains("instagram")
+        || lower.contains("social media")
+        || lower.contains("social-media-manager");
+
+    let mentions_authenticated_social_action = lower.contains("post")
+        || lower.contains("tweet")
+        || lower.contains("reply")
+        || lower.contains("comment")
+        || lower.contains("article")
+        || lower.contains("thread")
+        || lower.contains("publish")
+        || lower.contains("compose");
+
+    mentions_platform && mentions_authenticated_social_action
+}
+
+fn filter_tools_for_message(
+    tools_registry: &mut Vec<Box<dyn Tool>>,
+    tool_descs: &mut Vec<(&'static str, &'static str)>,
+    message: &str,
+) {
+    let has_browser_ext = tools_registry
+        .iter()
+        .any(|tool| tool.name() == "browser_ext");
+    if !has_browser_ext || !message_requires_logged_in_browser_ext(message) {
+        return;
+    }
+
+    tools_registry.retain(|tool| tool.name() != "browser");
+    tool_descs.retain(|(name, _)| *name != "browser");
+}
+
 fn parse_tool_call_value(value: &serde_json::Value) -> Option<ParsedToolCall> {
     if let Some(function) = value.get("function") {
         let tool_call_id = parse_tool_call_id(value, Some(function));
@@ -2640,7 +2695,9 @@ pub(crate) async fn run_tool_call_loop(
             }
 
             let signature = tool_call_signature(&tool_name, &tool_args);
-            if !seen_tool_signatures.insert(signature) {
+            if !allow_duplicate_tool_call(&tool_name, &tool_args)
+                && !seen_tool_signatures.insert(signature)
+            {
                 let duplicate = format!(
                     "Skipped duplicate tool call '{tool_name}' with identical arguments in this turn."
                 );
@@ -2841,6 +2898,9 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
     let mut instructions = String::new();
     let has_mail = tools_registry.iter().any(|tool| tool.name() == "mail");
     let has_browser = tools_registry.iter().any(|tool| tool.name() == "browser");
+    let has_browser_ext = tools_registry
+        .iter()
+        .any(|tool| tool.name() == "browser_ext");
 
     instructions.push_str("\n## Tool Use Protocol\n\n");
     instructions.push_str("To use a tool, wrap a JSON object in <tool_call></tool_call> tags:\n\n");
@@ -2865,6 +2925,13 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
         instructions.push_str("### Browser Rule\n\n");
         instructions.push_str(
             "For browser tasks on websites (including Gmail, X, Slack, and other logged-in apps), prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`. Do not use `list_windows`, `focus_window`, `list_tabs`, `focus_tab`, `mouse_move`, `mouse_click`, `mouse_drag`, `key_type`, `key_press`, `screen_capture`, or `verify_artifact` unless OS-level computer-use behavior is truly required and supported by the active backend. If a browser action fails, stop and report the exact failed action and tool error instead of pretending the task completed.\n\n",
+        );
+    }
+
+    if has_browser_ext {
+        instructions.push_str("### Logged-In Browser Rule\n\n");
+        instructions.push_str(
+            "For X/Twitter, LinkedIn, Instagram, or other authenticated social flows that must use the user's existing logged-in browser session, use `browser_ext` instead of `browser`. This includes posting, replying, commenting, messaging, article drafting, or publishing. If `browser_ext` is available, do not fall back to `browser` for those tasks.\n\n",
         );
     }
 
@@ -3491,14 +3558,15 @@ pub async fn process_message(
     if config.browser.enabled {
         tool_descs.push(("browser_open", "Open approved URLs in browser."));
         tool_descs.push((
-            "browser",
-            "Automate websites and logged-in web apps with open, snapshot, type, click, and proof-oriented browser actions.",
+            "browser_ext",
+            "Preferred tool for logged-in browser work. Control the live browser extension session for X, LinkedIn, Instagram, forms, and other authenticated sites; supports browser selection when multiple clients are connected.",
         ));
         tool_descs.push((
-            "browser_ext",
-            "Control the live browser extension session for logged-in sites; supports browser selection when multiple clients are connected.",
+            "browser",
+            "Automate normal websites with open, snapshot, type, click, and proof-oriented browser actions. Do not use this for social posting or other tasks that must run inside the user's logged-in browser session when browser_ext is available.",
         ));
     }
+    filter_tools_for_message(&mut tools_registry, &mut tool_descs, message);
     if config.composio.enabled {
         tool_descs.push(("composio", "Execute actions on 1000+ apps via Composio."));
     }
@@ -4213,6 +4281,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_ext_observational_retries_are_not_deduplicated() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"browser_ext","arguments":{"action":"snapshot"}}
+</tool_call>
+<tool_call>
+{"name":"browser_ext","arguments":{"action":"snapshot"}}
+</tool_call>"#,
+            "done",
+        ]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "browser_ext",
+            Arc::clone(&invocations),
+        ))];
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run tool calls"),
+        ];
+        let observer = NoopObserver;
+
+        let result = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("loop should finish after allowing observational retries");
+
+        assert_eq!(result, "done");
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            2,
+            "browser_ext snapshot retries should both execute"
+        );
+
+        let tool_results = history
+            .iter()
+            .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
+            .expect("prompt-mode tool result payload should be present");
+        assert!(!tool_results.content.contains("Skipped duplicate tool call"));
+    }
+
+    #[tokio::test]
     async fn run_tool_call_loop_native_mode_preserves_fallback_tool_call_ids() {
         let provider = ScriptedProvider::from_text_responses(vec![
             r#"{"content":"Need to call tool","tool_calls":[{"id":"call_abc","name":"count_tool","arguments":"{\"value\":\"X\"}"}]}"#,
@@ -4853,7 +4982,9 @@ Tail"#;
     fn build_tool_instructions_prioritizes_mail_and_dom_browser_flow() {
         use crate::channels::email_channel::EmailConfig;
         use crate::security::SecurityPolicy;
-        use crate::tools::{browser::BrowserTool, mail::MailTool};
+        use crate::tools::{
+            browser::BrowserTool, browser_bridge_tool::BrowserBridgeTool, mail::MailTool,
+        };
 
         let security = Arc::new(SecurityPolicy::from_config(
             &crate::config::AutonomyConfig::default(),
@@ -4882,6 +5013,9 @@ Tail"#;
                 vec!["*".into()],
                 Some("test".into()),
             )),
+            Box::new(BrowserBridgeTool::new(Arc::new(
+                crate::browser_bridge::BrowserBridge::new(),
+            ))),
         ];
 
         let instructions = build_tool_instructions(&tools);
@@ -4889,6 +5023,56 @@ Tail"#;
         assert!(instructions.contains("prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`"));
         assert!(instructions
             .contains("If a browser action fails, stop and report the exact failed action"));
+        assert!(instructions
+            .contains("For X/Twitter, LinkedIn, Instagram, or other authenticated social flows"));
+    }
+
+    #[test]
+    fn message_requires_logged_in_browser_ext_detects_x_article_work() {
+        assert!(message_requires_logged_in_browser_ext(
+            "Use the social-media-manager skill to write an X article and publish it"
+        ));
+        assert!(message_requires_logged_in_browser_ext(
+            "Reply to this post on x.com and leave a comment"
+        ));
+        assert!(!message_requires_logged_in_browser_ext(
+            "Open example.com in the browser and summarize it"
+        ));
+    }
+
+    #[test]
+    fn filter_tools_for_message_removes_generic_browser_for_social_turns() {
+        use crate::security::SecurityPolicy;
+        use crate::tools::{browser::BrowserTool, browser_bridge_tool::BrowserBridgeTool};
+
+        let security = Arc::new(SecurityPolicy::from_config(
+            &crate::config::AutonomyConfig::default(),
+            std::path::Path::new("/tmp"),
+        ));
+        let mut tools: Vec<Box<dyn Tool>> = vec![
+            Box::new(BrowserTool::new(
+                security,
+                vec!["*".into()],
+                Some("test".into()),
+            )),
+            Box::new(BrowserBridgeTool::new(Arc::new(
+                crate::browser_bridge::BrowserBridge::new(),
+            ))),
+        ];
+        let mut tool_descs = vec![
+            ("browser", "Generic browser automation."),
+            ("browser_ext", "Logged-in browser extension automation."),
+        ];
+
+        filter_tools_for_message(
+            &mut tools,
+            &mut tool_descs,
+            "Comment on this X post and then draft an article",
+        );
+
+        assert!(tools.iter().all(|tool| tool.name() != "browser"));
+        assert!(tools.iter().any(|tool| tool.name() == "browser_ext"));
+        assert!(tool_descs.iter().all(|(name, _)| *name != "browser"));
     }
 
     #[test]

@@ -543,7 +543,15 @@ async function executeScriptViaDebugger(tabId, script) {
     await _debuggerAttach(tabId);
     attached = true;
     await _debuggerSendCommand(tabId, "Runtime.enable", {});
-    const wrappedExpression = `(async () => {\n${String(script || "")}\n})()`;
+    const source = String(script || "");
+    const trimmed = source.trim();
+    const looksLikeExpression =
+      trimmed.length > 0
+      && !/\breturn\b/.test(trimmed)
+      && !/[;{}]/.test(trimmed);
+    const wrappedExpression = looksLikeExpression
+      ? `(async () => {\nreturn (${source});\n})()`
+      : `(async () => {\n${source}\n})()`;
     const evalResult = await _debuggerSendCommand(
       tabId,
       "Runtime.evaluate",
@@ -607,8 +615,9 @@ async function executeScriptViaDebugger(tabId, script) {
 // ---------------------------------------------------------------------------
 async function typeViaCDP(payload) {
   const selector = String(payload.selector || "").trim();
-  const text = String(payload.text || payload.value || "").trim();
-  if (!text) {
+  const text = String(payload.text ?? payload.value ?? "");
+  const replace = payload.replace === true;
+  if (text.length === 0) {
     return { ok: false, output: "type_cdp: missing text/value", data: {} };
   }
 
@@ -622,6 +631,35 @@ async function typeViaCDP(payload) {
     await _debuggerAttach(tabId);
     attached = true;
 
+    async function readTargetState() {
+      if (!selector) {
+        return { found: false, text: "", active_matches: false };
+      }
+      const stateResult = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+        expression: `JSON.stringify((function(){
+          var el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return { found: false, text: "", active_matches: false };
+          var text = '';
+          if (typeof el.value === 'string') {
+            text = el.value;
+          } else {
+            text = el.innerText || el.textContent || '';
+          }
+          var active = document.activeElement;
+          return {
+            found: true,
+            text: String(text || ''),
+            active_matches: !!(active && (active === el || (typeof el.contains === 'function' && el.contains(active))))
+          };
+        })())`,
+        returnByValue: true
+      });
+      const stateStr = stateResult && stateResult.result && stateResult.result.value;
+      return stateStr ? JSON.parse(stateStr) : { found: false, text: "", active_matches: false };
+    }
+
+    let targetMeta = null;
+
     // Use a trusted CDP mouse click to focus the element (isTrusted: true).
     // el.focus() via Runtime.evaluate produces isTrusted:false which Draft.js
     // ignores, leaving editorState empty and the Post button disabled.
@@ -631,7 +669,15 @@ async function typeViaCDP(payload) {
           var el = document.querySelector(${JSON.stringify(selector)});
           if (!el) return null;
           var r = el.getBoundingClientRect();
-          return {left: r.left, top: r.top, width: r.width, height: r.height, found: true};
+          return {
+            left: r.left,
+            top: r.top,
+            width: r.width,
+            height: r.height,
+            found: true,
+            tag: (el.tagName || '').toLowerCase(),
+            contenteditable: el.getAttribute('contenteditable') || ''
+          };
         })())`,
         returnByValue: true
       });
@@ -639,6 +685,7 @@ async function typeViaCDP(payload) {
       const bounds = boundsStr ? JSON.parse(boundsStr) : null;
 
       if (bounds && bounds.found && bounds.width > 0) {
+        targetMeta = bounds;
         const x = Math.round(bounds.left + bounds.width / 2);
         const y = Math.round(bounds.top + bounds.height / 2);
         // Trusted mouse press+release = trusted focus event that Draft.js accepts
@@ -655,40 +702,163 @@ async function typeViaCDP(payload) {
       }
     }
 
-    // Select all existing text + delete, then insert fresh text
-    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
-      type: "keyDown", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
-    });
-    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
-      type: "keyUp", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65
-    });
-    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
-      type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8
-    });
-    await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
-      type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8
-    });
+    const isContentEditable = Boolean(
+      targetMeta
+      && typeof targetMeta.contenteditable === "string"
+      && targetMeta.contenteditable.toLowerCase() !== "false"
+      && targetMeta.contenteditable.length > 0
+    );
 
-    // Insert text as trusted OS-level input (isTrusted: true, fires beforeinput+input)
-    await _debuggerSendCommand(tabId, "Input.insertText", { text });
+    if (replace) {
+      // Replace mode clears existing editor/input content using trusted key
+      // events so rich-text editors update their internal state too.
+      await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "rawKeyDown",
+        key: "Meta",
+        code: "MetaLeft",
+        windowsVirtualKeyCode: 91,
+        nativeVirtualKeyCode: 91,
+        modifiers: 4
+      });
+      await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "rawKeyDown",
+        key: "a",
+        code: "KeyA",
+        windowsVirtualKeyCode: 65,
+        nativeVirtualKeyCode: 65,
+        modifiers: 4
+      });
+      await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "a",
+        code: "KeyA",
+        windowsVirtualKeyCode: 65,
+        nativeVirtualKeyCode: 65,
+        modifiers: 4
+      });
+      await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Meta",
+        code: "MetaLeft",
+        windowsVirtualKeyCode: 91,
+        nativeVirtualKeyCode: 91
+      });
+      await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "rawKeyDown",
+        key: "Backspace",
+        code: "Backspace",
+        windowsVirtualKeyCode: 8,
+        nativeVirtualKeyCode: 8
+      });
+      await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+        type: "keyUp",
+        key: "Backspace",
+        code: "Backspace",
+        windowsVirtualKeyCode: 8,
+        nativeVirtualKeyCode: 8
+      });
+      await new Promise(r => setTimeout(r, 80));
 
-    // Small pause then verify button is enabled
-    await new Promise(r => setTimeout(r, 200));
-    const btnCheck = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
-      expression: `(function(){
-        var btn = document.querySelector('[data-testid="tweetButtonInline"]');
-        if (!btn) return "btn_not_found";
-        var disabled = btn.getAttribute("aria-disabled") || btn.disabled;
-        return disabled ? "disabled" : "enabled";
-      })()`,
-      returnByValue: true
-    });
-    const btnState = btnCheck && btnCheck.result && btnCheck.result.value || "unknown";
+      if (!isContentEditable && selector) {
+        const afterClear = await readTargetState();
+        const remainingText = String(afterClear && afterClear.text ? afterClear.text : "");
+        if (remainingText.length > 0) {
+          await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+            expression: `(function(){
+              var el = document.querySelector(${JSON.stringify(selector)});
+              if (!el) return false;
+              if (typeof el.value === 'string') {
+                el.value = '';
+              } else {
+                el.textContent = '';
+              }
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            })()`,
+            returnByValue: true
+          });
+          await new Promise(r => setTimeout(r, 80));
+        }
+      }
+    }
+
+    if (isContentEditable) {
+      const preferBulkInsert = text.length > 280;
+
+      if (preferBulkInsert) {
+        // Large rich-text payloads are more reliable with trusted bulk insert
+        // than with hundreds of synthetic char events that can trigger app
+        // shortcuts or unexpected editor behavior.
+        await _debuggerSendCommand(tabId, "Input.insertText", { text });
+      } else {
+        // Short composer text works better with char events because some apps
+        // only enable submit after keyboard-like input updates internal state.
+        for (const ch of text) {
+          if (ch === "\n") {
+            await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+              type: "rawKeyDown",
+              key: "Enter",
+              code: "Enter",
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13,
+              unmodifiedText: "\r",
+              text: "\r"
+            });
+            await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+              type: "keyUp",
+              key: "Enter",
+              code: "Enter",
+              windowsVirtualKeyCode: 13,
+              nativeVirtualKeyCode: 13
+            });
+            continue;
+          }
+
+          const codePoint = ch.codePointAt(0) || 0;
+          await _debuggerSendCommand(tabId, "Input.dispatchKeyEvent", {
+            type: "char",
+            text: ch,
+            unmodifiedText: ch,
+            key: ch,
+            windowsVirtualKeyCode: codePoint,
+            nativeVirtualKeyCode: codePoint
+          });
+        }
+      }
+
+      const afterInput = await readTargetState();
+      const landedText = String(afterInput && afterInput.text ? afterInput.text : "");
+      if (!landedText.includes(text)) {
+        // Some editors still ignore the first strategy. Re-focus if needed and
+        // retry with trusted bulk insert as the broadest fallback.
+        if (!afterInput.active_matches && selector) {
+          await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+            expression: `(function(){
+              var el = document.querySelector(${JSON.stringify(selector)});
+              if (el && typeof el.focus === 'function') el.focus();
+            })()`,
+            returnByValue: true
+          });
+          await new Promise(r => setTimeout(r, 50));
+        }
+        await _debuggerSendCommand(tabId, "Input.insertText", { text });
+      }
+    } else {
+      // Regular inputs/textareas accept trusted insertText reliably.
+      await _debuggerSendCommand(tabId, "Input.insertText", { text });
+    }
 
     return {
       ok: true,
-      output: `Typed ${text.length} chars into: ${selector || "(active element)"} | post_button=${btnState}`,
-      data: { tab_id: tabId, engine: "cdp", post_button: btnState }
+      output: `Typed ${text.length} chars into: ${selector || "(active element)"}`,
+      data: {
+        tab_id: tabId,
+        engine: "cdp",
+        typed_chars: text.length,
+        mode: isContentEditable ? "char-events" : "insertText",
+        replace
+      }
     };
   } catch (err) {
     const msg = String(err && err.message ? err.message : err);
@@ -726,7 +896,11 @@ async function clickViaCDP(payload) {
           top: r.top,
           width: r.width,
           height: r.height,
-          found: true
+          found: true,
+          disabled: !!el.disabled,
+          ariaDisabled: (el.getAttribute('aria-disabled') || '').toLowerCase(),
+          text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+          tag: (el.tagName || '').toLowerCase()
         };
       })())`,
       returnByValue: true
@@ -738,8 +912,31 @@ async function clickViaCDP(payload) {
       return { ok: false, output: `click_cdp: element not found: ${selector}`, data: {} };
     }
 
+    const ariaDisabled = String(bounds.ariaDisabled || "").trim();
+    const disabled = Boolean(bounds.disabled) || ariaDisabled === "true";
+    if (disabled) {
+      return {
+        ok: false,
+        output: `click_cdp: element is disabled: ${selector}`,
+        data: {
+          tab_id: tabId,
+          engine: "cdp",
+          disabled: true,
+          aria_disabled: ariaDisabled || null,
+          tag: bounds.tag || null,
+          text: bounds.text || ""
+        }
+      };
+    }
+
     const x = Math.round(bounds.left + bounds.width / 2);
     const y = Math.round(bounds.top + bounds.height / 2);
+    const beforeUrl = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: "window.location.href",
+      returnByValue: true
+    });
+    const beforeHref =
+      (beforeUrl && beforeUrl.result && beforeUrl.result.value) || null;
 
     await _debuggerSendCommand(tabId, "Input.dispatchMouseEvent", {
       type: "mouseMoved",
@@ -765,10 +962,62 @@ async function clickViaCDP(payload) {
       buttons: 0
     });
 
+    // Some sites bind submission to synthetic click handlers attached directly
+    // to the DOM node. Triggering HTMLElement.click() after the trusted mouse
+    // sequence preserves the browser-level click while also hitting framework
+    // listeners that may not react to coordinate dispatch alone.
+    await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: `(function(){
+        var el = document.querySelector(${JSON.stringify(selector)});
+        if (!el) return { exists: false };
+        try { el.click(); } catch (_) {}
+        return { exists: true };
+      })()`,
+      returnByValue: true
+    });
+
+    await new Promise(r => setTimeout(r, 800));
+
+    const afterState = await _debuggerSendCommand(tabId, "Runtime.evaluate", {
+      expression: `JSON.stringify((function(){
+        var el = document.querySelector(${JSON.stringify(selector)});
+        var href = window.location.href;
+        if (!el) return { exists: false, href: href };
+        var r = el.getBoundingClientRect();
+        return {
+          exists: true,
+          href: href,
+          disabled: !!el.disabled,
+          ariaDisabled: (el.getAttribute('aria-disabled') || '').toLowerCase(),
+          text: (el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+          width: r.width,
+          height: r.height
+        };
+      })())`,
+      returnByValue: true
+    });
+    const afterStateStr = afterState && afterState.result && afterState.result.value;
+    const after = afterStateStr ? JSON.parse(afterStateStr) : null;
+
     return {
       ok: true,
       output: `Clicked: ${selector}`,
-      data: { tab_id: tabId, engine: "cdp" }
+      data: {
+        tab_id: tabId,
+        engine: "cdp",
+        disabled: false,
+        aria_disabled: ariaDisabled || null,
+        tag: bounds.tag || null,
+        text: bounds.text || "",
+        href_before: beforeHref,
+        href_after: after && after.href ? after.href : beforeHref,
+        target_exists_after: Boolean(after && after.exists),
+        target_disabled_after: Boolean(after && after.disabled),
+        target_aria_disabled_after: after && typeof after.ariaDisabled === "string"
+          ? after.ariaDisabled || null
+          : null,
+        target_text_after: after && typeof after.text === "string" ? after.text : ""
+      }
     };
   } catch (err) {
     const msg = String(err && err.message ? err.message : err);
@@ -804,6 +1053,9 @@ async function executeScript(payload) {
   const allFrames = payload && payload.all_frames === true;
 
   try {
+    const source = /(?:^|\s)return\b|[;\n]/.test(script)
+      ? script
+      : `return (${script});`;
     const injections = await chrome.scripting.executeScript({
       target: { tabId, allFrames },
       func: async (source) => {
@@ -827,7 +1079,7 @@ async function executeScript(payload) {
           return { ok: false, error: msg };
         }
       },
-      args: [script]
+      args: [source]
     });
 
     const first = Array.isArray(injections) && injections.length ? injections[0] : null;
@@ -1160,7 +1412,10 @@ async function executeCommand(command) {
 
   if (type === "click") {
     const trustedClick = await clickViaCDP(payload);
-    if (trustedClick.ok) {
+    if (
+      trustedClick.ok
+      || (trustedClick.data && trustedClick.data.disabled === true)
+    ) {
       return trustedClick;
     }
   }

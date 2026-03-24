@@ -202,6 +202,52 @@ pub enum BrowserAction {
 }
 
 impl BrowserTool {
+    fn requires_logged_in_extension(args: &Value) -> bool {
+        let action = args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+
+        let url = args
+            .get("url")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+
+        let selector = args
+            .get("selector")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+
+        let text = args
+            .get("text")
+            .and_then(|value| value.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+
+        let is_x_url = url.contains("x.com/");
+        let is_x_social_selector = selector.contains("tweet")
+            || selector.contains("reply")
+            || selector.contains("composer")
+            || selector.contains("tweettextarea")
+            || selector.contains("sidenav_newtweet_button");
+        let is_article_flow = url.contains("/compose/articles")
+            || selector.contains("add a title")
+            || selector.contains("empty_state_button_text")
+            || text.contains("publish");
+
+        matches!(
+            action.as_str(),
+            "open" | "snapshot" | "click" | "fill" | "type" | "get_text" | "wait"
+        ) && (is_x_url || is_x_social_selector || is_article_flow)
+    }
+
     fn resolve_agent_browser_binary() -> PathBuf {
         let direct = PathBuf::from("agent-browser");
         if Path::new(&direct).is_file() {
@@ -1385,9 +1431,11 @@ impl Tool for BrowserTool {
         concat!(
             "Web/browser automation with pluggable backends (agent-browser, rust-native, computer_use, extension_bridge). ",
             "Supports DOM actions plus optional OS-level actions (mouse_move, mouse_click, mouse_drag, ",
-            "key_type, key_press, screen_capture) through a computer-use sidecar. For normal websites and logged-in web apps, ",
+            "key_type, key_press, screen_capture) through a computer-use sidecar. For normal websites, ",
             "prefer open -> snapshot -> find/fill/click/press/get_text. Use 'snapshot' to map interactive elements to refs ",
             "(@e1, @e2). Window/tab management and OS-level mouse/keyboard actions are only for computer_use-style backends. ",
+            "Do not use this for X/Twitter, LinkedIn, Instagram, or other authenticated social flows when browser_ext is available, ",
+            "because browser_ext is the logged-in live-session tool. ",
             "Enforces browser.allowed_domains for open actions."
         )
     }
@@ -1562,6 +1610,19 @@ impl Tool for BrowserTool {
                 });
             }
         };
+
+        if backend != ResolvedBackend::ExtensionBridge && Self::requires_logged_in_extension(&args)
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "This X/social workflow must use browser_ext so it runs in the user's logged-in browser session."
+                        .into(),
+                ),
+                metadata: None,
+            });
+        }
 
         // Parse action from args
         let action_str = args
