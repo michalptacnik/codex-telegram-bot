@@ -107,3 +107,49 @@ export interface WsMessage {
   output?: string;
   message?: string;
 }
+
+export interface SocialTwitterCredentials {
+  username?: string | null;
+  password?: string | null;
+  email?: string | null;
+}
+
+export interface AgentSocialAccount {
+  agent_name: string;
+  twitter?: SocialTwitterCredentials | null;
+}
+
+export interface IntegrationCapabilityStatus {
+  post: boolean;
+  comment: boolean;
+  article: boolean;
+}
+
+export interface TwitterAdapterStatus {
+  status: string;
+  detail?: string | null;
+  supported_capabilities: IntegrationCapabilityStatus;
+}
+
+export interface HeadlessIntegrationStatus {
+  status: string;
+  authenticated: boolean;
+  detail?: string | null;
+  session?: string | null;
+  url?: string | null;
+  required_user_action?: string | null;
+  recommended_setup_mode?: string | null;
+}
+
+export interface BrowserExtensionIntegrationStatus {
+  status: string;
+  detail?: string | null;
+}
+
+export interface AgentXIntegrationStatus {
+  agent_name: string;
+  twitter_x: TwitterAdapterStatus;
+  browser_headless: HeadlessIntegrationStatus;
+  browser_ext: BrowserExtensionIntegrationStatus;
+  supported_capabilities: IntegrationCapabilityStatus;
+}

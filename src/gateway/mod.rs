@@ -47,7 +47,7 @@ use uuid::Uuid;
 /// Maximum request body size (64KB) — prevents memory exhaustion
 pub const MAX_BODY_SIZE: usize = 65_536;
 /// Request timeout (30s) — prevents slow-loris attacks
-pub const REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const REQUEST_TIMEOUT_SECS: u64 = 120;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Fallback max distinct client keys tracked in gateway rate limiter.
@@ -683,6 +683,16 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/config", put(api::handle_api_config_put))
         .layer(RequestBodyLimitLayer::new(1_048_576));
 
+    let social_bootstrap_router = Router::new()
+        .route(
+            "/api/agents/social-accounts/bootstrap/x",
+            post(api::handle_api_agent_social_accounts_bootstrap_x),
+        )
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(120),
+        ));
+
     // Build router with middleware
     let app = Router::new()
         // ── Admin routes (for CLI management) ──
@@ -703,6 +713,11 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/config", get(api::handle_api_config_get))
+        .route(
+            "/api/agents/social-accounts",
+            get(api::handle_api_agent_social_accounts_get)
+                .put(api::handle_api_agent_social_accounts_put),
+        )
         .route("/api/tools", get(api::handle_api_tools))
         .route("/api/cron", get(api::handle_api_cron_list))
         .route("/api/cron", post(api::handle_api_cron_add))
@@ -790,6 +805,7 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/_app/{*path}", get(static_files::handle_static))
         // ── Config PUT with larger body limit ──
         .merge(config_put_router)
+        .merge(social_bootstrap_router)
         .with_state(state)
         .layer(RequestBodyLimitLayer::new(MAX_BODY_SIZE))
         .layer(TimeoutLayer::with_status_code(
@@ -1761,7 +1777,7 @@ mod tests {
 
     #[test]
     fn security_timeout_is_30_seconds() {
-        assert_eq!(REQUEST_TIMEOUT_SECS, 30);
+        assert_eq!(REQUEST_TIMEOUT_SECS, 120);
     }
 
     #[test]

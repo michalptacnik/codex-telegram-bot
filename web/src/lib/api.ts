@@ -8,6 +8,8 @@ import type {
   CostSummary,
   CliTool,
   HealthSnapshot,
+  AgentSocialAccount,
+  AgentXIntegrationStatus,
 } from '../types/api';
 import { clearToken, getToken, setToken } from './auth';
 
@@ -133,6 +135,47 @@ export function putConfig(toml: string): Promise<void> {
     method: 'PUT',
     headers: { 'Content-Type': 'application/toml' },
     body: toml,
+  });
+}
+
+export function getAgentSocialAccounts(): Promise<{
+  accounts: AgentSocialAccount[];
+  x_status: AgentXIntegrationStatus[];
+}> {
+  return apiFetch<{ accounts: AgentSocialAccount[]; x_status: AgentXIntegrationStatus[] }>(
+    '/api/agents/social-accounts',
+  );
+}
+
+export function putAgentSocialAccounts(
+  accounts: AgentSocialAccount[],
+): Promise<{ accounts: AgentSocialAccount[]; x_status: AgentXIntegrationStatus[] }> {
+  return apiFetch<{ accounts: AgentSocialAccount[]; x_status: AgentXIntegrationStatus[] }>(
+    '/api/agents/social-accounts',
+    {
+      method: 'PUT',
+      body: JSON.stringify({ accounts }),
+    },
+  );
+}
+
+export function bootstrapAgentXHeadlessSession(
+  agent_name: string,
+  mode?: 'headless' | 'interactive' | 'import_chrome',
+): Promise<{
+  status: string;
+  message?: string;
+  error?: string | null;
+  metadata?: unknown;
+}> {
+  return apiFetch<{
+    status: string;
+    message?: string;
+    error?: string | null;
+    metadata?: unknown;
+  }>('/api/agents/social-accounts/bootstrap/x', {
+    method: 'POST',
+    body: JSON.stringify({ agent_name, mode }),
   });
 }
 

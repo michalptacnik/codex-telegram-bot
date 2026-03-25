@@ -3,14 +3,75 @@
 //! All `/api/*` routes require bearer token authentication (PairingGuard).
 
 use super::AppState;
+use crate::tools::traits::Tool;
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
-use serde::Deserialize;
+use futures_util::future::join_all;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+const BROWSER_HEADLESS_STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const MASKED_SECRET: &str = "***MASKED***";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct AgentSocialAccountEntry {
+    pub agent_name: String,
+    pub twitter: Option<crate::config::schema::SocialTwitterCredentials>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AgentSocialAccountsPutRequest {
+    pub accounts: Vec<AgentSocialAccountEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentSocialBootstrapRequest {
+    pub agent_name: String,
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntegrationCapabilityStatus {
+    pub post: bool,
+    pub comment: bool,
+    pub article: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserExtensionIntegrationStatus {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeadlessIntegrationStatus {
+    pub status: String,
+    pub authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_user_action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recommended_setup_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentXIntegrationStatus {
+    pub agent_name: String,
+    pub twitter_x: crate::tools::twitter_mcp::TwitterHealthStatus,
+    pub browser_headless: HeadlessIntegrationStatus,
+    pub browser_ext: BrowserExtensionIntegrationStatus,
+    pub supported_capabilities: IntegrationCapabilityStatus,
+}
 
 // ── Bearer token auth extractor ─────────────────────────────────
 
@@ -866,6 +927,14 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
 
     for agent in masked.agents.values_mut() {
         mask_optional_secret(&mut agent.api_key);
+        if let Some(twitter) = agent.social_accounts.twitter.as_mut() {
+            mask_optional_secret(&mut twitter.password);
+            mask_optional_secret(&mut twitter.email);
+        }
+    }
+    if let Some(twitter) = masked.agent.social_accounts.twitter.as_mut() {
+        mask_optional_secret(&mut twitter.password);
+        mask_optional_secret(&mut twitter.email);
     }
     for route in &mut masked.model_routes {
         mask_optional_secret(&mut route.api_key);
@@ -990,7 +1059,21 @@ fn restore_masked_sensitive_fields(
     for (name, agent) in &mut incoming.agents {
         if let Some(current_agent) = current.agents.get(name) {
             restore_optional_secret(&mut agent.api_key, &current_agent.api_key);
+            if let (Some(incoming_twitter), Some(current_twitter)) = (
+                agent.social_accounts.twitter.as_mut(),
+                current_agent.social_accounts.twitter.as_ref(),
+            ) {
+                restore_optional_secret(&mut incoming_twitter.password, &current_twitter.password);
+                restore_optional_secret(&mut incoming_twitter.email, &current_twitter.email);
+            }
         }
+    }
+    if let (Some(incoming_twitter), Some(current_twitter)) = (
+        incoming.agent.social_accounts.twitter.as_mut(),
+        current.agent.social_accounts.twitter.as_ref(),
+    ) {
+        restore_optional_secret(&mut incoming_twitter.password, &current_twitter.password);
+        restore_optional_secret(&mut incoming_twitter.email, &current_twitter.email);
     }
     restore_model_route_api_keys(&mut incoming.model_routes, &current.model_routes);
     restore_embedding_route_api_keys(&mut incoming.embedding_routes, &current.embedding_routes);
@@ -1128,6 +1211,330 @@ fn restore_masked_sensitive_fields(
     ) {
         restore_required_secret(&mut incoming_ch.password, &current_ch.password);
     }
+}
+
+fn agent_social_accounts_payload(config: &crate::config::Config) -> Vec<AgentSocialAccountEntry> {
+    let mut accounts = Vec::new();
+    accounts.push(AgentSocialAccountEntry {
+        agent_name: "primary".into(),
+        twitter: config.agent.social_accounts.twitter.clone(),
+    });
+    let mut delegate_names: Vec<_> = config.agents.keys().cloned().collect();
+    delegate_names.sort();
+    for name in delegate_names {
+        if let Some(agent) = config.agents.get(&name) {
+            accounts.push(AgentSocialAccountEntry {
+                agent_name: name,
+                twitter: agent.social_accounts.twitter.clone(),
+            });
+        }
+    }
+    accounts
+}
+
+fn build_browser_headless_tool(
+    config: &crate::config::Config,
+) -> crate::tools::BrowserHeadlessTool {
+    crate::tools::BrowserHeadlessTool::new(
+        config.browser.headless.command.clone(),
+        config.browser.headless.args.clone(),
+        config
+            .browser
+            .headless
+            .cwd
+            .as_ref()
+            .map(std::path::PathBuf::from),
+        config
+            .browser
+            .headless
+            .state_dir
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| config.workspace_dir.join("state/browser-headless")),
+        config.browser.session_name.clone(),
+        config.browser.headless.headless,
+        config.browser.headless.timeout_ms,
+    )
+}
+
+async fn twitter_x_status_for_agent(
+    _agent_name: &str,
+) -> crate::tools::twitter_mcp::TwitterHealthStatus {
+    crate::tools::twitter_mcp::TwitterHealthStatus {
+        status: "disabled".into(),
+        detail: Some(
+            "The direct X/Twitter adapter is disabled because it is not reliable enough yet. Use browser_headless first, then browser_ext.".into(),
+        ),
+        backend: None,
+        supported_capabilities: crate::tools::twitter_mcp::TwitterCapabilityMatrix {
+            post: false,
+            comment: false,
+            article: false,
+        },
+    }
+}
+
+async fn browser_headless_status_for_agent(
+    config: &crate::config::Config,
+    agent_name: &str,
+) -> HeadlessIntegrationStatus {
+    let tool = build_browser_headless_tool(config);
+    let args = serde_json::json!({
+        "action": "status",
+        "platform": "x",
+        "agent_name": agent_name,
+    });
+    match tokio::time::timeout(BROWSER_HEADLESS_STATUS_TIMEOUT, tool.execute(args)).await {
+        Err(_) => HeadlessIntegrationStatus {
+            status: "status_timeout".into(),
+            authenticated: false,
+            detail: Some("browser_headless status check timed out.".into()),
+            session: None,
+            url: None,
+            required_user_action: None,
+            recommended_setup_mode: None,
+        },
+        Ok(Ok(result)) => {
+            let success = result.success;
+            let output = result.output.clone();
+            let error = result.error.clone();
+            let extra = result
+                .metadata
+                .and_then(|meta| meta.extra)
+                .unwrap_or_else(|| serde_json::json!({}));
+            let runtime_status = extra
+                .get("runtime")
+                .and_then(|runtime: &serde_json::Value| runtime.get("status"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(if success { "ready" } else { "failed" })
+                .to_string();
+            let x = extra
+                .get("x")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            HeadlessIntegrationStatus {
+                status: runtime_status,
+                authenticated: x
+                    .get("authenticated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                detail: x
+                    .get("detail")
+                    .and_then(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .or_else(|| extra.get("runtime").and_then(|runtime: &serde_json::Value| runtime.get("detail")).and_then(serde_json::Value::as_str).map(ToString::to_string))
+                    .or(error)
+                    .or(Some(output)),
+                session: extra.get("session").and_then(serde_json::Value::as_str).map(ToString::to_string),
+                url: x.get("url").and_then(serde_json::Value::as_str).map(ToString::to_string),
+                required_user_action: match x
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                {
+                    "login_required" => Some(
+                        "One-time setup required: stay signed into X in Google Chrome, then run 'Import Chrome X Session'. If that fails, run 'Interactive X Bootstrap' and complete any challenge in the opened browser window.".into(),
+                    ),
+                    "suspicious_login_prevented" => Some(
+                        "X blocked fresh automated login. Stay signed into X in Google Chrome, then run 'Import Chrome X Session'.".into(),
+                    ),
+                    _ => None,
+                },
+                recommended_setup_mode: match x
+                    .get("status")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                {
+                    "login_required" | "suspicious_login_prevented" => Some("import_chrome".into()),
+                    _ => None,
+                },
+            }
+        }
+        Ok(Err(error)) => HeadlessIntegrationStatus {
+            status: "failed".into(),
+            authenticated: false,
+            detail: Some(error.to_string()),
+            session: None,
+            url: None,
+            required_user_action: None,
+            recommended_setup_mode: None,
+        },
+    }
+}
+
+fn browser_ext_x_status(
+    bridge: Option<&crate::browser_bridge::BrowserBridge>,
+) -> BrowserExtensionIntegrationStatus {
+    let Some(bridge) = bridge else {
+        return BrowserExtensionIntegrationStatus {
+            status: "not_connected".into(),
+            detail: Some("No browser extension bridge is available.".into()),
+        };
+    };
+    let status = bridge.status();
+    if status.active_clients > 0 {
+        BrowserExtensionIntegrationStatus {
+            status: "ready".into(),
+            detail: Some(format!(
+                "{} live browser extension client(s) connected.",
+                status.active_clients
+            )),
+        }
+    } else {
+        BrowserExtensionIntegrationStatus {
+            status: "not_connected".into(),
+            detail: Some("No live browser extension client is connected.".into()),
+        }
+    }
+}
+
+async fn x_integration_status_payload(
+    config: &crate::config::Config,
+    bridge: Option<&crate::browser_bridge::BrowserBridge>,
+) -> Vec<AgentXIntegrationStatus> {
+    join_all(
+        agent_social_accounts_payload(config)
+            .into_iter()
+            .map(|account| {
+                let agent_name = account.agent_name.clone();
+                let browser_ext = browser_ext_x_status(bridge);
+                async move {
+                    let (twitter_x, browser_headless) = tokio::join!(
+                        twitter_x_status_for_agent(&agent_name),
+                        browser_headless_status_for_agent(config, &agent_name)
+                    );
+                    AgentXIntegrationStatus {
+                        agent_name,
+                        twitter_x,
+                        browser_headless,
+                        browser_ext,
+                        supported_capabilities: IntegrationCapabilityStatus {
+                            post: true,
+                            comment: true,
+                            article: true,
+                        },
+                    }
+                }
+            }),
+    )
+    .await
+}
+
+/// GET /api/agents/social-accounts — masked social credentials by agent
+pub async fn handle_api_agent_social_accounts_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let masked = mask_sensitive_fields(&config);
+    let x_status = x_integration_status_payload(&config, state.browser_bridge.as_deref()).await;
+    Json(serde_json::json!({
+        "accounts": agent_social_accounts_payload(&masked),
+        "x_status": x_status,
+    }))
+    .into_response()
+}
+
+/// PUT /api/agents/social-accounts — update per-agent social credentials
+pub async fn handle_api_agent_social_accounts_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentSocialAccountsPutRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let current = state.config.lock().clone();
+    let mut new_config = current.clone();
+
+    for entry in body.accounts {
+        if entry.agent_name == "primary" {
+            new_config.agent.social_accounts.twitter = entry.twitter;
+            continue;
+        }
+        if let Some(agent) = new_config.agents.get_mut(&entry.agent_name) {
+            agent.social_accounts.twitter = entry.twitter;
+        }
+    }
+
+    restore_masked_sensitive_fields(&mut new_config, &current);
+
+    if let Err(e) = new_config.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": format!("Invalid config: {e}")})),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = new_config.save().await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to save config: {e}")})),
+        )
+            .into_response();
+    }
+
+    *state.config.lock() = new_config.clone();
+    let masked = mask_sensitive_fields(&new_config);
+    let x_status = x_integration_status_payload(&new_config, state.browser_bridge.as_deref()).await;
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "accounts": agent_social_accounts_payload(&masked),
+        "x_status": x_status,
+    }))
+    .into_response()
+}
+
+/// POST /api/agents/social-accounts/bootstrap/x — bootstrap persistent X headless session
+pub async fn handle_api_agent_social_accounts_bootstrap_x(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentSocialBootstrapRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let tool = build_browser_headless_tool(&config);
+    let result = match crate::tools::Tool::execute(
+        &tool,
+        serde_json::json!({
+            "action": match body.mode.as_deref() {
+                Some("interactive") => "bootstrap_x_session_interactive",
+                Some("import_chrome") => "import_x_session_from_chrome",
+                _ => "bootstrap_x_session",
+            },
+            "agent_name": body.agent_name,
+            "mode": body.mode,
+        }),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response();
+        }
+    };
+
+    Json(serde_json::json!({
+        "status": if result.success { "ok" } else { "failed" },
+        "message": result.output,
+        "error": result.error,
+        "metadata": result.metadata.as_ref().and_then(|meta| meta.extra.clone()),
+    }))
+    .into_response()
 }
 
 fn hydrate_config_for_save(

@@ -336,6 +336,29 @@ pub struct DelegateAgentConfig {
     /// Maximum tool-call iterations in agentic mode.
     #[serde(default = "default_max_tool_iterations")]
     pub max_iterations: usize,
+    /// Per-agent social platform credentials and preferences.
+    #[serde(default)]
+    pub social_accounts: AgentSocialAccountsConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SocialTwitterCredentials {
+    /// X/Twitter username or handle used for twitter-client-mcp login.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// X/Twitter account password.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// X/Twitter login email or verification email.
+    #[serde(default)]
+    pub email: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct AgentSocialAccountsConfig {
+    /// X/Twitter credentials for headless social automation.
+    #[serde(default)]
+    pub twitter: Option<SocialTwitterCredentials>,
 }
 
 /// Valid temperature range for all paths (config, CLI, env override).
@@ -657,6 +680,9 @@ pub struct AgentConfig {
     /// Tool dispatch strategy (e.g. `"auto"`). Default: `"auto"`.
     #[serde(default = "default_agent_tool_dispatcher")]
     pub tool_dispatcher: String,
+    /// Social platform credentials for the primary/default agent.
+    #[serde(default)]
+    pub social_accounts: AgentSocialAccountsConfig,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -679,6 +705,7 @@ impl Default for AgentConfig {
             max_history_messages: default_agent_max_history_messages(),
             parallel_tools: false,
             tool_dispatcher: default_agent_tool_dispatcher(),
+            social_accounts: AgentSocialAccountsConfig::default(),
         }
     }
 }
@@ -1192,6 +1219,58 @@ impl Default for BrowserComputerUseConfig {
     }
 }
 
+/// Headless browser sidecar configuration (`[browser.headless]` section).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BrowserHeadlessConfig {
+    /// Enable the shared headless browser sidecar.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Command used to launch the sidecar.
+    #[serde(default = "default_browser_headless_command")]
+    pub command: String,
+    /// CLI arguments passed to the sidecar command.
+    #[serde(default = "default_browser_headless_args")]
+    pub args: Vec<String>,
+    /// Optional working directory for the sidecar process.
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Default headless mode for sidecar browser sessions.
+    #[serde(default = "default_true")]
+    pub headless: bool,
+    /// Default timeout per call in milliseconds.
+    #[serde(default = "default_browser_headless_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Optional override for where profiles, screenshots, and traces are stored.
+    #[serde(default)]
+    pub state_dir: Option<String>,
+}
+
+fn default_browser_headless_command() -> String {
+    "node".into()
+}
+
+fn default_browser_headless_args() -> Vec<String> {
+    vec!["sidecars/browser-headless/server.mjs".into()]
+}
+
+fn default_browser_headless_timeout_ms() -> u64 {
+    20_000
+}
+
+impl Default for BrowserHeadlessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_true(),
+            command: default_browser_headless_command(),
+            args: default_browser_headless_args(),
+            cwd: None,
+            headless: default_true(),
+            timeout_ms: default_browser_headless_timeout_ms(),
+            state_dir: None,
+        }
+    }
+}
+
 /// Browser automation configuration (`[browser]` section).
 ///
 /// Controls the `browser_open` tool and browser automation backends.
@@ -1221,6 +1300,9 @@ pub struct BrowserConfig {
     /// Computer-use sidecar configuration
     #[serde(default)]
     pub computer_use: BrowserComputerUseConfig,
+    /// Shared Playwright/Stagehand sidecar configuration
+    #[serde(default)]
+    pub headless: BrowserHeadlessConfig,
 }
 
 fn default_browser_backend() -> String {
@@ -1242,6 +1324,7 @@ impl Default for BrowserConfig {
             native_webdriver_url: default_browser_webdriver_url(),
             native_chrome_path: None,
             computer_use: BrowserComputerUseConfig::default(),
+            headless: BrowserHeadlessConfig::default(),
         }
     }
 }
@@ -6343,6 +6426,7 @@ tool_dispatcher = "xml"
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
 
@@ -7124,6 +7208,14 @@ default_temperature = 0.7
         assert!(b.computer_use.window_allowlist.is_empty());
         assert!(b.computer_use.max_coordinate_x.is_none());
         assert!(b.computer_use.max_coordinate_y.is_none());
+        assert!(b.headless.enabled);
+        assert_eq!(b.headless.command, "node");
+        assert_eq!(
+            b.headless.args,
+            vec!["sidecars/browser-headless/server.mjs"]
+        );
+        assert!(b.headless.headless);
+        assert_eq!(b.headless.timeout_ms, 20_000);
     }
 
     #[test]
@@ -7144,6 +7236,15 @@ default_temperature = 0.7
                 window_allowlist: vec!["Chrome".into(), "Visual Studio Code".into()],
                 max_coordinate_x: Some(3840),
                 max_coordinate_y: Some(2160),
+            },
+            headless: BrowserHeadlessConfig {
+                enabled: true,
+                command: "node".into(),
+                args: vec!["sidecars/browser-headless/server.mjs".into()],
+                cwd: Some("/tmp/agenthq".into()),
+                headless: false,
+                timeout_ms: 12_000,
+                state_dir: Some("/tmp/browser-state".into()),
             },
         };
         let toml_str = toml::to_string(&b).unwrap();
@@ -7168,6 +7269,19 @@ default_temperature = 0.7
         assert_eq!(parsed.computer_use.window_allowlist.len(), 2);
         assert_eq!(parsed.computer_use.max_coordinate_x, Some(3840));
         assert_eq!(parsed.computer_use.max_coordinate_y, Some(2160));
+        assert!(parsed.headless.enabled);
+        assert_eq!(parsed.headless.command, "node");
+        assert_eq!(
+            parsed.headless.args,
+            vec!["sidecars/browser-headless/server.mjs"]
+        );
+        assert_eq!(parsed.headless.cwd.as_deref(), Some("/tmp/agenthq"));
+        assert!(!parsed.headless.headless);
+        assert_eq!(parsed.headless.timeout_ms, 12_000);
+        assert_eq!(
+            parsed.headless.state_dir.as_deref(),
+            Some("/tmp/browser-state")
+        );
     }
 
     #[test]

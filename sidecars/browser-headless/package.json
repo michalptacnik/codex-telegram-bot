@@ -1,0 +1,15 @@
+{
+  "name": "@agenthq/browser-headless-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Stagehand + Playwright browser sidecar for AgentHQ",
+  "scripts": {
+    "start": "node server.mjs",
+    "check": "node --check server.mjs"
+  },
+  "dependencies": {
+    "@browserbasehq/stagehand": "^2.1.0",
+    "playwright": "^1.54.0"
+  }
+}

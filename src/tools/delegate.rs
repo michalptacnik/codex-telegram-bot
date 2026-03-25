@@ -535,6 +535,7 @@ mod tests {
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
         agents.insert(
@@ -549,6 +550,7 @@ mod tests {
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
         agents
@@ -703,6 +705,7 @@ mod tests {
             agentic: true,
             allowed_tools,
             max_iterations,
+            social_accounts: Default::default(),
         }
     }
 
@@ -811,6 +814,7 @@ mod tests {
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
         let tool = DelegateTool::new(agents, None, test_security());
@@ -917,6 +921,7 @@ mod tests {
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
         let tool = DelegateTool::new(agents, None, test_security());
@@ -952,6 +957,7 @@ mod tests {
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
         let tool = DelegateTool::new(agents, None, test_security());

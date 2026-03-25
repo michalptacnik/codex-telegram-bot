@@ -17,6 +17,7 @@
 
 pub mod browser;
 pub mod browser_bridge_tool;
+pub mod browser_headless;
 pub mod browser_open;
 pub mod cli_discovery;
 pub mod composio;
@@ -54,6 +55,7 @@ pub mod schema;
 pub mod screenshot;
 pub mod shell;
 pub mod traits;
+pub mod twitter_mcp;
 pub mod web_fetch;
 pub mod web_search_tool;
 
@@ -67,6 +69,7 @@ pub mod sop_status;
 
 pub use browser::{BrowserTool, ComputerUseConfig};
 pub use browser_bridge_tool::BrowserBridgeTool;
+pub use browser_headless::BrowserHeadlessTool;
 pub use browser_open::BrowserOpenTool;
 pub use composio::ComposioTool;
 pub use content_search::ContentSearchTool;
@@ -111,6 +114,7 @@ pub use sop_status::SopStatusTool;
 pub use traits::Tool;
 #[allow(unused_imports)]
 pub use traits::{ProofArtifact, ToolResult, ToolResultMetadata, ToolSpec};
+pub use twitter_mcp::TwitterMcpTool;
 pub use web_fetch::WebFetchTool;
 pub use web_search_tool::WebSearchTool;
 
@@ -271,6 +275,27 @@ pub fn all_tools_with_runtime(
             security.clone(),
             browser_config.allowed_domains.clone(),
         )));
+        // Add primary headless browser sidecar tool.
+        if browser_config.headless.enabled {
+            tool_arcs.push(Arc::new(BrowserHeadlessTool::new(
+                browser_config.headless.command.clone(),
+                browser_config.headless.args.clone(),
+                browser_config
+                    .headless
+                    .cwd
+                    .as_ref()
+                    .map(std::path::PathBuf::from),
+                browser_config
+                    .headless
+                    .state_dir
+                    .as_ref()
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|| workspace_dir.join("state/browser-headless")),
+                browser_config.session_name.clone(),
+                browser_config.headless.headless,
+                browser_config.headless.timeout_ms,
+            )));
+        }
         // Add full browser automation tool (pluggable backend)
         tool_arcs.push(Arc::new(BrowserTool::new_with_backend(
             security.clone(),
@@ -506,6 +531,8 @@ mod tests {
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         assert!(names.contains(&"browser_open"));
+        assert!(names.contains(&"browser_headless"));
+        assert!(names.contains(&"browser"));
         assert!(names.contains(&"content_search"));
         assert!(names.contains(&"model_routing_config"));
         assert!(names.contains(&"pushover"));
@@ -639,6 +666,7 @@ mod tests {
                 agentic: false,
                 allowed_tools: Vec::new(),
                 max_iterations: 10,
+                social_accounts: Default::default(),
             },
         );
 

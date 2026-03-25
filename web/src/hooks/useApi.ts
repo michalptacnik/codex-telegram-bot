@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
+  apiFetch,
   getStatus,
   getTools,
   getCronJobs,
@@ -32,6 +33,15 @@ interface UseApiResult<T> {
   loading: boolean;
   /** Re-fetch the data manually. */
   refetch: () => void;
+}
+
+export function useApi() {
+  const fetchApi = useCallback(
+    <T = any>(path: string, options?: RequestInit) => apiFetch<T>(path, options),
+    [],
+  );
+
+  return { fetchApi };
 }
 
 function useApiCall<T>(

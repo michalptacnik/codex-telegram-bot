@@ -383,26 +383,45 @@ fn tool_call_signature(name: &str, arguments: &serde_json::Value) -> (String, St
 }
 
 fn allow_duplicate_tool_call(name: &str, arguments: &serde_json::Value) -> bool {
-    if !name.eq_ignore_ascii_case("browser_ext") {
-        return false;
-    }
-
     let Some(action) = arguments.get("action").and_then(|value| value.as_str()) else {
         return false;
     };
 
-    matches!(
-        action.trim().to_ascii_lowercase().as_str(),
+    let action = action.trim().to_ascii_lowercase();
+
+    let observational_retry = matches!(
+        action.as_str(),
         // Observational browser steps often need legitimate retries after DOM churn,
         // timeouts, or page transitions within the same turn.
-        "snapshot" | "wait" | "get_text" | "run_script" | "press"
-    )
+        "snapshot"
+            | "wait"
+            | "get_text"
+            | "run_script"
+            | "press"
+            | "wait_for"
+            | "save_screenshot"
+            | "status"
+    );
+
+    let browser_session_retry =
+        (name.eq_ignore_ascii_case("browser_headless") || name.eq_ignore_ascii_case("browser_ext"))
+            && matches!(action.as_str(), "open_url" | "navigate_url");
+
+    ((name.eq_ignore_ascii_case("browser_ext") || name.eq_ignore_ascii_case("browser_headless"))
+        && observational_retry)
+        || browser_session_retry
 }
 
 fn message_requires_logged_in_browser_ext(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
+    let normalized = lower
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>();
+    let mentions_x_token = normalized.split_whitespace().any(|token| token == "x");
 
-    let mentions_platform = lower.contains("x.com")
+    let mentions_platform = mentions_x_token
+        || lower.contains("x.com")
         || lower.contains("twitter")
         || lower.contains("linkedin")
         || lower.contains("instagram")
@@ -2898,6 +2917,9 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
     let mut instructions = String::new();
     let has_mail = tools_registry.iter().any(|tool| tool.name() == "mail");
     let has_browser = tools_registry.iter().any(|tool| tool.name() == "browser");
+    let has_browser_headless = tools_registry
+        .iter()
+        .any(|tool| tool.name() == "browser_headless");
     let has_browser_ext = tools_registry
         .iter()
         .any(|tool| tool.name() == "browser_ext");
@@ -2928,10 +2950,17 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
         );
     }
 
+    if has_browser_headless {
+        instructions.push_str("### Headless Browser Rule\n\n");
+        instructions.push_str(
+            "Use `browser_headless` as the primary browser tool before `browser_ext` or legacy `browser` for ordinary website work and browser automation. Reuse the same `session` value across related calls in one task so navigation state persists. Use `browser_headless` action=`status` to distinguish sidecar health from authentication state, and use `bootstrap_x_session` before authenticated X work when the saved headless session is missing or expired. Save screenshots or traces when the flow becomes flaky or proof is needed.\n\n",
+        );
+    }
+
     if has_browser_ext {
         instructions.push_str("### Logged-In Browser Rule\n\n");
         instructions.push_str(
-            "For X/Twitter, LinkedIn, Instagram, or other authenticated social flows that must use the user's existing logged-in browser session, use `browser_ext` instead of `browser`. This includes posting, replying, commenting, messaging, article drafting, or publishing. If `browser_ext` is available, do not fall back to `browser` for those tasks.\n\n",
+            "For X/Twitter, LinkedIn, Instagram, or other authenticated social flows, prefer authenticated `browser_headless` first, and then `browser_ext` only when headless automation is blocked, the user explicitly wants the live session, or the task requires the user's existing logged-in browser state. Do not fall back to legacy `browser` for those social tasks.\n\n",
         );
     }
 
@@ -3558,8 +3587,12 @@ pub async fn process_message(
     if config.browser.enabled {
         tool_descs.push(("browser_open", "Open approved URLs in browser."));
         tool_descs.push((
+            "browser_headless",
+            "Primary headless browser automation tool. Uses a local Stagehand + Playwright sidecar with persistent sessions, screenshots, and traces. Prefer this before browser_ext for normal website work.",
+        ));
+        tool_descs.push((
             "browser_ext",
-            "Preferred tool for logged-in browser work. Control the live browser extension session for X, LinkedIn, Instagram, forms, and other authenticated sites; supports browser selection when multiple clients are connected.",
+            "Fallback tool for live logged-in browser work. Control the installed browser extension session for X, LinkedIn, Instagram, forms, and other authenticated sites when the headless path is blocked or the user wants the real session; supports browser selection when multiple clients are connected.",
         ));
         tool_descs.push((
             "browser",
@@ -4342,6 +4375,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn browser_headless_repeated_navigation_is_not_deduplicated() {
+        let provider = ScriptedProvider::from_text_responses(vec![
+            r#"<tool_call>
+{"name":"browser_headless","arguments":{"action":"open_url","session":"x_session","url":"https://x.com/example"}}
+</tool_call>
+<tool_call>
+{"name":"browser_headless","arguments":{"action":"open_url","session":"x_session","url":"https://x.com/example"}}
+</tool_call>"#,
+            "done",
+        ]);
+
+        let invocations = Arc::new(AtomicUsize::new(0));
+        let tools_registry: Vec<Box<dyn Tool>> = vec![Box::new(CountingTool::new(
+            "browser_headless",
+            Arc::clone(&invocations),
+        ))];
+
+        let mut history = vec![
+            ChatMessage::system("test-system"),
+            ChatMessage::user("run tool calls"),
+        ];
+        let observer = NoopObserver;
+
+        let result = run_tool_call_loop(
+            &provider,
+            &mut history,
+            &tools_registry,
+            &observer,
+            "mock-provider",
+            "mock-model",
+            0.0,
+            true,
+            None,
+            "cli",
+            &crate::config::MultimodalConfig::default(),
+            4,
+            None,
+            None,
+            None,
+            &[],
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await
+        .expect("loop should allow repeated browser_headless navigation");
+
+        assert_eq!(result, "done");
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            2,
+            "browser_headless navigation retries should both execute"
+        );
+
+        let tool_results = history
+            .iter()
+            .find(|msg| msg.role == "user" && msg.content.starts_with("[Tool results]"))
+            .expect("prompt-mode tool result payload should be present");
+        assert!(!tool_results.content.contains("Skipped duplicate tool call"));
+    }
+
+    #[tokio::test]
     async fn run_tool_call_loop_native_mode_preserves_fallback_tool_call_ids() {
         let provider = ScriptedProvider::from_text_responses(vec![
             r#"{"content":"Need to call tool","tool_calls":[{"id":"call_abc","name":"count_tool","arguments":"{\"value\":\"X\"}"}]}"#,
@@ -4983,7 +5077,8 @@ Tail"#;
         use crate::channels::email_channel::EmailConfig;
         use crate::security::SecurityPolicy;
         use crate::tools::{
-            browser::BrowserTool, browser_bridge_tool::BrowserBridgeTool, mail::MailTool,
+            browser::BrowserTool, browser_bridge_tool::BrowserBridgeTool,
+            browser_headless::BrowserHeadlessTool, mail::MailTool, twitter_mcp::TwitterMcpTool,
         };
 
         let security = Arc::new(SecurityPolicy::from_config(
@@ -5013,6 +5108,16 @@ Tail"#;
                 vec!["*".into()],
                 Some("test".into()),
             )),
+            Box::new(BrowserHeadlessTool::new(
+                "node".into(),
+                vec!["sidecars/browser-headless/server.mjs".into()],
+                None,
+                std::path::PathBuf::from("/tmp/browser-headless"),
+                Some("test".into()),
+                true,
+                20_000,
+            )),
+            Box::new(TwitterMcpTool::new()),
             Box::new(BrowserBridgeTool::new(Arc::new(
                 crate::browser_bridge::BrowserBridge::new(),
             ))),
@@ -5023,6 +5128,8 @@ Tail"#;
         assert!(instructions.contains("prefer DOM-style actions: `open`, then `snapshot`, then `find`/`fill`/`click`/`press`/`get_text`"));
         assert!(instructions
             .contains("If a browser action fails, stop and report the exact failed action"));
+        assert!(instructions.contains("Use `browser_headless` as the primary browser tool"));
+        assert!(instructions.contains("For X/Twitter tasks, use `twitter_x` first"));
         assert!(instructions
             .contains("For X/Twitter, LinkedIn, Instagram, or other authenticated social flows"));
     }
@@ -5043,7 +5150,10 @@ Tail"#;
     #[test]
     fn filter_tools_for_message_removes_generic_browser_for_social_turns() {
         use crate::security::SecurityPolicy;
-        use crate::tools::{browser::BrowserTool, browser_bridge_tool::BrowserBridgeTool};
+        use crate::tools::{
+            browser::BrowserTool, browser_bridge_tool::BrowserBridgeTool,
+            browser_headless::BrowserHeadlessTool,
+        };
 
         let security = Arc::new(SecurityPolicy::from_config(
             &crate::config::AutonomyConfig::default(),
@@ -5055,12 +5165,22 @@ Tail"#;
                 vec!["*".into()],
                 Some("test".into()),
             )),
+            Box::new(BrowserHeadlessTool::new(
+                "node".into(),
+                vec!["sidecars/browser-headless/server.mjs".into()],
+                None,
+                std::path::PathBuf::from("/tmp/browser-headless"),
+                Some("test".into()),
+                true,
+                20_000,
+            )),
             Box::new(BrowserBridgeTool::new(Arc::new(
                 crate::browser_bridge::BrowserBridge::new(),
             ))),
         ];
         let mut tool_descs = vec![
             ("browser", "Generic browser automation."),
+            ("browser_headless", "Primary headless browser automation."),
             ("browser_ext", "Logged-in browser extension automation."),
         ];
 
@@ -5071,6 +5191,7 @@ Tail"#;
         );
 
         assert!(tools.iter().all(|tool| tool.name() != "browser"));
+        assert!(tools.iter().any(|tool| tool.name() == "browser_headless"));
         assert!(tools.iter().any(|tool| tool.name() == "browser_ext"));
         assert!(tool_descs.iter().all(|(name, _)| *name != "browser"));
     }
