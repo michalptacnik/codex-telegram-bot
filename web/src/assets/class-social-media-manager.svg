@@ -1,0 +1,60 @@
+<svg width="720" height="520" viewBox="0 0 720 520" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="720" height="520" rx="36" fill="#F4E4CF"/>
+  <rect x="22" y="22" width="676" height="476" rx="30" fill="url(#panel)"/>
+  <path d="M82 116C153 48 277 34 381 70C456 96 526 146 640 124V232C566 206 499 213 436 233C337 264 231 250 144 207C116 193 97 177 82 159V116Z" fill="url(#warmGlow)" opacity="0.92"/>
+  <path d="M68 392C146 336 250 318 338 342C415 362 472 401 650 369V454H68V392Z" fill="#C78763" opacity="0.14"/>
+  <circle cx="566" cy="116" r="56" fill="#FFE3AE" opacity="0.62"/>
+  <circle cx="610" cy="158" r="24" fill="#FFF8EB" opacity="0.92"/>
+  <ellipse cx="364" cy="452" rx="186" ry="24" fill="#6E4736" opacity="0.12"/>
+
+  <rect x="482" y="216" width="122" height="154" rx="26" fill="#FFF8EF"/>
+  <rect x="494" y="230" width="98" height="123" rx="18" fill="#F2E4D6"/>
+  <rect x="514" y="254" width="58" height="10" rx="5" fill="#C58B67"/>
+  <rect x="506" y="279" width="74" height="10" rx="5" fill="#D7A37D"/>
+  <rect x="506" y="302" width="60" height="10" rx="5" fill="#D7A37D"/>
+  <circle cx="543" cy="336" r="7" fill="#C58B67"/>
+
+  <g opacity="0.96">
+    <rect x="122" y="250" width="118" height="92" rx="22" fill="#FFF8F0"/>
+    <rect x="140" y="269" width="54" height="8" rx="4" fill="#C58B67"/>
+    <rect x="140" y="289" width="72" height="8" rx="4" fill="#DEB18F"/>
+    <rect x="140" y="309" width="61" height="8" rx="4" fill="#DEB18F"/>
+    <circle cx="215" cy="246" r="22" fill="#F6D893"/>
+    <path d="M215 234V258" stroke="#77573A" stroke-width="6" stroke-linecap="round"/>
+    <path d="M203 246H227" stroke="#77573A" stroke-width="6" stroke-linecap="round"/>
+  </g>
+
+  <path d="M188 398C188 298.589 268.589 218 368 218C467.411 218 548 298.589 548 398H188Z" fill="#A55F4D"/>
+  <path d="M254 406C254 350.772 298.772 306 354 306H382C437.228 306 482 350.772 482 406H254Z" fill="#C97C63"/>
+
+  <path d="M252 216C252 142.546 311.546 83 385 83C441.047 83 489.003 117.63 509.203 166.655C480.562 153.176 448.567 146 414.895 146C344.906 146 282.191 176.998 252 225.92V216Z" fill="#2B1815"/>
+  <path d="M219 232C219 143.635 290.635 72 379 72C467.365 72 539 143.635 539 232V267H219V232Z" fill="#34201B"/>
+  <path d="M258 212C273 155 316 118 382 118C444 118 486 154 504 208C476 189 442 179 404 179H298C284 179 270 190 258 212Z" fill="#1E120F"/>
+  <path d="M264 228C264 172.772 308.772 128 364 128H372C427.228 128 472 172.772 472 228V252C472 315.513 420.513 367 357 367C305.487 367 264 325.513 264 274V228Z" fill="#8B563E"/>
+  <path d="M277 227C277 176.19 318.19 135 369 135C419.81 135 461 176.19 461 227V246C461 297.914 418.914 340 367 340C315.086 340 273 297.914 273 246L277 227Z" fill="#945C42"/>
+  <path d="M294 236C294 200.654 322.654 172 358 172H381C416.346 172 445 200.654 445 236V246C445 289.63 409.63 325 366 325C322.37 325 287 289.63 287 246L294 236Z" fill="#B97758"/>
+  <path d="M300 217C318 181 349 164 393 164C422 164 444 175 461 196C458 161 432 132 387 132C338 132 305 164 300 217Z" fill="#281612"/>
+  <path d="M312 254C326 267 341.667 273.5 359 273.5C376.333 273.5 392 267 406 254" stroke="#6B3D2B" stroke-width="8" stroke-linecap="round"/>
+  <path d="M349 285C355.667 288.333 361.333 290 366 290C370.667 290 376.333 288.333 383 285" stroke="#8A553F" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="332" cy="228" r="8" fill="#241512"/>
+  <circle cx="401" cy="228" r="8" fill="#241512"/>
+  <path d="M344 244C351 249.333 358.333 252 366 252C373.667 252 381 249.333 388 244" stroke="#6B3D2B" stroke-width="5" stroke-linecap="round"/>
+  <path d="M315 211C324.867 205.711 335.867 203.067 348 203.067C360.133 203.067 370.467 205.711 379 211" stroke="#2D1B17" stroke-width="5" stroke-linecap="round"/>
+  <path d="M385 211C393.533 205.711 403.867 203.067 416 203.067C428.133 203.067 439.133 205.711 449 211" stroke="#2D1B17" stroke-width="5" stroke-linecap="round"/>
+
+  <text x="70" y="84" fill="#573A2B" font-family="Georgia, serif" font-size="34" font-weight="700">Social Media Manager</text>
+  <text x="70" y="122" fill="#7A5746" font-family="Avenir, Verdana, sans-serif" font-size="20">Warm strategist. Story-led. Audience-savvy.</text>
+
+  <defs>
+    <linearGradient id="panel" x1="72" y1="42" x2="648" y2="488" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F5E7D8"/>
+      <stop offset="0.55" stop-color="#E7CCB2"/>
+      <stop offset="1" stop-color="#D7AF90"/>
+    </linearGradient>
+    <linearGradient id="warmGlow" x1="150" y1="74" x2="598" y2="236" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBE5C5"/>
+      <stop offset="0.45" stop-color="#F4BF89"/>
+      <stop offset="1" stop-color="#E8A174"/>
+    </linearGradient>
+  </defs>
+</svg>

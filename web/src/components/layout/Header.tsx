@@ -3,27 +3,14 @@ import { LogOut } from 'lucide-react';
 import { t } from '@/lib/i18n';
 import { useLocaleContext } from '@/App';
 import { useAuth } from '@/hooks/useAuth';
-
-const routeTitles: Record<string, string> = {
-  '/': 'nav.dashboard',
-  '/agent': 'nav.agent',
-  '/tools': 'nav.tools',
-  '/cron': 'nav.cron',
-  '/integrations': 'nav.integrations',
-  '/memory': 'nav.memory',
-  '/config': 'nav.config',
-  '/cost': 'nav.cost',
-  '/logs': 'nav.logs',
-  '/doctor': 'nav.doctor',
-};
+import { routeTitles } from './navigation';
 
 export default function Header() {
   const location = useLocation();
   const { logout } = useAuth();
   const { locale, setAppLocale } = useLocaleContext();
 
-  const titleKey = routeTitles[location.pathname] ?? 'nav.dashboard';
-  const pageTitle = t(titleKey);
+  const pageTitle = routeTitles[location.pathname] ?? 'Studio';
 
   const toggleLanguage = () => {
     setAppLocale(locale === 'en' ? 'tr' : 'en');

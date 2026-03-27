@@ -153,3 +153,132 @@ export interface AgentXIntegrationStatus {
   browser_ext: BrowserExtensionIntegrationStatus;
   supported_capabilities: IntegrationCapabilityStatus;
 }
+
+export type AgentClassStatus = 'active' | 'coming_soon';
+
+export interface SoulStyle {
+  emoji: string;
+  emphasis: string;
+  brevity: string;
+}
+
+export interface SoulProfile {
+  name: string;
+  voice: string;
+  principles: string[];
+  boundaries: string[];
+  style: SoulStyle;
+}
+
+export interface IdentityOverlay {
+  creature?: string | null;
+  vibe?: string | null;
+  emoji?: string | null;
+  role_title?: string | null;
+  tagline?: string | null;
+}
+
+export interface SoulProfileOverlay {
+  voice?: string | null;
+  principles: string[];
+  boundaries: string[];
+  style?: SoulStyle | null;
+}
+
+export interface AgentClassManifest {
+  version: number;
+  id: string;
+  name: string;
+  status: AgentClassStatus;
+  description: string;
+  fantasy_theme: string;
+  default_role_summary: string;
+  default_soul_overlay: SoulProfileOverlay;
+  default_identity_overlay: IdentityOverlay;
+  tool_grants: string[];
+  skill_grants: string[];
+  channel_affinities: string[];
+  integration_affinities: string[];
+  guardrails: string[];
+  evaluation_scenarios: string[];
+}
+
+export interface AgentProfileOverrides {
+  summary?: string | null;
+  system_prompt_appendix?: string | null;
+  provider?: string | null;
+  model?: string | null;
+  temperature?: number | null;
+  max_depth?: number | null;
+  agentic?: boolean | null;
+  max_iterations?: number | null;
+  tool_grants: string[];
+  skill_grants: string[];
+  soul: SoulProfileOverlay;
+  identity: IdentityOverlay;
+}
+
+export interface AgentProfile {
+  id: string;
+  name: string;
+  avatar?: string | null;
+  launch_on_startup?: boolean;
+  primary_class: string;
+  secondary_classes: string[];
+  social_accounts: {
+    twitter?: SocialTwitterCredentials | null;
+  };
+  overrides: AgentProfileOverrides;
+}
+
+export interface ResolvedIdentity {
+  name: string;
+  creature: string;
+  vibe: string;
+  emoji: string;
+  role_title: string;
+  tagline: string;
+}
+
+export type DesktopAppearance = 'light' | 'dark' | 'system';
+
+export type DesktopPlatform = 'macos' | 'windows' | 'linux' | 'web';
+
+export interface DesktopShellInfo {
+  name: string;
+  mode: string;
+  runtime_host: string;
+  platform: DesktopPlatform;
+  appearance: DesktopAppearance;
+  menuDriven: boolean;
+  supportsTranslucency: boolean;
+  windowStyle?: string | null;
+  updateConfigured?: boolean;
+}
+
+export interface ResolvedAgentProfile {
+  profile: AgentProfile;
+  classes: AgentClassManifest[];
+  summary: string;
+  soul: SoulProfile;
+  identity: ResolvedIdentity;
+  tool_grants: string[];
+  skill_grants: string[];
+  guardrails: string[];
+  evaluation_scenarios: string[];
+}
+
+export interface OnboardingState {
+  version: number;
+  completed: boolean;
+  active_agent_id: string;
+  startup_agent_id?: string | null;
+  has_provider_config: boolean;
+  runtime_ready: boolean;
+  profile_count: number;
+}
+
+export interface OnboardingBootstrapResponse {
+  onboarding: OnboardingState;
+  active_profile: ResolvedAgentProfile;
+}

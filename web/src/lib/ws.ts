@@ -22,6 +22,14 @@ const MAX_RECONNECT_DELAY = 30000;
 
 const SESSION_STORAGE_KEY = 'zeroclaw_session_id';
 
+function runtimeWebSocketBaseUrl(): string {
+  const { protocol, host } = window.location;
+  if (protocol === 'https:' || protocol === 'http:') {
+    return `${protocol === 'https:' ? 'wss:' : 'ws:'}//${host}`;
+  }
+  return 'ws://127.0.0.1:8765';
+}
+
 /** Return a stable session ID, persisted in sessionStorage across reconnects. */
 function getOrCreateSessionId(): string {
   let id = sessionStorage.getItem(SESSION_STORAGE_KEY);
@@ -49,9 +57,7 @@ export class WebSocketClient {
   private readonly autoReconnect: boolean;
 
   constructor(options: WebSocketClientOptions = {}) {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    this.baseUrl =
-      options.baseUrl ?? `${protocol}//${window.location.host}`;
+    this.baseUrl = options.baseUrl ?? runtimeWebSocketBaseUrl();
     this.reconnectDelay = options.reconnectDelay ?? DEFAULT_RECONNECT_DELAY;
     this.maxReconnectDelay = options.maxReconnectDelay ?? MAX_RECONNECT_DELAY;
     this.autoReconnect = options.autoReconnect ?? true;

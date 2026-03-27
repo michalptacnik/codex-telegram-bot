@@ -1,8 +1,16 @@
 import { Outlet } from 'react-router-dom';
 import Sidebar from '@/components/layout/Sidebar';
 import Header from '@/components/layout/Header';
+import MacLayout from '@/components/layout/MacLayout';
+import { useShell } from '@/components/shell/ShellProvider';
 
 export default function Layout() {
+  const { isDesktopMac } = useShell();
+
+  if (isDesktopMac) {
+    return <MacLayout />;
+  }
+
   return (
     <div className="min-h-screen bg-gray-950 text-white">
       {/* Fixed sidebar */}

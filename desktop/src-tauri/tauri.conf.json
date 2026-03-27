@@ -1,0 +1,37 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Agent HQ",
+  "version": "0.1.0",
+  "identifier": "com.agenthq.desktop",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "cd ../web && VITE_PUBLIC_BASE=./ VITE_OUT_DIR=dist-desktop npm run build",
+    "devUrl": "http://127.0.0.1:8765",
+    "frontendDist": "../../web/dist-desktop"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Agent HQ",
+        "width": 1500,
+        "height": 960,
+        "minWidth": 1100,
+        "minHeight": 760,
+        "resizable": true,
+        "fullscreen": false,
+        "transparent": true,
+        "hiddenTitle": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
+  }
+}

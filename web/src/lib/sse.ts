@@ -18,6 +18,14 @@ export interface SSEClientOptions {
 const DEFAULT_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
 
+function runtimeSsePath(path: string): string {
+  const { protocol } = window.location;
+  if (protocol === 'http:' || protocol === 'https:') {
+    return path;
+  }
+  return `http://127.0.0.1:8765${path}`;
+}
+
 /**
  * SSE client that connects to the ZeroClaw event stream.
  *
@@ -62,7 +70,7 @@ export class SSEClient {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    fetch(this.path, {
+    fetch(runtimeSsePath(this.path), {
       headers,
       signal: this.controller.signal,
     })

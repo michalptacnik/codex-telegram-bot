@@ -1,0 +1,86 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos-updater:
+    runs-on: macos-14
+    env:
+      CARGO_TERM_COLOR: always
+      AGENT_HQ_UPDATER_PUBKEY: ${{ secrets.AGENT_HQ_UPDATER_PUBKEY }}
+      AGENT_HQ_UPDATER_ENDPOINTS: ${{ vars.AGENT_HQ_UPDATER_ENDPOINTS }}
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: |
+          cd web && npm ci
+          cd ../desktop && npm ci
+
+      - name: Validate updater secrets
+        run: |
+          test -n "$AGENT_HQ_UPDATER_PUBKEY"
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+
+      - name: Build signed macOS updater release
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          cd desktop
+          npm run tauri:build:update
+
+      - name: Validate updater artifacts
+        run: |
+          find desktop/src-tauri/target/release/bundle -type f | sort
+          test -n "$(find desktop/src-tauri/target/release/bundle -name 'latest.json' -print -quit)"
+          test -n "$(find desktop/src-tauri/target/release/bundle -name '*.sig' -print -quit)"
+
+      - name: Upload desktop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-release-${{ github.run_number }}
+          path: |
+            desktop/src-tauri/target/release/bundle/**/*.dmg
+            desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
+            desktop/src-tauri/target/release/bundle/**/*.sig
+            desktop/src-tauri/target/release/bundle/**/latest.json
+          if-no-files-found: error
+
+      - name: Publish release assets
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/src-tauri/target/release/bundle/**/*.dmg
+            desktop/src-tauri/target/release/bundle/**/*.app.tar.gz
+            desktop/src-tauri/target/release/bundle/**/*.sig
+            desktop/src-tauri/target/release/bundle/**/latest.json

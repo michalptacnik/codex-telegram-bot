@@ -1,0 +1,14 @@
+{
+  "name": "agent-hq-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "tauri:build:update": "node scripts/write_updater_config.mjs && tauri build --config src-tauri/tauri.generated.updater.conf.json"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.1.0"
+  }
+}

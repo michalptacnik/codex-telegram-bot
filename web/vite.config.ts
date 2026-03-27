@@ -4,7 +4,7 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "path";
 
 export default defineConfig({
-  base: "/_app/",
+  base: process.env.VITE_PUBLIC_BASE ?? "/_app/",
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
@@ -12,7 +12,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: "dist",
+    outDir: process.env.VITE_OUT_DIR ?? "dist",
   },
   server: {
     proxy: {

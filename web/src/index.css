@@ -1,44 +1,78 @@
 @import "tailwindcss";
 
-/*
- * ZeroClaw Dark Theme
- * Dark-mode by default with gray cards and blue/green accents.
- */
-
 @theme {
-  --color-bg-primary: #0a0a0f;
-  --color-bg-secondary: #12121a;
-  --color-bg-card: #1a1a2e;
-  --color-bg-card-hover: #22223a;
-  --color-bg-input: #14141f;
+  --color-bg-primary: #0b0f17;
+  --color-bg-secondary: #121826;
+  --color-bg-card: rgba(255, 255, 255, 0.08);
+  --color-bg-card-hover: rgba(255, 255, 255, 0.12);
+  --color-bg-input: rgba(12, 17, 26, 0.7);
 
-  --color-border-default: #2a2a3e;
-  --color-border-subtle: #1e1e30;
+  --color-border-default: rgba(255, 255, 255, 0.12);
+  --color-border-subtle: rgba(255, 255, 255, 0.08);
 
-  --color-accent-blue: #3b82f6;
-  --color-accent-blue-hover: #2563eb;
-  --color-accent-green: #10b981;
-  --color-accent-green-hover: #059669;
+  --color-accent-blue: #0a84ff;
+  --color-accent-blue-hover: #409cff;
+  --color-accent-green: #32d74b;
+  --color-accent-green-hover: #63e276;
 
-  --color-text-primary: #e2e8f0;
-  --color-text-secondary: #94a3b8;
-  --color-text-muted: #64748b;
+  --color-text-primary: #eef3fb;
+  --color-text-secondary: #b0bfd5;
+  --color-text-muted: #71829e;
 
-  --color-status-success: #10b981;
-  --color-status-warning: #f59e0b;
-  --color-status-error: #ef4444;
-  --color-status-info: #3b82f6;
+  --color-status-success: #32d74b;
+  --color-status-warning: #ffd60a;
+  --color-status-error: #ff5f57;
+  --color-status-info: #64d2ff;
 }
 
-/* Base styles */
-html {
+:root {
   color-scheme: dark;
+  --shell-bg: radial-gradient(circle at top, #202838 0%, #161d2a 40%, #0d121a 100%);
+  --shell-text: #f2f6fc;
+  --shell-muted: #a9b7cb;
+  --shell-border: rgba(255, 255, 255, 0.14);
+  --shell-panel: rgba(255, 255, 255, 0.1);
+  --shell-panel-strong: rgba(255, 255, 255, 0.15);
+  --shell-panel-hover: rgba(255, 255, 255, 0.2);
+  --shell-sidebar: rgba(14, 18, 28, 0.66);
+  --shell-toolbar: rgba(14, 18, 28, 0.46);
+  --shell-input: rgba(8, 12, 19, 0.5);
+  --shell-selection: rgba(10, 132, 255, 0.24);
+  --shell-shadow: 0 28px 80px rgba(3, 8, 20, 0.28);
+  --shell-ring: rgba(10, 132, 255, 0.45);
+}
+
+:root[data-appearance="light"] {
+  color-scheme: light;
+  --shell-bg: radial-gradient(circle at top, #f6f8fc 0%, #edf1f8 42%, #dce4f0 100%);
+  --shell-text: #15243a;
+  --shell-muted: #586b86;
+  --shell-border: rgba(255, 255, 255, 0.55);
+  --shell-panel: rgba(255, 255, 255, 0.76);
+  --shell-panel-strong: rgba(255, 255, 255, 0.9);
+  --shell-panel-hover: rgba(255, 255, 255, 0.96);
+  --shell-sidebar: rgba(247, 249, 252, 0.72);
+  --shell-toolbar: rgba(255, 255, 255, 0.62);
+  --shell-input: rgba(255, 255, 255, 0.84);
+  --shell-selection: rgba(10, 132, 255, 0.12);
+  --shell-shadow: 0 26px 70px rgba(15, 23, 42, 0.14);
+  --shell-ring: rgba(10, 132, 255, 0.28);
+}
+
+html,
+body,
+#root {
+  min-height: 100vh;
 }
 
 body {
-  background-color: var(--color-bg-primary);
-  color: var(--color-text-primary);
+  margin: 0;
+  background: var(--shell-bg);
+  color: var(--shell-text);
   font-family:
+    "SF Pro Display",
+    "SF Pro Text",
+    "Helvetica Neue",
     "Inter",
     ui-sans-serif,
     system-ui,
@@ -48,42 +82,788 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-#root {
-  min-height: 100vh;
+body.desktop-macos {
+  background-attachment: fixed;
 }
 
-/* Scrollbar styling */
+a,
+button,
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--color-bg-secondary);
+  background: transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--color-border-default);
-  border-radius: 4px;
+  background: rgba(127, 141, 165, 0.34);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-muted);
-}
-
-/* Card utility */
-.card {
-  background-color: var(--color-bg-card);
-  border: 1px solid var(--color-border-default);
-  border-radius: 0.75rem;
-}
-
-.card:hover {
-  background-color: var(--color-bg-card-hover);
-}
-
-/* Focus ring utility */
 *:focus-visible {
-  outline: 2px solid var(--color-accent-blue);
+  outline: 2px solid var(--shell-ring);
   outline-offset: 2px;
+}
+
+.desktop-macos .bg-gray-950,
+.desktop-macos .bg-gray-900,
+.desktop-macos .bg-gray-800,
+.desktop-macos .bg-gray-950\/70,
+.desktop-macos .bg-gray-900\/70,
+.desktop-macos .bg-gray-800\/50 {
+  background-color: var(--shell-panel) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(24px) saturate(150%);
+}
+
+.desktop-macos .border-gray-800,
+.desktop-macos .border-gray-700,
+.desktop-macos .border-gray-800\/50,
+.desktop-macos .border-gray-700\/50 {
+  border-color: var(--shell-border) !important;
+}
+
+.desktop-macos .text-white {
+  color: var(--shell-text) !important;
+}
+
+.desktop-macos .text-gray-500,
+.desktop-macos .text-gray-400,
+.desktop-macos .text-gray-300 {
+  color: var(--shell-muted) !important;
+}
+
+.desktop-macos .text-slate-500,
+.desktop-macos .text-slate-400 {
+  color: var(--shell-muted) !important;
+}
+
+.desktop-macos .text-slate-300,
+.desktop-macos .text-slate-200 {
+  color: color-mix(in srgb, var(--shell-text) 84%, white 16%) !important;
+}
+
+.desktop-macos .font-serif {
+  font-family:
+    "SF Pro Display",
+    "Helvetica Neue",
+    "Inter",
+    ui-sans-serif,
+    system-ui,
+    sans-serif !important;
+}
+
+.desktop-macos .rounded-xl,
+.desktop-macos .rounded-2xl,
+.desktop-macos .rounded-3xl {
+  border-radius: 1.35rem !important;
+}
+
+.desktop-macos .bg-blue-600,
+.desktop-macos .hover\:bg-blue-700:hover {
+  background-color: #0a84ff !important;
+}
+
+.desktop-macos .bg-green-600,
+.desktop-macos .hover\:bg-green-700:hover {
+  background-color: #30b94d !important;
+}
+
+.desktop-macos .bg-yellow-600,
+.desktop-macos .hover\:bg-yellow-700:hover {
+  background-color: #c89312 !important;
+}
+
+.desktop-macos .bg-red-600,
+.desktop-macos .hover\:bg-red-700:hover {
+  background-color: #d74d4d !important;
+}
+
+.desktop-macos .shadow-\[0_20px_80px_rgba\(0\,0\,0\,0\.35\)\] {
+  box-shadow: var(--shell-shadow) !important;
+}
+
+.mac-shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+  background: transparent;
+}
+
+.mac-sidebar {
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  padding: 1.25rem 1rem 1rem;
+  border-right: 1px solid var(--shell-border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.04)),
+    var(--shell-sidebar);
+  backdrop-filter: blur(28px) saturate(155%);
+}
+
+.mac-sidebar-collapsed {
+  width: 84px;
+}
+
+.mac-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+  padding: 0.5rem 0.55rem;
+}
+
+.mac-sidebar-logo {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.95rem;
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.95), rgba(71, 167, 255, 0.72));
+  color: white;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.mac-sidebar-brand-title {
+  margin: 0;
+  font-size: 0.98rem;
+  font-weight: 700;
+}
+
+.mac-sidebar-brand-detail {
+  margin: 0.125rem 0 0;
+  font-size: 0.76rem;
+  color: var(--shell-muted);
+}
+
+.mac-sidebar-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  overflow-y: auto;
+}
+
+.mac-sidebar-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.mac-sidebar-section-title {
+  margin: 0;
+  padding: 0 0.7rem;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--shell-muted);
+}
+
+.mac-sidebar-items {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.mac-sidebar-link {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.7rem 0.8rem;
+  border-radius: 1rem;
+  color: var(--shell-muted);
+  text-decoration: none;
+  transition:
+    background-color 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.mac-sidebar-link:hover {
+  background: var(--shell-panel);
+  color: var(--shell-text);
+}
+
+.mac-sidebar-link-active {
+  background: var(--shell-selection);
+  color: var(--shell-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+}
+
+.mac-sidebar-link-icon-only {
+  justify-content: center;
+  padding-inline: 0;
+}
+
+.mac-content {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mac-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  min-height: 4.75rem;
+  padding: 1rem 1.5rem 1rem 1.25rem;
+  border-bottom: 1px solid var(--shell-border);
+  background: var(--shell-toolbar);
+  backdrop-filter: blur(28px) saturate(160%);
+}
+
+.mac-toolbar-leading,
+.mac-toolbar-trailing {
+  display: flex;
+  align-items: center;
+  gap: 0.875rem;
+}
+
+.mac-toolbar-button,
+.mac-toolbar-pill,
+.mac-toolbar-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.5rem;
+  padding: 0 0.9rem;
+  border: 1px solid var(--shell-border);
+  border-radius: 999px;
+  background: var(--shell-panel-strong);
+  color: var(--shell-text);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(18px) saturate(160%);
+}
+
+.mac-toolbar-button:hover,
+.mac-toolbar-pill:hover {
+  background: var(--shell-panel-hover);
+}
+
+.mac-toolbar-search {
+  color: var(--shell-muted);
+  min-width: 17rem;
+  justify-content: space-between;
+  text-align: left;
+}
+
+.mac-toolbar-titles {
+  display: flex;
+  flex-direction: column;
+}
+
+.mac-toolbar-overline {
+  margin: 0;
+  font-size: 0.72rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--shell-muted) 92%, white 8%);
+}
+
+.mac-toolbar-title {
+  margin: 0.15rem 0 0;
+  font-size: 1.55rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.mac-kbd {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid var(--shell-border);
+  background: rgba(255, 255, 255, 0.36);
+  color: var(--shell-muted);
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+:root[data-appearance="dark"] .mac-kbd {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.mac-main {
+  min-height: 0;
+  flex: 1;
+}
+
+.mac-main-scroll {
+  min-height: calc(100vh - 4.75rem);
+  padding: 1.5rem;
+}
+
+.mac-page {
+  display: flex;
+  flex-direction: column;
+  gap: 1.25rem;
+}
+
+.mac-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 1rem;
+}
+
+.mac-page-eyebrow {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--shell-muted);
+}
+
+.mac-page-title {
+  margin: 0.35rem 0 0;
+  font-size: clamp(2rem, 4vw, 3.25rem);
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.05em;
+}
+
+.mac-page-description {
+  max-width: 56rem;
+  margin: 0.65rem 0 0;
+  font-size: 1rem;
+  line-height: 1.75;
+  color: var(--shell-muted);
+}
+
+.mac-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.mac-panel {
+  border: 1px solid var(--shell-border);
+  border-radius: 1.75rem;
+  background: var(--shell-panel-strong);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(24px) saturate(160%);
+  padding: 1.25rem;
+}
+
+.mac-panel-header {
+  margin-bottom: 1rem;
+}
+
+.mac-panel-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.mac-panel-detail {
+  margin: 0.3rem 0 0;
+  font-size: 0.92rem;
+  color: var(--shell-muted);
+}
+
+.mac-stat {
+  border: 1px solid var(--shell-border);
+  border-radius: 1.4rem;
+  background: color-mix(in srgb, var(--shell-panel-strong) 86%, transparent 14%);
+  padding: 1rem 1.05rem;
+}
+
+.mac-stat-label,
+.mac-stat-detail {
+  margin: 0;
+  color: var(--shell-muted);
+}
+
+.mac-stat-label {
+  font-size: 0.8rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.mac-stat-value {
+  margin: 0.45rem 0 0;
+  font-size: 1.75rem;
+  line-height: 1.1;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+}
+
+.mac-stat-detail {
+  margin-top: 0.4rem;
+  font-size: 0.9rem;
+}
+
+.mac-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 999px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border: 1px solid transparent;
+}
+
+.mac-badge-neutral {
+  background: rgba(127, 141, 165, 0.12);
+  border-color: rgba(127, 141, 165, 0.16);
+  color: var(--shell-muted);
+}
+
+.mac-badge-success {
+  background: rgba(50, 215, 75, 0.14);
+  border-color: rgba(50, 215, 75, 0.2);
+  color: #0f7a21;
+}
+
+:root[data-appearance="dark"] .mac-badge-success {
+  color: #9cf3aa;
+}
+
+.mac-badge-warning {
+  background: rgba(255, 214, 10, 0.16);
+  border-color: rgba(255, 214, 10, 0.24);
+  color: #8b6500;
+}
+
+:root[data-appearance="dark"] .mac-badge-warning {
+  color: #ffe374;
+}
+
+.mac-badge-danger {
+  background: rgba(255, 95, 87, 0.14);
+  border-color: rgba(255, 95, 87, 0.2);
+  color: #b43d37;
+}
+
+:root[data-appearance="dark"] .mac-badge-danger {
+  color: #ffb0ac;
+}
+
+.mac-badge-accent {
+  background: rgba(10, 132, 255, 0.16);
+  border-color: rgba(10, 132, 255, 0.2);
+  color: #005fcb;
+}
+
+:root[data-appearance="dark"] .mac-badge-accent {
+  color: #8bc4ff;
+}
+
+.mac-empty-state {
+  display: grid;
+  place-items: center;
+  gap: 0.5rem;
+  min-height: 14rem;
+  border: 1px dashed var(--shell-border);
+  border-radius: 1.75rem;
+  background: var(--shell-panel);
+  text-align: center;
+  padding: 2rem;
+}
+
+.mac-empty-icon {
+  color: var(--shell-muted);
+}
+
+.mac-empty-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.mac-empty-description {
+  max-width: 30rem;
+  margin: 0;
+  color: var(--shell-muted);
+}
+
+.mac-search {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  min-width: min(100%, 22rem);
+}
+
+.mac-search-icon {
+  position: absolute;
+  left: 0.9rem;
+  width: 1rem;
+  height: 1rem;
+  color: var(--shell-muted);
+}
+
+.mac-search-input {
+  width: 100%;
+  min-height: 2.8rem;
+  border: 1px solid var(--shell-border);
+  border-radius: 999px;
+  background: var(--shell-input);
+  color: var(--shell-text);
+  padding: 0 1rem 0 2.6rem;
+  backdrop-filter: blur(14px) saturate(160%);
+}
+
+.mac-search-input::placeholder {
+  color: var(--shell-muted);
+}
+
+.mac-palette-backdrop {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding-top: 5.5rem;
+  background: rgba(10, 14, 21, 0.22);
+  backdrop-filter: blur(16px);
+  z-index: 60;
+}
+
+.mac-palette {
+  width: min(42rem, calc(100vw - 2rem));
+  overflow: hidden;
+  border-radius: 1.6rem;
+  border: 1px solid var(--shell-border);
+  background: var(--shell-panel-strong);
+  box-shadow: var(--shell-shadow);
+  backdrop-filter: blur(28px) saturate(175%);
+}
+
+.mac-palette-header {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  padding: 1rem 1.1rem;
+  border-bottom: 1px solid var(--shell-border);
+}
+
+.mac-palette-input {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: var(--shell-text);
+  font-size: 1rem;
+  outline: none;
+}
+
+.mac-palette-input::placeholder {
+  color: var(--shell-muted);
+}
+
+.mac-palette-list {
+  max-height: 24rem;
+  overflow-y: auto;
+  padding: 0.5rem;
+}
+
+.mac-palette-item {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.95rem 1rem;
+  border-radius: 1.1rem;
+  color: inherit;
+  text-align: left;
+}
+
+.mac-palette-item:hover {
+  background: var(--shell-selection);
+}
+
+.mac-palette-title {
+  font-size: 0.98rem;
+  font-weight: 650;
+}
+
+.mac-palette-detail,
+.mac-palette-empty {
+  color: var(--shell-muted);
+  font-size: 0.88rem;
+}
+
+.mac-palette-empty {
+  padding: 1rem;
+}
+
+.mac-update-sheet {
+  width: min(34rem, calc(100vw - 2rem));
+  border-radius: 1.7rem;
+  border: 1px solid var(--shell-border);
+  background: var(--shell-panel-strong);
+  box-shadow: var(--shell-shadow);
+  backdrop-filter: blur(28px) saturate(175%);
+  padding: 1.25rem;
+}
+
+.mac-update-header {
+  display: flex;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.mac-update-icon {
+  display: grid;
+  place-items: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  border-radius: 0.95rem;
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.2), rgba(10, 132, 255, 0.08));
+  color: #0a84ff;
+}
+
+.mac-update-title {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.mac-update-subtitle {
+  margin: 0.3rem 0 0;
+  color: var(--shell-muted);
+  line-height: 1.6;
+}
+
+.mac-update-body {
+  margin-top: 1rem;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.mac-update-line {
+  margin: 0;
+  color: var(--shell-text);
+}
+
+.mac-update-notes {
+  border: 1px solid var(--shell-border);
+  border-radius: 1rem;
+  background: var(--shell-panel);
+  padding: 0.9rem 1rem;
+  color: var(--shell-muted);
+  white-space: pre-wrap;
+  line-height: 1.65;
+}
+
+.mac-update-error {
+  border: 1px solid rgba(255, 95, 87, 0.22);
+  border-radius: 1rem;
+  background: rgba(255, 95, 87, 0.12);
+  color: #8f2d27;
+  padding: 0.9rem 1rem;
+}
+
+:root[data-appearance="dark"] .mac-update-error {
+  color: #ffb5b1;
+}
+
+.mac-update-actions {
+  margin-top: 1.2rem;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.mac-update-primary,
+.mac-update-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.6rem;
+  padding: 0 1rem;
+  border-radius: 999px;
+  font-weight: 600;
+}
+
+.mac-update-primary {
+  background: #0a84ff;
+  color: white;
+}
+
+.mac-update-secondary {
+  border: 1px solid var(--shell-border);
+  background: var(--shell-panel);
+  color: var(--shell-text);
+}
+
+@media (max-width: 1100px) {
+  .mac-shell {
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+
+  .mac-sidebar {
+    width: 88px;
+    padding-inline: 0.7rem;
+  }
+
+  .mac-sidebar-brand > div,
+  .mac-sidebar-section-title,
+  .mac-sidebar-link span,
+  .mac-toolbar-search {
+    display: none;
+  }
+
+  .mac-sidebar-link {
+    justify-content: center;
+    padding-inline: 0;
+  }
+}
+
+@media (max-width: 760px) {
+  .mac-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .mac-sidebar {
+    display: none;
+  }
+
+  .mac-toolbar {
+    padding-inline: 1rem;
+  }
+
+  .mac-main-scroll {
+    padding: 1rem;
+  }
+
+  .mac-page-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

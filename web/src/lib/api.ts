@@ -10,8 +10,25 @@ import type {
   HealthSnapshot,
   AgentSocialAccount,
   AgentXIntegrationStatus,
+  AgentClassManifest,
+  AgentProfile,
+  OnboardingBootstrapResponse,
+  ResolvedAgentProfile,
 } from '../types/api';
 import { clearToken, getToken, setToken } from './auth';
+
+function runtimeBaseUrl(): string {
+  const { protocol } = window.location;
+  if (protocol === 'http:' || protocol === 'https:') {
+    return '';
+  }
+  return 'http://127.0.0.1:8765';
+}
+
+function runtimeUrl(path: string): string {
+  const base = runtimeBaseUrl();
+  return `${base}${path}`;
+}
 
 // ---------------------------------------------------------------------------
 // Base fetch wrapper
@@ -43,7 +60,7 @@ export async function apiFetch<T = unknown>(
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(path, { ...options, headers });
+  const response = await fetch(runtimeUrl(path), { ...options, headers });
 
   if (response.status === 401) {
     clearToken();
@@ -79,7 +96,7 @@ function unwrapField<T>(value: T | Record<string, T>, key: string): T {
 // ---------------------------------------------------------------------------
 
 export async function pair(code: string): Promise<{ token: string }> {
-  const response = await fetch('/pair', {
+  const response = await fetch(runtimeUrl('/pair'), {
     method: 'POST',
     headers: { 'X-Pairing-Code': code },
   });
@@ -99,7 +116,7 @@ export async function pair(code: string): Promise<{ token: string }> {
 // ---------------------------------------------------------------------------
 
 export async function getPublicHealth(): Promise<{ require_pairing: boolean; paired: boolean }> {
-  const response = await fetch('/health');
+  const response = await fetch(runtimeUrl('/health'));
   if (!response.ok) {
     throw new Error(`Health check failed (${response.status})`);
   }
@@ -176,6 +193,80 @@ export function bootstrapAgentXHeadlessSession(
   }>('/api/agents/social-accounts/bootstrap/x', {
     method: 'POST',
     body: JSON.stringify({ agent_name, mode }),
+  });
+}
+
+export function getClasses(): Promise<AgentClassManifest[]> {
+  return apiFetch<{ classes: AgentClassManifest[] } | AgentClassManifest[]>('/api/classes').then(
+    (data) => unwrapField(data, 'classes'),
+  );
+}
+
+export function getClass(id: string): Promise<AgentClassManifest> {
+  return apiFetch<AgentClassManifest>(`/api/classes/${encodeURIComponent(id)}`);
+}
+
+export function getAgents(): Promise<{
+  active_agent_id: string;
+  profiles: ResolvedAgentProfile[];
+}> {
+  return apiFetch<{ active_agent_id: string; profiles: ResolvedAgentProfile[] }>('/api/agents');
+}
+
+export function getAgent(id: string): Promise<ResolvedAgentProfile> {
+  return apiFetch<ResolvedAgentProfile>(`/api/agents/${encodeURIComponent(id)}`);
+}
+
+export function createAgent(
+  profile: AgentProfile,
+  activate = false,
+): Promise<ResolvedAgentProfile> {
+  return apiFetch<ResolvedAgentProfile>('/api/agents', {
+    method: 'POST',
+    body: JSON.stringify({ profile, activate }),
+  });
+}
+
+export function updateAgent(
+  profile: AgentProfile,
+  activate = false,
+): Promise<ResolvedAgentProfile> {
+  return apiFetch<ResolvedAgentProfile>(`/api/agents/${encodeURIComponent(profile.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ profile, activate }),
+  });
+}
+
+export function activateAgent(id: string): Promise<{
+  status: string;
+  active_agent_id: string;
+  profile: ResolvedAgentProfile;
+}> {
+  return apiFetch<{
+    status: string;
+    active_agent_id: string;
+    profile: ResolvedAgentProfile;
+  }>(`/api/agents/${encodeURIComponent(id)}/activate`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function getOnboardingState(): Promise<OnboardingBootstrapResponse> {
+  return apiFetch<OnboardingBootstrapResponse>('/api/onboarding/state');
+}
+
+export function bootstrapOnboarding(): Promise<OnboardingBootstrapResponse> {
+  return apiFetch<OnboardingBootstrapResponse>('/api/onboarding/bootstrap', {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function completeOnboarding(active_agent_id?: string): Promise<OnboardingBootstrapResponse> {
+  return apiFetch<OnboardingBootstrapResponse>('/api/onboarding/complete', {
+    method: 'POST',
+    body: JSON.stringify({ active_agent_id }),
   });
 }
 

@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import type { SSEEvent } from '@/types/api';
 import { SSEClient } from '@/lib/sse';
+import { useShell } from '@/components/shell/ShellProvider';
 
 function formatTimestamp(ts?: string): string {
   if (!ts) return new Date().toLocaleTimeString();
@@ -41,6 +42,7 @@ interface LogEntry {
 }
 
 export default function Logs() {
+  const { isDesktopMac } = useShell();
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [paused, setPaused] = useState(false);
   const [connected, setConnected] = useState(false);
@@ -133,7 +135,7 @@ export default function Logs() {
       : entries.filter((e) => typeFilters.has(e.event.type));
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3.5rem)]">
+    <div className={isDesktopMac ? 'flex flex-col min-h-[70vh]' : 'flex flex-col h-[calc(100vh-3.5rem)]'}>
       {/* Toolbar */}
       <div className="flex items-center justify-between px-6 py-3 border-b border-gray-800 bg-gray-900">
         <div className="flex items-center gap-3">
