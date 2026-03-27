@@ -58,10 +58,18 @@ jobs:
           cd desktop
           npm run tauri:build:update
 
+      - name: Generate updater manifest
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          cd desktop
+          node scripts/generate_updater_manifest.mjs
+
       - name: Validate updater artifacts
         run: |
           find desktop/src-tauri/target/release/bundle -type f | sort
-          test -n "$(find desktop/src-tauri/target/release/bundle -name 'latest.json' -print -quit)"
+          test -f desktop/src-tauri/target/release/bundle/latest.json
           test -n "$(find desktop/src-tauri/target/release/bundle -name '*.sig' -print -quit)"
 
       - name: Upload desktop artifacts
