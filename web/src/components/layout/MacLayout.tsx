@@ -13,6 +13,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useLocaleContext } from '@/App';
 import { listenForMenuActions } from '@/lib/desktop';
 import { useShell } from '@/components/shell/ShellProvider';
+import badgeArt from '@/assets/agent-hq-badge.svg';
 import { menuActionRoutes, navItems, primaryNavSections, routeTitles } from './navigation';
 
 type PaletteAction = {
@@ -74,6 +75,13 @@ export default function MacLayout() {
         subtitle: 'Change interface language',
         keywords: 'language locale english turkish',
         run: () => setAppLocale(locale === 'en' ? 'tr' : 'en'),
+      },
+      {
+        id: 'action:new_agent',
+        title: 'New Agent',
+        subtitle: 'Open the setup flow for another roster member',
+        keywords: 'new create agent wizard roster',
+        run: () => navigate('/?new=1'),
       },
       {
         id: 'action:new_mission',
@@ -208,11 +216,11 @@ export default function MacLayout() {
       <div className="mac-shell">
         <aside className={sidebarOpen ? 'mac-sidebar' : 'mac-sidebar mac-sidebar-collapsed'}>
           <div className="mac-sidebar-brand">
-            <div className="mac-sidebar-logo">HQ</div>
+            <img src={badgeArt} alt="Agent HQ" className="mac-sidebar-logo-image" />
             {sidebarOpen ? (
               <div>
                 <p className="mac-sidebar-brand-title">Agent HQ</p>
-                <p className="mac-sidebar-brand-detail">Desktop operations suite</p>
+                <p className="mac-sidebar-brand-detail">Operator console for local agents</p>
               </div>
             ) : null}
           </div>

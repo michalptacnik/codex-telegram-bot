@@ -78,6 +78,7 @@ export const menuActionRoutes: Record<string, string> = {
   'navigate.cost': '/cost',
   'app.preferences': '/config',
   'help.diagnostics': '/doctor',
+  'file.new_agent': '/?new=1',
   'file.new_mission': '/missions?new=1',
   'file.new_session': '/sessions?new=1',
 };

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Activity,
   Cpu,
@@ -85,7 +86,7 @@ export default function Dashboard() {
     return (
       <MacPage
         eyebrow="Overview"
-        title="System Dashboard"
+        title="Operations overview"
         description="A macOS-style operational overview of the local runtime."
       >
         <MacPanel title="Unavailable" detail={error}>
@@ -103,7 +104,7 @@ export default function Dashboard() {
     return (
       <MacPage
         eyebrow="Overview"
-        title="System Dashboard"
+        title="Operations overview"
         description="A macOS-style operational overview of the local runtime."
       >
         <MacPanel title="Loading">
@@ -124,9 +125,22 @@ export default function Dashboard() {
   return (
     <MacPage
       eyebrow="Overview"
-      title="System Dashboard"
-      description="Core runtime health, model usage, and live channel posture arranged for quick scanning on macOS."
-      actions={<MacBadge tone={healthTone(overallStatus)}>{overallStatus}</MacBadge>}
+      title="Operations overview"
+      description="Health, spend, and live channel posture arranged for quick scanning on macOS."
+      actions={
+        <div className="flex flex-wrap items-center gap-2">
+          <MacBadge tone={healthTone(overallStatus)}>{overallStatus}</MacBadge>
+          <Link className="mac-badge mac-badge-neutral" to="/logs">
+            Logs
+          </Link>
+          <Link className="mac-badge mac-badge-neutral" to="/doctor">
+            Diagnostics
+          </Link>
+          <Link className="mac-badge mac-badge-neutral" to="/cost">
+            Cost
+          </Link>
+        </div>
+      }
     >
       <div className="grid gap-4 lg:grid-cols-4">
         <MacStat label="Provider" value={status.provider ?? 'Unknown'} detail={status.model} />

@@ -187,6 +187,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .build()?;
 
     let file_menu = SubmenuBuilder::new(app, "File")
+        .text("file.new_agent", "New Agent…")
         .text("file.new_session", "New Session")
         .text("file.new_mission", "New Mission")
         .build()?;
@@ -207,6 +208,10 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .text("view.command_palette", "Command Palette…")
         .text("view.search", "Search")
         .separator()
+        .text("view.refresh", "Refresh")
+        .build()?;
+
+    let go_menu = SubmenuBuilder::new(app, "Go")
         .text("navigate.studio", "Open Studio")
         .text("navigate.dashboard", "Open Dashboard")
         .text("navigate.agent", "Open Agent Chat")
@@ -216,8 +221,12 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .text("navigate.memory", "Open Memory")
         .text("navigate.logs", "Open Logs")
         .text("navigate.cost", "Open Cost")
-        .separator()
-        .text("view.refresh", "Refresh")
+        .build()?;
+
+    let actions_menu = SubmenuBuilder::new(app, "Actions")
+        .text("app.check_updates", "Check for Updates…")
+        .text("help.diagnostics", "Run Diagnostics")
+        .text("app.preferences", "Open Settings")
         .build()?;
 
     let window_menu = SubmenuBuilder::new(app, "Window")
@@ -241,6 +250,8 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .item(&file_menu)
         .item(&edit_menu)
         .item(&view_menu)
+        .item(&go_menu)
+        .item(&actions_menu)
         .item(&window_menu)
         .item(&help_menu)
         .build()

@@ -1,9 +1,9 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useState, useEffect, createContext, useContext } from 'react';
-import { Sparkles } from 'lucide-react';
 import Layout from './components/layout/Layout';
 import { ShellProvider, useShell } from './components/shell/ShellProvider';
 import UpdateController from './components/shell/UpdateController';
+import badgeArt from './assets/agent-hq-badge.svg';
 import Dashboard from './pages/Dashboard';
 import AgentChat from './pages/AgentChat';
 import Studio from './pages/Studio';
@@ -75,11 +75,11 @@ function PairingDialog({ onPair }: { onPair: (code: string) => Promise<void> }) 
           <div
             className={
               isDesktopMac
-                ? 'mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-[18px] bg-[linear-gradient(180deg,rgba(151,186,255,0.4),rgba(255,255,255,0.9))] text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] dark:bg-[linear-gradient(180deg,rgba(94,145,255,0.45),rgba(255,255,255,0.12))] dark:text-slate-100'
-                : 'mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-300/15 text-amber-200'
+                ? 'mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-[20px] bg-[linear-gradient(180deg,rgba(151,186,255,0.35),rgba(255,255,255,0.9))] shadow-[inset_0_1px_0_rgba(255,255,255,0.75)] dark:bg-[linear-gradient(180deg,rgba(94,145,255,0.45),rgba(255,255,255,0.12))]'
+                : 'mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-amber-300/15'
             }
           >
-            <Sparkles className="h-7 w-7" />
+            <img src={badgeArt} alt="Agent HQ" className="h-12 w-12" />
           </div>
           <h1 className={isDesktopMac ? 'text-3xl font-semibold text-slate-900 dark:text-white mb-2' : 'text-2xl font-bold text-white mb-2'}>
             Agent HQ
