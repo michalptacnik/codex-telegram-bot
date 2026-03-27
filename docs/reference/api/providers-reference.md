@@ -29,6 +29,7 @@ credential is not reused for fallback providers.
 | `openrouter` | — | No | `OPENROUTER_API_KEY` |
 | `anthropic` | — | No | `ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_API_KEY` |
 | `openai` | — | No | `OPENAI_API_KEY` |
+| `openai-codex` | `openai_codex`, `codex` | No | (managed by the official `codex` CLI session) |
 | `ollama` | — | Yes | `OLLAMA_API_KEY` (optional) |
 | `gemini` | `google`, `google-gemini` | No | `GEMINI_API_KEY`, `GOOGLE_API_KEY` |
 | `venice` | — | No | `VENICE_API_KEY` |
@@ -78,6 +79,23 @@ credential is not reused for fallback providers.
 - API key requests use `generativelanguage.googleapis.com/v1beta`
 - Gemini CLI OAuth requests use `cloudcode-pa.googleapis.com/v1internal` with Code Assist request envelope semantics
 - Thinking models (e.g. `gemini-3-pro-preview`) are supported — internal reasoning parts are automatically filtered from the response
+
+### OpenAI Codex Notes
+
+- Provider ID: `openai-codex` (aliases: `openai_codex`, `codex`)
+- Authentication is delegated to the official OpenAI `codex` CLI.
+- Supported sign-in methods are the ones documented by OpenAI for Codex itself, including ChatGPT sign-in and API-key sign-in through the official client.
+- Setup:
+
+```bash
+codex login
+codex login status
+```
+
+- Agent HQ intentionally does not perform direct ChatGPT OAuth or call undocumented ChatGPT backend endpoints for this provider.
+- Optional overrides:
+  - `ZEROCLAW_CODEX_CLI_PATH` to point at a non-default `codex` binary
+  - `ZEROCLAW_CODEX_SANDBOX` with `read-only`, `workspace-write`, or `danger-full-access`
 
 ### Ollama Vision Notes
 

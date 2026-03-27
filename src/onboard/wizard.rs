@@ -624,6 +624,12 @@ async fn run_quick_setup_with_home(
                 println!("       (device / OAuth auth will prompt on first run)");
                 println!("    2. Gateway:           zeroclaw gateway");
                 println!("    3. Status:            zeroclaw status");
+            } else if canonical_provider_name(&provider_name) == "openai-codex" {
+                println!("    1. Login:             codex login");
+                println!("    2. Verify:            codex login status");
+                println!("    3. Chat:              zeroclaw agent -m \"Hello!\"");
+                println!("    4. Gateway:           zeroclaw gateway");
+                println!("    5. Status:            zeroclaw status");
             } else {
                 println!(
                     "    1. Login:             zeroclaw auth login --provider {}",
@@ -5661,10 +5667,8 @@ fn print_summary(config: &Config) {
                 "    {} Authenticate OpenAI Codex:",
                 style(format!("{step}.")).cyan().bold()
             );
-            println!(
-                "       {}",
-                style("zeroclaw auth login --provider openai-codex --device-code").yellow()
-            );
+            println!("       {}", style("codex login").yellow());
+            println!("       {}", style("codex login status").yellow());
         } else if provider == "anthropic" {
             println!(
                 "    {} Configure Anthropic auth:",
