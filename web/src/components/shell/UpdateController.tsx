@@ -11,6 +11,29 @@ interface UpdateMetadata {
   date?: string | null;
 }
 
+function describeError(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (typeof error === 'string' && error.trim()) {
+    return error;
+  }
+
+  if (error && typeof error === 'object') {
+    try {
+      const serialized = JSON.stringify(error);
+      if (serialized && serialized !== '{}') {
+        return serialized;
+      }
+    } catch {
+      // Ignore serialization failures and fall back below.
+    }
+  }
+
+  return fallback;
+}
+
 type UpdateAnnouncement = {
   available: boolean;
   metadata?: UpdateMetadata;
@@ -98,7 +121,7 @@ export default function UpdateController() {
       if (!silent) {
         setState({
           kind: 'error',
-          message: error instanceof Error ? error.message : 'Failed to check for updates.',
+          message: describeError(error, 'Failed to check for updates.'),
         });
       }
     }
@@ -115,7 +138,7 @@ export default function UpdateController() {
     } catch (error) {
       setState({
         kind: 'error',
-        message: error instanceof Error ? error.message : 'Failed to install update.',
+        message: describeError(error, 'Failed to install update.'),
       });
     }
   };
