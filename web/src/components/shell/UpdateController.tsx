@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { CheckCircle2, Download, LoaderCircle, RefreshCw, Sparkles } from 'lucide-react';
 import { useShell } from '@/components/shell/ShellProvider';
@@ -10,6 +10,11 @@ interface UpdateMetadata {
   body?: string | null;
   date?: string | null;
 }
+
+type UpdateAnnouncement = {
+  available: boolean;
+  metadata?: UpdateMetadata;
+};
 
 type UpdateState =
   | { kind: 'idle' }
@@ -24,6 +29,9 @@ export default function UpdateController() {
   const { shell, isDesktopMac } = useShell();
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<UpdateState>({ kind: 'idle' });
+  const autoCheckStartedRef = useRef(false);
+  const autoOpenedRef = useRef(false);
+  const lastCheckedAtRef = useRef(0);
 
   const updateEnabled = Boolean(shell.updateConfigured && isDesktopMac);
 
@@ -34,33 +42,65 @@ export default function UpdateController() {
         ? state.currentVersion
         : undefined;
 
-  const checkForUpdates = async () => {
+  const publishUpdateStatus = (announcement: UpdateAnnouncement) => {
+    window.dispatchEvent(
+      new CustomEvent<UpdateAnnouncement>('agenthq:update-status', {
+        detail: announcement,
+      }),
+    );
+  };
+
+  const checkForUpdates = async ({
+    openSheet = true,
+    silent = false,
+  }: {
+    openSheet?: boolean;
+    silent?: boolean;
+  } = {}) => {
     if (!updateEnabled) {
-      setOpen(true);
-      setState({
-        kind: 'error',
-        message:
-          'Updater is not configured yet. Set AGENT_HQ_UPDATER_ENDPOINTS and AGENT_HQ_UPDATER_PUBKEY when building the desktop app.',
-      });
+      publishUpdateStatus({ available: false });
+      if (openSheet) {
+        setOpen(true);
+        setState({
+          kind: 'error',
+          message:
+            'Updater is not configured yet. Set AGENT_HQ_UPDATER_ENDPOINTS and AGENT_HQ_UPDATER_PUBKEY when building the desktop app.',
+        });
+      }
       return;
     }
 
-    setOpen(true);
-    setState({ kind: 'checking' });
+    if (openSheet) {
+      setOpen(true);
+    }
+    if (!silent) {
+      setState({ kind: 'checking' });
+    }
 
     try {
+      lastCheckedAtRef.current = Date.now();
       const update = await invoke<UpdateMetadata | null>('desktop_check_for_updates');
       if (!update) {
-        setState({ kind: 'none' });
+        publishUpdateStatus({ available: false });
+        if (!silent) {
+          setState({ kind: 'none' });
+        }
         return;
       }
 
+      publishUpdateStatus({ available: true, metadata: update });
       setState({ kind: 'available', metadata: update });
+      if (silent && !autoOpenedRef.current) {
+        setOpen(true);
+        autoOpenedRef.current = true;
+      }
     } catch (error) {
-      setState({
-        kind: 'error',
-        message: error instanceof Error ? error.message : 'Failed to check for updates.',
-      });
+      if (!silent) {
+        setState({
+          kind: 'error',
+          message: error instanceof Error ? error.message : 'Failed to check for updates.',
+        });
+      }
     }
   };
 
@@ -70,6 +110,7 @@ export default function UpdateController() {
     try {
       setState({ kind: 'installing', metadata: state.metadata });
       await invoke('desktop_install_update');
+      publishUpdateStatus({ available: false });
       setState({ kind: 'installed', metadata: state.metadata });
     } catch (error) {
       setState({
@@ -99,6 +140,26 @@ export default function UpdateController() {
       detach();
       window.removeEventListener('agenthq:check-updates', handleWindowEvent);
     };
+  }, [updateEnabled]);
+
+  useEffect(() => {
+    if (!updateEnabled || autoCheckStartedRef.current) {
+      return;
+    }
+
+    autoCheckStartedRef.current = true;
+    void checkForUpdates({ openSheet: false, silent: true });
+
+    const handleFocus = () => {
+      if (Date.now() - lastCheckedAtRef.current < 15 * 60 * 1000) {
+        return;
+      }
+
+      void checkForUpdates({ openSheet: false, silent: true });
+    };
+
+    window.addEventListener('focus', handleFocus);
+    return () => window.removeEventListener('focus', handleFocus);
   }, [updateEnabled]);
 
   if (!isDesktopMac) {

@@ -359,6 +359,16 @@ textarea {
   background: var(--shell-panel-hover);
 }
 
+.mac-toolbar-pill-attention {
+  border-color: rgba(10, 132, 255, 0.22);
+  background: linear-gradient(180deg, rgba(10, 132, 255, 0.14), rgba(10, 132, 255, 0.08));
+  color: #005fcb;
+}
+
+:root[data-appearance="dark"] .mac-toolbar-pill-attention {
+  color: #8bc4ff;
+}
+
 .mac-toolbar-search {
   color: var(--shell-muted);
   min-width: 17rem;

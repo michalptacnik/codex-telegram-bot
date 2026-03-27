@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import {
   ChevronRight,
   Command,
+  Download,
   Globe,
   LogOut,
   PanelLeft,
@@ -22,6 +23,13 @@ type PaletteAction = {
   run: () => void;
 };
 
+type UpdateStatusDetail = {
+  available: boolean;
+  metadata?: {
+    version: string;
+  };
+};
+
 export default function MacLayout() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -30,6 +38,7 @@ export default function MacLayout() {
   const { shell, sidebarOpen, toggleSidebar } = useShell();
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const [availableUpdateVersion, setAvailableUpdateVersion] = useState<string | null>(null);
 
   const pageTitle = routeTitles[location.pathname] ?? 'Agent HQ';
   const pageSubtitle =
@@ -178,6 +187,22 @@ export default function MacLayout() {
     return () => detach();
   }, [locale, logout, navigate, setAppLocale, toggleSidebar]);
 
+  useEffect(() => {
+    const handleUpdateStatus = (event: Event) => {
+      const detail = (event as CustomEvent<UpdateStatusDetail>).detail;
+      if (!detail?.available) {
+        setAvailableUpdateVersion(null);
+        return;
+      }
+
+      setAvailableUpdateVersion(detail.metadata?.version ?? 'available');
+    };
+
+    window.addEventListener('agenthq:update-status', handleUpdateStatus as EventListener);
+    return () =>
+      window.removeEventListener('agenthq:update-status', handleUpdateStatus as EventListener);
+  }, []);
+
   return (
     <>
       <div className="mac-shell">
@@ -240,6 +265,17 @@ export default function MacLayout() {
             </div>
 
             <div className="mac-toolbar-trailing">
+              {availableUpdateVersion ? (
+                <button
+                  type="button"
+                  onClick={() => window.dispatchEvent(new CustomEvent('agenthq:check-updates'))}
+                  className="mac-toolbar-pill mac-toolbar-pill-attention"
+                  title={`Update ${availableUpdateVersion} is ready to install`}
+                >
+                  <Download className="h-4 w-4" />
+                  <span>Update {availableUpdateVersion}</span>
+                </button>
+              ) : null}
               <button type="button" onClick={openPalette} className="mac-toolbar-search">
                 <Search className="h-4 w-4" />
                 <span>Jump to anything</span>
