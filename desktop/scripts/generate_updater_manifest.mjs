@@ -36,7 +36,7 @@ if (!fs.existsSync(signaturePath)) {
 }
 
 const signature = fs.readFileSync(signaturePath, 'utf8').trim();
-const encodedArchiveName = archiveName.replace(/ /g, '%20');
+const releaseAssetName = archiveName.replace(/ /g, '.');
 const manifest = {
   version,
   notes: `Agent HQ desktop release ${version}.`,
@@ -44,7 +44,7 @@ const manifest = {
   platforms: {
     'darwin-aarch64': {
       signature,
-      url: `https://github.com/${repository}/releases/download/${refName}/${encodedArchiveName}`,
+      url: `https://github.com/${repository}/releases/download/${refName}/${releaseAssetName}`,
     },
   },
 };
