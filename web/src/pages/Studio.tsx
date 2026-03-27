@@ -30,8 +30,8 @@ import {
   MacStat,
 } from '@/components/macos/MacPrimitives';
 import { useShell } from '@/components/shell/ShellProvider';
-import socialMediaManagerArt from '@/assets/class-social-media-manager.svg';
-import vaArt from '@/assets/class-va.svg';
+import socialMediaManagerArt from '@/assets/class-social-media-manager.png';
+import vaArt from '@/assets/class-va.png';
 import type {
   AgentClassManifest,
   AgentProfile,
