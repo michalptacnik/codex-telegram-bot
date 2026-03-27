@@ -27,6 +27,47 @@ const STREAM_CHUNK_MIN_CHARS: usize = 80;
 /// Used as a safe fallback when `max_tool_iterations` is unset or configured as zero.
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 10;
 
+fn pricing_for_model<'a>(
+    prices: &'a std::collections::HashMap<String, crate::config::ModelPricing>,
+    model: &str,
+) -> Option<&'a crate::config::ModelPricing> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let mut candidates = vec![trimmed.to_string(), lower.clone()];
+
+    if let Some((_, suffix)) = trimmed.split_once('/') {
+        candidates.push(suffix.to_string());
+        candidates.push(suffix.to_ascii_lowercase());
+    }
+    if let Some((_, suffix)) = trimmed.rsplit_once('.') {
+        candidates.push(suffix.to_string());
+        candidates.push(suffix.to_ascii_lowercase());
+    }
+    if let Some(stripped) = lower.strip_prefix("models/") {
+        candidates.push(stripped.to_string());
+    }
+    if let Some(base) = lower.split([':', '@']).next() {
+        candidates.push(base.to_string());
+    }
+    if let Some(base) = lower
+        .split([':', '@'])
+        .next()
+        .and_then(|value| value.rsplit_once('/').map(|(_, suffix)| suffix))
+    {
+        candidates.push(base.to_string());
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+        .into_iter()
+        .find_map(|candidate| prices.get(&candidate))
+}
+
 /// Minimum user-message length (in chars) for auto-save to memory.
 /// Matches the channel-side constant in `channels/mod.rs`.
 const AUTOSAVE_MIN_MESSAGE_CHARS: usize = 20;
@@ -403,9 +444,9 @@ fn allow_duplicate_tool_call(name: &str, arguments: &serde_json::Value) -> bool 
             | "status"
     );
 
-    let browser_session_retry =
-        (name.eq_ignore_ascii_case("browser_headless") || name.eq_ignore_ascii_case("browser_ext"))
-            && matches!(action.as_str(), "open_url" | "navigate_url");
+    let browser_session_retry = (name.eq_ignore_ascii_case("browser_headless")
+        || name.eq_ignore_ascii_case("browser_ext"))
+        && matches!(action.as_str(), "open_url" | "navigate_url");
 
     ((name.eq_ignore_ascii_case("browser_ext") || name.eq_ignore_ascii_case("browser_headless"))
         && observational_retry)
@@ -2379,7 +2420,7 @@ pub(crate) async fn run_tool_call_loop(
                     if let (Some(tracker), Some(in_tok), Some(out_tok)) =
                         (cost_tracker, resp_input_tokens, resp_output_tokens)
                     {
-                        let pricing = cost_prices.get(model);
+                        let pricing = pricing_for_model(cost_prices, model);
                         let (input_price, output_price) =
                             pricing.map(|p| (p.input, p.output)).unwrap_or((0.0, 0.0));
                         let usage = crate::cost::TokenUsage::new(

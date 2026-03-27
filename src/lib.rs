@@ -68,6 +68,7 @@ pub mod security;
 pub mod service;
 pub mod skillforge;
 pub mod skills;
+pub mod studio;
 pub mod tools;
 pub mod tunnel;
 pub mod util;

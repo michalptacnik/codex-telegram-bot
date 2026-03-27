@@ -890,6 +890,55 @@ impl Default for CostConfig {
     }
 }
 
+impl CostConfig {
+    pub fn pricing_for_model(&self, model: &str) -> Option<&ModelPricing> {
+        let candidates = pricing_lookup_candidates(model);
+        candidates
+            .iter()
+            .find_map(|candidate| self.prices.get(candidate))
+    }
+}
+
+fn pricing_lookup_candidates(model: &str) -> Vec<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let mut candidates = vec![trimmed.to_string(), lower.clone()];
+
+    if let Some((_, suffix)) = trimmed.split_once('/') {
+        candidates.push(suffix.to_string());
+        candidates.push(suffix.to_ascii_lowercase());
+    }
+
+    if let Some((_, suffix)) = trimmed.rsplit_once('.') {
+        candidates.push(suffix.to_string());
+        candidates.push(suffix.to_ascii_lowercase());
+    }
+
+    if let Some(stripped) = lower.strip_prefix("models/") {
+        candidates.push(stripped.to_string());
+    }
+
+    if let Some(base) = lower.split([':', '@']).next() {
+        candidates.push(base.to_string());
+    }
+
+    if let Some(base) = lower
+        .split([':', '@'])
+        .next()
+        .and_then(|value| value.rsplit_once('/').map(|(_, suffix)| suffix))
+    {
+        candidates.push(base.to_string());
+    }
+
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
 /// Default pricing for popular models (USD per 1M tokens)
 fn get_default_pricing() -> std::collections::HashMap<String, ModelPricing> {
     let mut prices = std::collections::HashMap::new();
@@ -940,6 +989,69 @@ fn get_default_pricing() -> std::collections::HashMap<String, ModelPricing> {
         },
     );
     prices.insert(
+        "openai/gpt-5.2".into(),
+        ModelPricing {
+            input: 1.25,
+            output: 10.0,
+        },
+    );
+    prices.insert(
+        "gpt-5.2".into(),
+        ModelPricing {
+            input: 1.25,
+            output: 10.0,
+        },
+    );
+    prices.insert(
+        "openai/gpt-5-mini".into(),
+        ModelPricing {
+            input: 0.25,
+            output: 2.0,
+        },
+    );
+    prices.insert(
+        "gpt-5-mini".into(),
+        ModelPricing {
+            input: 0.25,
+            output: 2.0,
+        },
+    );
+    prices.insert(
+        "openai/gpt-5-nano".into(),
+        ModelPricing {
+            input: 0.05,
+            output: 0.4,
+        },
+    );
+    prices.insert(
+        "gpt-5-nano".into(),
+        ModelPricing {
+            input: 0.05,
+            output: 0.4,
+        },
+    );
+    prices.insert(
+        "openai/gpt-5.2-codex".into(),
+        ModelPricing {
+            input: 1.5,
+            output: 12.0,
+        },
+    );
+    prices.insert(
+        "gpt-5.2-codex".into(),
+        ModelPricing {
+            input: 1.5,
+            output: 12.0,
+        },
+    );
+    prices.insert(
+        "gpt-5-codex".into(),
+        ModelPricing {
+            input: 1.5,
+            output: 12.0,
+        },
+    );
+    prices.insert(
         "openai/o1-preview".into(),
         ModelPricing {
             input: 15.0,
@@ -960,6 +1072,49 @@ fn get_default_pricing() -> std::collections::HashMap<String, ModelPricing> {
         ModelPricing {
             input: 1.25,
             output: 5.0,
+        },
+    );
+    prices.insert(
+        "gemini-2.5-pro".into(),
+        ModelPricing {
+            input: 1.25,
+            output: 10.0,
+        },
+    );
+    prices.insert(
+        "gemini-2.5-flash".into(),
+        ModelPricing {
+            input: 0.3,
+            output: 2.5,
+        },
+    );
+    prices.insert(
+        "gemini-2.5-flash-lite".into(),
+        ModelPricing {
+            input: 0.1,
+            output: 0.4,
+        },
+    );
+
+    prices.insert(
+        "claude-sonnet-4-5-20250929".into(),
+        ModelPricing {
+            input: 3.0,
+            output: 15.0,
+        },
+    );
+    prices.insert(
+        "anthropic.claude-sonnet-4-5-20250929-v1:0".into(),
+        ModelPricing {
+            input: 3.0,
+            output: 15.0,
+        },
+    );
+    prices.insert(
+        "claude-haiku-4-5-20251001".into(),
+        ModelPricing {
+            input: 0.8,
+            output: 4.0,
         },
     );
 

@@ -3,6 +3,7 @@
 //! All `/api/*` routes require bearer token authentication (PairingGuard).
 
 use super::AppState;
+use crate::studio;
 use crate::tools::traits::Tool;
 use axum::{
     extract::{Path, Query, State},
@@ -26,6 +27,19 @@ pub struct AgentSocialAccountEntry {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct AgentSocialAccountsPutRequest {
     pub accounts: Vec<AgentSocialAccountEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentProfileUpsertRequest {
+    pub profile: studio::AgentProfile,
+    #[serde(default)]
+    pub activate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingCompleteRequest {
+    #[serde(default)]
+    pub active_agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +85,12 @@ pub struct AgentXIntegrationStatus {
     pub browser_headless: HeadlessIntegrationStatus,
     pub browser_ext: BrowserExtensionIntegrationStatus,
     pub supported_capabilities: IntegrationCapabilityStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OnboardingBootstrapResponse {
+    pub onboarding: studio::OnboardingState,
+    pub active_profile: studio::ResolvedAgentProfile,
 }
 
 // ── Bearer token auth extractor ─────────────────────────────────
@@ -354,6 +374,383 @@ pub async fn handle_api_config_put(
     *state.config.lock() = new_config;
 
     Json(serde_json::json!({"status": "ok"})).into_response()
+}
+
+async fn load_studio_state(
+    state: &AppState,
+) -> Result<studio::AgentStudioState, (StatusCode, Json<serde_json::Value>)> {
+    let config = state.config.lock().clone();
+    studio::load_or_bootstrap(&config).await.map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to load agent studio state: {error}")
+            })),
+        )
+    })
+}
+
+/// GET /api/classes — built-in class registry
+pub async fn handle_api_classes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    Json(serde_json::json!({
+        "classes": studio::built_in_classes(),
+    }))
+    .into_response()
+}
+
+/// GET /api/classes/:id — class detail
+pub async fn handle_api_class_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(class_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    match studio::class_by_id(&class_id) {
+        Some(class_) => Json(class_).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("Unknown class '{class_id}'")})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/agents — list agent profiles
+pub async fn handle_api_agents_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let studio_state = match load_studio_state(&state).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+
+    let mut resolved = Vec::new();
+    for profile in &studio_state.profiles {
+        match studio::resolve_profile(&studio_state, &profile.id) {
+            Ok(item) => resolved.push(item),
+            Err(error) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": error.to_string()})),
+                )
+                    .into_response()
+            }
+        }
+    }
+
+    Json(serde_json::json!({
+        "active_agent_id": studio_state.active_agent_id,
+        "profiles": resolved,
+    }))
+    .into_response()
+}
+
+/// GET /api/agents/:id — agent profile detail
+pub async fn handle_api_agent_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let studio_state = match load_studio_state(&state).await {
+        Ok(value) => value,
+        Err(error) => return error.into_response(),
+    };
+
+    match studio::resolve_profile(&studio_state, &agent_id) {
+        Ok(profile) => Json(profile).into_response(),
+        Err(error) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/agents — create agent profile
+pub async fn handle_api_agents_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AgentProfileUpsertRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let mut current_config = state.config.lock().clone();
+    let mut studio_state = match studio::load_or_bootstrap(&current_config).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    if studio_state
+        .profiles
+        .iter()
+        .any(|profile| profile.id == body.profile.id)
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::json!({"error": format!("Agent '{}' already exists", body.profile.id)}),
+            ),
+        )
+            .into_response();
+    }
+
+    match studio::upsert_profile(
+        &mut current_config,
+        &mut studio_state,
+        body.profile,
+        body.activate,
+    )
+    .await
+    {
+        Ok(profile) => {
+            *state.config.lock() = current_config;
+            Json(profile).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// PUT /api/agents/:id — update agent profile
+pub async fn handle_api_agent_put(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+    Json(body): Json<AgentProfileUpsertRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    if agent_id != body.profile.id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Path agent id must match profile.id"})),
+        )
+            .into_response();
+    }
+
+    let mut current_config = state.config.lock().clone();
+    let mut studio_state = match studio::load_or_bootstrap(&current_config).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    match studio::upsert_profile(
+        &mut current_config,
+        &mut studio_state,
+        body.profile,
+        body.activate,
+    )
+    .await
+    {
+        Ok(profile) => {
+            *state.config.lock() = current_config;
+            Json(profile).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// POST /api/agents/:id/activate — activate selected agent
+pub async fn handle_api_agent_activate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let mut current_config = state.config.lock().clone();
+    let mut studio_state = match studio::load_or_bootstrap(&current_config).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    match studio::set_active_agent(&mut current_config, &mut studio_state, &agent_id).await {
+        Ok(profile) => {
+            *state.config.lock() = current_config;
+            Json(serde_json::json!({
+                "status": "ok",
+                "active_agent_id": agent_id,
+                "profile": profile,
+            }))
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/onboarding/state — onboarding status and active profile
+pub async fn handle_api_onboarding_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let studio_state = match studio::load_or_bootstrap(&config).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let active_profile = match studio::resolve_active_profile(&studio_state) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    Json(OnboardingBootstrapResponse {
+        onboarding: studio::onboarding_state(&config, &studio_state),
+        active_profile,
+    })
+    .into_response()
+}
+
+/// POST /api/onboarding/bootstrap — ensure seeded state exists
+pub async fn handle_api_onboarding_bootstrap(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let studio_state = match studio::load_or_bootstrap(&config).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+    let active_profile = match studio::resolve_active_profile(&studio_state) {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    Json(OnboardingBootstrapResponse {
+        onboarding: studio::onboarding_state(&config, &studio_state),
+        active_profile,
+    })
+    .into_response()
+}
+
+/// POST /api/onboarding/complete — mark onboarding complete and activate chosen agent
+pub async fn handle_api_onboarding_complete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<OnboardingCompleteRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let mut current_config = state.config.lock().clone();
+    let mut studio_state = match studio::load_or_bootstrap(&current_config).await {
+        Ok(value) => value,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": error.to_string()})),
+            )
+                .into_response()
+        }
+    };
+
+    match studio::complete_onboarding(
+        &mut current_config,
+        &mut studio_state,
+        body.active_agent_id.as_deref(),
+    )
+    .await
+    {
+        Ok(active_profile) => {
+            *state.config.lock() = current_config.clone();
+            Json(OnboardingBootstrapResponse {
+                onboarding: studio::onboarding_state(&current_config, &studio_state),
+                active_profile,
+            })
+            .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /api/tools — list registered tool specs

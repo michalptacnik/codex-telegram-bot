@@ -713,6 +713,32 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         // ── Web Dashboard API routes ──
         .route("/api/status", get(api::handle_api_status))
         .route("/api/config", get(api::handle_api_config_get))
+        .route("/api/classes", get(api::handle_api_classes))
+        .route("/api/classes/{id}", get(api::handle_api_class_get))
+        .route(
+            "/api/agents",
+            get(api::handle_api_agents_list).post(api::handle_api_agents_create),
+        )
+        .route(
+            "/api/agents/{id}",
+            get(api::handle_api_agent_get).put(api::handle_api_agent_put),
+        )
+        .route(
+            "/api/agents/{id}/activate",
+            post(api::handle_api_agent_activate),
+        )
+        .route(
+            "/api/onboarding/state",
+            get(api::handle_api_onboarding_state),
+        )
+        .route(
+            "/api/onboarding/bootstrap",
+            post(api::handle_api_onboarding_bootstrap),
+        )
+        .route(
+            "/api/onboarding/complete",
+            post(api::handle_api_onboarding_complete),
+        )
         .route(
             "/api/agents/social-accounts",
             get(api::handle_api_agent_social_accounts_get)
