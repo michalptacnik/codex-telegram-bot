@@ -146,6 +146,17 @@ Interactive guided setup -- configures your provider keys, default model, and ch
 ./target/release/agent-hq onboard
 ```
 
+### OpenAI Codex Setup
+
+For `openai-codex`, Agent HQ now uses the official OpenAI `codex` client as its compliant bridge.
+
+```bash
+codex login
+codex login status
+```
+
+Then set `default_provider = "openai-codex"` in your Agent HQ config. Agent HQ does not perform direct ChatGPT OAuth for this provider.
+
 ### Run
 
 ```bash
