@@ -151,7 +151,7 @@ Sandboxing: `bubblewrap.rs`, `firejail.rs`, `landlock.rs`, `docker.rs`, `detect.
 
 | Module | Key Files | Role |
 |---|---|---|
-| `skills/` | `mod.rs` (1.5k), `audit.rs` | **User/community-authored capabilities.** Loaded from `~/.zeroclaw/workspace/skills/<name>/SKILL.md`. CLI: list, install, audit, remove. Optional community sync from open-skills repo. |
+| `skills/` | `mod.rs` (1.5k), `audit.rs`, repo `skills/<name>/SKILL.md` packages | **Repo + user/community-authored capabilities.** Repo skills in `skills/<name>/SKILL.md` load by default and override same-name workspace copies for product updates. Workspace skills still load from `~/.zeroclaw/workspace/skills/<name>/SKILL.md`. CLI: list, install, audit, remove. Optional community sync from open-skills repo. |
 | `skillforge/` | `scout.rs`, `evaluate.rs`, `integrate.rs`, `mod.rs` | **Skill discovery and evaluation.** Scouts for skills, evaluates quality/fitness, integrates into the runtime. |
 
 ### SOP (Standard Operating Procedures)

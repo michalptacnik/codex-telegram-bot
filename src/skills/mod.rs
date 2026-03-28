@@ -12,9 +12,10 @@ const OPEN_SKILLS_REPO_URL: &str = "https://github.com/besoeasy/open-skills";
 const OPEN_SKILLS_SYNC_MARKER: &str = ".zeroclaw-open-skills-sync";
 const OPEN_SKILLS_SYNC_INTERVAL_SECS: u64 = 60 * 60 * 24 * 7;
 
-/// A skill is a user-defined or community-built capability.
-/// Skills live in `~/.zeroclaw/workspace/skills/<name>/SKILL.md`
-/// and can include tool definitions, prompts, and automation scripts.
+/// A skill is a repo-packaged, user-defined, or community-built capability.
+/// Built-in repo skills live in `skills/<name>/SKILL.md`.
+/// Workspace skills live in `~/.zeroclaw/workspace/skills/<name>/SKILL.md`.
+/// Skills can include tool definitions, prompts, and automation scripts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
     pub name: String,
@@ -95,16 +96,34 @@ fn load_skills_with_open_skills_config(
     if let Some(open_skills_dir) =
         ensure_open_skills_repo(config_open_skills_enabled, config_open_skills_dir)
     {
-        skills.extend(load_open_skills(&open_skills_dir));
+        merge_skills_by_name(&mut skills, load_open_skills(&open_skills_dir));
     }
 
-    skills.extend(load_workspace_skills(workspace_dir));
+    merge_skills_by_name(&mut skills, load_workspace_skills(workspace_dir));
+    // Repo-packaged skills are the product defaults and intentionally override
+    // same-name workspace copies so shipping updates take effect immediately.
+    merge_skills_by_name(&mut skills, load_repo_skills());
     skills
 }
 
 fn load_workspace_skills(workspace_dir: &Path) -> Vec<Skill> {
     let skills_dir = workspace_dir.join("skills");
     load_skills_from_directory(&skills_dir)
+}
+
+fn load_repo_skills() -> Vec<Skill> {
+    let skills_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+    load_skills_from_directory(&skills_dir)
+}
+
+fn merge_skills_by_name(into: &mut Vec<Skill>, incoming: Vec<Skill>) {
+    for skill in incoming {
+        if let Some(existing) = into.iter_mut().find(|existing| existing.name == skill.name) {
+            *existing = skill;
+        } else {
+            into.push(skill);
+        }
+    }
 }
 
 fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
@@ -1470,6 +1489,44 @@ description = "Bare minimum"
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "http_request");
         assert_ne!(skills[0].name, "CONTRIBUTING");
+    }
+
+    #[test]
+    fn merge_skills_by_name_replaces_same_named_skill() {
+        let mut skills = vec![Skill {
+            name: "social-media-manager".to_string(),
+            description: "workspace version".to_string(),
+            version: "0.1.0".to_string(),
+            author: None,
+            tags: vec![],
+            tools: vec![],
+            prompts: vec!["workspace".to_string()],
+            location: Some(PathBuf::from("/tmp/workspace/skills/social-media-manager/SKILL.md")),
+        }];
+
+        merge_skills_by_name(
+            &mut skills,
+            vec![Skill {
+                name: "social-media-manager".to_string(),
+                description: "repo version".to_string(),
+                version: "0.2.0".to_string(),
+                author: None,
+                tags: vec!["builtin".to_string()],
+                tools: vec![],
+                prompts: vec!["repo".to_string()],
+                location: Some(PathBuf::from(
+                    "/tmp/repo/skills/social-media-manager/SKILL.md",
+                )),
+            }],
+        );
+
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "repo version");
+        assert_eq!(skills[0].version, "0.2.0");
+        assert_eq!(
+            skills[0].location.as_deref(),
+            Some(Path::new("/tmp/repo/skills/social-media-manager/SKILL.md"))
+        );
     }
 }
 
