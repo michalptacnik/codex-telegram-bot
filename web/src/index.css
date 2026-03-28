@@ -42,6 +42,25 @@
   --shell-ring: rgba(10, 132, 255, 0.45);
 }
 
+@media (prefers-color-scheme: light) {
+  :root:not([data-appearance]) {
+    color-scheme: light;
+    --shell-bg: radial-gradient(circle at top, #f6f8fc 0%, #edf1f8 42%, #dce4f0 100%);
+    --shell-text: #15243a;
+    --shell-muted: #586b86;
+    --shell-border: rgba(255, 255, 255, 0.55);
+    --shell-panel: rgba(255, 255, 255, 0.76);
+    --shell-panel-strong: rgba(255, 255, 255, 0.9);
+    --shell-panel-hover: rgba(255, 255, 255, 0.96);
+    --shell-sidebar: rgba(247, 249, 252, 0.72);
+    --shell-toolbar: rgba(255, 255, 255, 0.62);
+    --shell-input: rgba(255, 255, 255, 0.84);
+    --shell-selection: rgba(10, 132, 255, 0.12);
+    --shell-shadow: 0 26px 70px rgba(15, 23, 42, 0.14);
+    --shell-ring: rgba(10, 132, 255, 0.28);
+  }
+}
+
 :root[data-appearance="light"] {
   color-scheme: light;
   --shell-bg: radial-gradient(circle at top, #f6f8fc 0%, #edf1f8 42%, #dce4f0 100%);
@@ -255,6 +274,22 @@ textarea {
   margin: 0.125rem 0 0;
   font-size: 0.76rem;
   color: var(--shell-muted);
+}
+
+.studio-art-frame {
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.22), transparent 62%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.05)),
+    color-mix(in srgb, var(--shell-panel-strong) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--shell-border) 90%, rgba(255, 255, 255, 0.1));
+  box-sizing: border-box;
+}
+
+:root[data-appearance="light"] .studio-art-frame,
+.light .studio-art-frame {
+  background:
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.95), rgba(255, 255, 255, 0.18) 70%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(232, 238, 248, 0.72));
 }
 
 .mac-sidebar-nav {

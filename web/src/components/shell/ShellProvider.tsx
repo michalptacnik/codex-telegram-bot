@@ -93,6 +93,8 @@ export function ShellProvider({ children }: { children: ReactNode }) {
     root.dataset.shellPlatform = shell.platform;
     root.dataset.shellMode = shell.mode;
     root.dataset.appearance = resolvedAppearance;
+    root.classList.toggle('dark', resolvedAppearance === 'dark');
+    root.classList.toggle('light', resolvedAppearance === 'light');
     body.classList.toggle('desktop-shell', shell.platform !== 'web');
     body.classList.toggle('desktop-macos', shell.platform === 'macos');
     body.classList.remove(desktopClass === 'desktop-macos' ? 'desktop-browser' : 'desktop-macos');
@@ -102,6 +104,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
       delete root.dataset.shellPlatform;
       delete root.dataset.shellMode;
       delete root.dataset.appearance;
+      root.classList.remove('dark', 'light');
       body.classList.remove('desktop-shell', 'desktop-macos', 'desktop-browser');
     };
   }, [resolvedAppearance, shell.mode, shell.platform]);

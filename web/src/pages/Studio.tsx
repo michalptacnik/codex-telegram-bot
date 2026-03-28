@@ -111,6 +111,12 @@ function actionButtonClass(primary: boolean, isDesktopMac: boolean): string {
     : 'inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-white/10';
 }
 
+function artworkClass(size: 'card' | 'hero'): string {
+  return size === 'hero'
+    ? 'h-40 w-full rounded-[1rem] object-contain p-3 studio-art-frame'
+    : 'rounded-[1rem] object-contain p-2 studio-art-frame';
+}
+
 function ClassChoiceCard({
   classItem,
   selected,
@@ -139,7 +145,7 @@ function ClassChoiceCard({
         <img
           src={classArtwork(classItem.id) ?? undefined}
           alt={classItem.name}
-          className="h-16 w-16 shrink-0 rounded-[1rem] object-cover"
+          className={`h-16 w-16 shrink-0 ${artworkClass('card')}`}
         />
       ) : (
         <div className="h-16 w-16 shrink-0 rounded-[1rem] bg-[var(--shell-selection)]" />
@@ -377,8 +383,8 @@ export default function Studio() {
       }
       description={
         stage === 'wizard'
-          ? 'Set up identity, class loadout, and startup behavior in a tighter Mac-style flow.'
-          : 'Manage the active roster, inspect class loadouts, and move into focused operational tools.'
+          ? 'Set up identity, class loadout, and startup behavior in one focused pass.'
+          : 'Manage the active roster, review class loadouts, and move into the tools that matter right now.'
       }
       actions={
         stage === 'studio' ? (
@@ -403,7 +409,7 @@ export default function Studio() {
         <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
           <MacPanel
             title="Set up your first working agent"
-            detail="Mac apps lead with the task at hand. Start with one strong agent profile, then refine deeper details in the dedicated tools."
+            detail="Start with one strong agent profile, then refine the details once the workspace is live."
           >
             <div className="grid gap-4 md:grid-cols-3">
               <MacStat label="Runtime" value={runtimeReadiness} detail="Local desktop runtime" />
@@ -456,7 +462,7 @@ export default function Studio() {
                     <img
                       src={classArtwork(activeProfile.profile.primary_class) ?? undefined}
                       alt={activeProfile.profile.name}
-                      className="h-20 w-20 rounded-[1.1rem] object-cover"
+                      className={`h-20 w-20 rounded-[1.1rem] ${artworkClass('card')}`}
                     />
                   ) : null}
                   <div className="min-w-0">
@@ -482,7 +488,7 @@ export default function Studio() {
                       Why this matters
                     </p>
                     <p className="mt-2 text-sm text-[var(--shell-muted)]">
-                      The sidebar and menus should open real work areas. This profile becomes the anchor for those actions.
+                      This profile becomes the default launch target for dashboard, chat, and startup actions.
                     </p>
                   </div>
                 </div>
@@ -656,7 +662,7 @@ export default function Studio() {
               </div>
             </MacPanel>
 
-            <MacPanel title="Live preview" detail="This summary becomes the basis for the dashboard and agent inspector.">
+            <MacPanel title="Live preview" detail="This summary feeds the agent roster, startup target, and detail view.">
               <div className="grid gap-3">
                 <MacStat
                   label="Primary"
@@ -767,7 +773,7 @@ export default function Studio() {
                             <img
                               src={classArtwork(agent.profile.primary_class) ?? undefined}
                               alt={agent.profile.name}
-                              className="h-14 w-14 rounded-[0.95rem] object-cover"
+                              className={`h-14 w-14 rounded-[0.95rem] ${artworkClass('card')}`}
                             />
                           ) : (
                             <div className="flex h-14 w-14 items-center justify-center rounded-[0.95rem] bg-[var(--shell-selection)] text-lg">
@@ -823,7 +829,7 @@ export default function Studio() {
             </MacPanel>
 
             <div className="grid gap-4">
-              <MacPanel title="Control center" detail="Central actions belong in the content area, not hidden in decorative hero panels.">
+              <MacPanel title="Workspace actions" detail="Open the active agent, jump to diagnostics, or add another roster member.">
                 <div className="grid gap-3 md:grid-cols-3">
                   <Link to="/dashboard" className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4 transition hover:bg-[var(--shell-selection)]">
                     <Rocket className="h-5 w-5 text-[#0a84ff]" />
@@ -865,7 +871,7 @@ export default function Studio() {
                           <img
                             src={classArtwork(classItem.id) ?? undefined}
                             alt={classItem.name}
-                            className="h-16 w-16 rounded-[1rem] object-cover"
+                            className={`h-16 w-16 ${artworkClass('card')}`}
                           />
                         ) : null}
                         <div className="min-w-0">
@@ -892,7 +898,7 @@ export default function Studio() {
               </MacPanel>
             </div>
 
-            <MacPanel title="Inspector" detail="A Mac inspector is concise, scannable, and always contextual to the current selection.">
+            <MacPanel title="Agent details" detail="Focused context for the selected agent, including artwork, guardrails, and tool access.">
               {activeProfile ? (
                 <div className="space-y-4">
                   <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
@@ -900,7 +906,7 @@ export default function Studio() {
                       <img
                         src={classArtwork(activeProfile.profile.primary_class) ?? undefined}
                         alt={activeProfile.profile.name}
-                        className="h-40 w-full rounded-[1rem] object-cover"
+                        className={artworkClass('hero')}
                       />
                     ) : null}
                     <h3 className="mt-4 text-lg font-semibold">{activeProfile.profile.name}</h3>
@@ -941,7 +947,7 @@ export default function Studio() {
                 <MacEmptyState
                   icon={<Sparkles className="h-7 w-7" />}
                   title="No active agent"
-                  description="Activate an agent from the roster to populate the inspector."
+                  description="Activate an agent from the roster to show its details here."
                 />
               )}
             </MacPanel>

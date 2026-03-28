@@ -44,8 +44,8 @@ export default function MacLayout() {
   const pageTitle = routeTitles[location.pathname] ?? 'Agent HQ';
   const pageSubtitle =
     shell.platform === 'macos'
-      ? 'macOS control center'
-      : 'Desktop control center';
+      ? 'Native macOS workspace'
+      : 'Desktop workspace';
 
   const openPalette = () => setPaletteOpen(true);
   const closePalette = () => {
@@ -220,7 +220,7 @@ export default function MacLayout() {
             {sidebarOpen ? (
               <div>
                 <p className="mac-sidebar-brand-title">Agent HQ</p>
-                <p className="mac-sidebar-brand-detail">Operator console for local agents</p>
+                <p className="mac-sidebar-brand-detail">Local runtime, agents, and channels</p>
               </div>
             ) : null}
           </div>

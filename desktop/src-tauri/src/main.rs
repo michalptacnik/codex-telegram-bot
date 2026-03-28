@@ -171,7 +171,7 @@ fn build_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
         .about(Some(AboutMetadata {
             name: Some("Agent HQ".into()),
             version: Some(env!("CARGO_PKG_VERSION").into()),
-            comments: Some("Local macOS control center for the Agent HQ runtime.".into()),
+            comments: Some("Local macOS workspace for the Agent HQ runtime.".into()),
             ..Default::default()
         }))
         .separator()

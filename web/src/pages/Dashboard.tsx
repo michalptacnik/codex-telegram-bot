@@ -154,7 +154,7 @@ export default function Dashboard() {
       </div>
 
       <div className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <MacPanel title="Runtime posture" detail="Primary operating characteristics for the local control center.">
+        <MacPanel title="Runtime posture" detail="Core runtime, model, memory, and channel signals.">
           <div className="grid gap-3 md:grid-cols-2">
             {[
               {
@@ -164,7 +164,7 @@ export default function Dashboard() {
               },
               {
                 icon: Globe,
-                label: 'Locale and gateway',
+                label: 'Locale and listener',
                 value: `${status.locale} on port ${status.gateway_port}`,
               },
               {
