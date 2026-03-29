@@ -500,7 +500,7 @@ export default function Cron() {
               Automation Manager
             </p>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight">
-              Schedule work for Tanith and every other agent profile
+              Schedule work for every agent profile
             </h1>
             <p className="mt-2 max-w-3xl text-sm text-slate-300">
               Build repeated daily or weekly jobs, interval automations, one-off tasks,
@@ -759,7 +759,16 @@ export default function Cron() {
                     Daily agent review
                   </div>
                   <p className="mt-2 text-slate-400">
-                    Schedule Tanith to run a morning review every weekday with browser access and the right profile context.
+                    Schedule an agent to run a morning review every weekday with browser access and the right profile context.
+                  </p>
+                </div>
+                <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
+                  <div className="flex items-center gap-2 text-white">
+                    <Bot className="h-4 w-4 text-emerald-300" />
+                    Sales pipeline sweep
+                  </div>
+                  <p className="mt-2 text-slate-400">
+                    For Sales profiles, queue daily prospect discovery, reply triage, or weekly pipeline summaries without losing owner context.
                   </p>
                 </div>
                 <div className="rounded-2xl border border-white/8 bg-white/[0.03] p-4">
@@ -920,7 +929,7 @@ export default function Cron() {
                     }
                     rows={5}
                     className="mt-2 w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm outline-none"
-                    placeholder="Review messages, browse for important updates, and send me a concise digest."
+                    placeholder="Review replies, qualify which prospects need follow-up, and prepare concise next-step drafts."
                   />
                 </label>
               ) : (

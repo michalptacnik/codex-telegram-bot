@@ -31,6 +31,7 @@ import {
 } from '@/components/macos/MacPrimitives';
 import { useShell } from '@/components/shell/ShellProvider';
 import socialMediaManagerArt from '@/assets/class-social-media-manager.png';
+import salesArt from '@/assets/class-sales.png';
 import vaArt from '@/assets/class-va.png';
 import type {
   AgentClassManifest,
@@ -52,16 +53,16 @@ function slugify(value: string): string {
 
 function defaultProfile(): AgentProfile {
   return {
-    id: 'tanith',
-    name: 'Tanith',
-    avatar: 'radiant tactician',
-    launch_on_startup: true,
-    primary_class: 'social_media_manager',
-    secondary_classes: ['va'],
+    id: 'agent',
+    name: 'Agent',
+    avatar: 'local operator',
+    launch_on_startup: false,
+    primary_class: 'va',
+    secondary_classes: [],
     social_accounts: {},
     overrides: {
       summary:
-        'Lead social growth while staying deeply useful in day-to-day coordination and follow-through.',
+        'Handle practical work across the workspace with reliable follow-through and shared browser capability.',
       system_prompt_appendix: '',
       provider: null,
       model: null,
@@ -86,6 +87,8 @@ function classArtwork(classId: string): string | null {
   switch (classId) {
     case 'social_media_manager':
       return socialMediaManagerArt;
+    case 'sales':
+      return salesArt;
     case 'va':
       return vaArt;
     default:
@@ -189,11 +192,7 @@ export default function Studio() {
         setClasses(classList);
         setAgents(agentList.profiles);
         setActiveAgentId(agentList.active_agent_id);
-        setDraft({
-          ...defaultProfile(),
-          id: slugify(state.active_profile.profile.name) || 'tanith',
-          name: state.active_profile.profile.name,
-        });
+        setDraft(defaultProfile());
         setStage(wizardRequested ? 'wizard' : state.onboarding.completed ? 'studio' : 'intro');
       })
       .catch((err: Error) => {
@@ -273,12 +272,12 @@ export default function Studio() {
     },
     {
       label: 'Flagship agent',
-      value: bootstrap?.active_profile.profile.name ?? 'Tanith',
+      value: bootstrap?.active_profile.profile.name ?? 'Agent',
     },
   ];
   const providerReadiness = readinessItems[0]?.value ?? 'Unknown';
   const runtimeReadiness = readinessItems[1]?.value ?? 'Unknown';
-  const starterAgent = readinessItems[2]?.value ?? 'Tanith';
+  const starterAgent = readinessItems[2]?.value ?? 'Agent';
 
   const refreshAgents = async () => {
     const [state, agentList] = await Promise.all([getOnboardingState(), getAgents()]);

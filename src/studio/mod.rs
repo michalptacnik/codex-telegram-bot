@@ -294,6 +294,76 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
                 "Set recurring reminders and summarize upcoming obligations.".into(),
             ],
         },
+        AgentClassManifest {
+            version: 1,
+            id: "sales".into(),
+            name: "Sales".into(),
+            status: AgentClassStatus::Active,
+            description: "Runs AI SDR workflows: finds prospects, qualifies accounts, researches targets, drafts outreach, triages replies, and prepares meeting handoffs.".into(),
+            fantasy_theme: "Pipeline closer".into(),
+            default_role_summary: "Generate pipeline through disciplined prospecting, account qualification, personalized outreach prep, reply triage, and clean human handoffs.".into(),
+            default_soul_overlay: SoulProfileOverlay {
+                voice: Some("sharp commercial evidence-driven".into()),
+                principles: vec![
+                    "Qualify before outreach.".into(),
+                    "Personalize from evidence, not filler.".into(),
+                    "Optimize for booked conversations and healthy pipeline, not noisy volume.".into(),
+                ],
+                boundaries: vec![
+                    "Do not send first-touch outbound messages without explicit approval or an approved automation policy.".into(),
+                    "Never fabricate prospect facts, company pain points, or personalization hooks.".into(),
+                    "Respect stop signals, opt-outs, and reputational risk.".into(),
+                ],
+                style: Some(SoulStyle {
+                    emoji: "off".into(),
+                    emphasis: "plain".into(),
+                    brevity: "short".into(),
+                }),
+            },
+            default_identity_overlay: IdentityOverlay {
+                creature: Some("a relentless but disciplined pipeline operator".into()),
+                vibe: Some("commercial, methodical, and useful under pressure".into()),
+                emoji: Some("💼".into()),
+                role_title: Some("Sales Agent".into()),
+                tagline: Some("Turns research into qualified pipeline and ready-to-send outreach.".into()),
+            },
+            tool_grants: vec![
+                "web_search".into(),
+                "web_fetch".into(),
+                "browser_open".into(),
+                "browser_headless".into(),
+                "schedule".into(),
+                "mail".into(),
+                "memory_recall".into(),
+                "memory_store".into(),
+                "content_search".into(),
+                "file_read".into(),
+                "file_write".into(),
+                "glob_search".into(),
+            ],
+            skill_grants: vec![
+                "sales-prospector".into(),
+                "sales-icp-qualifier".into(),
+                "sales-account-researcher".into(),
+                "sales-personalization-writer".into(),
+                "sales-followup-planner".into(),
+                "sales-reply-triage".into(),
+                "sales-meeting-handoff".into(),
+                "sales-pipeline-reporter".into(),
+            ],
+            channel_affinities: vec!["email".into(), "slack".into(), "telegram".into()],
+            integration_affinities: vec!["browser_headless".into(), "schedule".into(), "mail".into()],
+            guardrails: vec![
+                "Treat first-touch outbound as approval-gated unless the user explicitly authorizes autonomous sending.".into(),
+                "Do qualification and account research before drafting outreach.".into(),
+                "When evidence is weak, say so instead of pretending personalization exists.".into(),
+            ],
+            evaluation_scenarios: vec![
+                "Build a ranked prospect list from a narrow ICP with evidence for fit.".into(),
+                "Draft a personalized first-touch email and two follow-ups from real account research.".into(),
+                "Classify inbound replies and prepare a clean meeting handoff summary.".into(),
+            ],
+        },
         placeholder_manifest(
             "tester",
             "Tester",
@@ -305,12 +375,6 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
             "BizDev",
             "Alliance broker",
             "Builds partnerships, lead maps, and opportunity pipelines once the class pack is ready.",
-        ),
-        placeholder_manifest(
-            "sales_agent",
-            "Sales Agent",
-            "Closer on the road",
-            "Handles qualification, outreach prep, and follow-up systems once the class pack is ready.",
         ),
     ]
 }
@@ -961,6 +1025,7 @@ mod tests {
             .iter()
             .any(|class_| class_.id == "social_media_manager"));
         assert!(classes.iter().any(|class_| class_.id == "va"));
+        assert!(classes.iter().any(|class_| class_.id == "sales"));
         assert_eq!(
             classes
                 .iter()
@@ -1022,6 +1087,30 @@ mod tests {
         assert!(resolved.skill_grants.contains(&"browser-operator".into()));
         assert!(!resolved.skill_grants.contains(&"ops_coordination".into()));
         assert!(!resolved.skill_grants.contains(&"task_triage".into()));
+    }
+
+    #[test]
+    fn sales_profile_gets_sales_skills_and_mail_tool() {
+        let profile = AgentProfile {
+            id: "closer".into(),
+            name: "Closer".into(),
+            avatar: None,
+            launch_on_startup: false,
+            primary_class: "sales".into(),
+            secondary_classes: Vec::new(),
+            social_accounts: AgentSocialAccountsConfig::default(),
+            overrides: AgentProfileOverrides::default(),
+        };
+
+        let resolved = resolve_profile_record(&profile).unwrap();
+        assert!(resolved.tool_grants.contains(&"browser_headless".into()));
+        assert!(resolved.tool_grants.contains(&"mail".into()));
+        assert!(resolved.skill_grants.contains(&"browser-operator".into()));
+        assert!(resolved.skill_grants.contains(&"sales-prospector".into()));
+        assert!(resolved
+            .skill_grants
+            .contains(&"sales-pipeline-reporter".into()));
+        assert!(resolved.summary.contains("Generate pipeline"));
     }
 
     #[test]
