@@ -3,6 +3,7 @@ use anyhow::{anyhow, Context};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -127,6 +128,52 @@ struct SidecarResponse {
 }
 
 impl BrowserHeadlessTool {
+    fn candidate_bin_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = Vec::new();
+        if let Some(cwd) = self.cwd.as_ref() {
+            dirs.push(cwd.clone());
+        }
+        if let Some(parent) = PathBuf::from(&self.command).parent() {
+            dirs.push(parent.to_path_buf());
+        }
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs
+    }
+
+    fn resolve_executable_path(&self, program: &str) -> PathBuf {
+        let candidate = PathBuf::from(program);
+        if candidate.components().count() > 1 && candidate.exists() {
+            return candidate;
+        }
+
+        if let Ok(found) = which::which(program) {
+            return found;
+        }
+
+        for dir in self.candidate_bin_dirs() {
+            let path = dir.join(program);
+            if path.exists() {
+                return path;
+            }
+        }
+
+        candidate
+    }
+
+    fn sidecar_env_path(&self) -> OsString {
+        let mut dirs: Vec<PathBuf> = self
+            .candidate_bin_dirs()
+            .into_iter()
+            .filter(|dir| dir.exists())
+            .collect();
+        if let Some(existing) = std::env::var_os("PATH") {
+            dirs.extend(std::env::split_paths(&existing));
+        }
+        std::env::join_paths(dirs)
+            .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+    }
+
     pub fn new(
         command: String,
         args: Vec<String>,
@@ -180,12 +227,13 @@ impl BrowserHeadlessTool {
             .with_context(|| format!("creating browser headless state dir {:?}", self.state_dir))?;
         self.ensure_sidecar_runtime().await?;
 
-        let mut command = Command::new(&self.command);
+        let mut command = Command::new(self.resolve_executable_path(&self.command));
         command.args(&self.args);
         command.stdin(Stdio::piped());
         command.stdout(Stdio::piped());
         command.stderr(Stdio::inherit());
         command.env("ZEROCLAW_HEADLESS_STATE_DIR", &self.state_dir);
+        command.env("PATH", self.sidecar_env_path());
         if let Some(cwd) = self.cwd.as_ref() {
             command.current_dir(cwd);
         }
@@ -345,9 +393,10 @@ impl BrowserHeadlessTool {
         cwd: &PathBuf,
         label: &str,
     ) -> anyhow::Result<()> {
-        let output = Command::new(program)
+        let output = Command::new(self.resolve_executable_path(program))
             .args(args)
             .current_dir(cwd)
+            .env("PATH", self.sidecar_env_path())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -381,13 +430,14 @@ impl BrowserHeadlessTool {
             ));
         }
 
-        let smoke = Command::new("node")
+        let smoke = Command::new(self.resolve_executable_path("node"))
             .args([
                 "--input-type=module",
                 "-e",
                 "import { chromium } from 'playwright'; const browser = await chromium.launch({ headless: true }); await browser.close();",
             ])
             .current_dir(&sidecar_dir)
+            .env("PATH", self.sidecar_env_path())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .output()

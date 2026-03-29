@@ -16,6 +16,7 @@ For browser work, prefer tools in this order:
 4. `browser_open` only to open a URL, never to automate
 
 Use `browser_ext` before `browser_headless` only when the user explicitly wants the live browser session or the task depends on the user's existing logged-in browser state and the headless path is blocked.
+If the user explicitly wants a headless workflow, do not fall back to `browser_ext`; stop and report the headless blocker instead.
 
 ## Fixed Workflow
 
@@ -54,6 +55,10 @@ For every externally visible action, require a fresh artifact from this attempt:
 - For social posting, comments, replies, and publishing, use the proven platform path first.
 - For authenticated X browser work, use `browser_headless action=status` first and `bootstrap_x_session` when the saved X session is missing or expired.
 - For X/Twitter, use authenticated `browser_headless` first, then `browser_ext`.
+- When an X task names a specific account, verify the loaded page still shows that exact `@handle` before using it as evidence or style reference.
+- For X replies and comments, open the post's timestamp/status link before drafting or posting. Do not use the author's profile page as the target post proof.
+- For X replies in headless mode, submit with the real composer control in this order: `[data-testid="tweetButtonInline"]`, `[data-testid="tweetButton"]`, then `button:has-text("Reply")`.
+- For X replies, do not accept the parent post URL as proof. Verify the exact reply text appears in the thread or `/with_replies`, then capture the reply's own `/status/` URL.
 - For browser webmail, only use this skill when the `mail` tool is unavailable, verification fails, or the user explicitly wants browser/webmail handling.
 - When a button or flow changes, stay in the same class of solution: headless DOM recovery first, then trace/screenshot, then live browser fallback.
 

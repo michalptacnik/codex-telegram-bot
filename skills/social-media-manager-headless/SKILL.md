@@ -22,6 +22,28 @@ For X:
   use `browser_headless` with `action=bootstrap_x_session_interactive` only if Chrome-session import is unavailable or fails
   after setup, re-check `browser_headless` with `action=status`, `platform=x`
 - only use `browser_ext` when direct and headless are truthfully unavailable or blocked
+- if the user explicitly wants a headless workflow, do not use `browser_ext`; stop and report the headless blocker instead
+
+## X Reply Flow
+
+When the task is to publish an X reply through `browser_headless`:
+
+1. use the authenticated X session returned by `browser_headless` `action=status`, `platform=x`
+2. open the exact target status URL, preferring `wait_until=domcontentloaded` if `networkidle` flakes
+3. verify the loaded page still shows the expected `@handle`
+4. confirm the reply editor exists with `[data-testid="tweetTextarea_0"]`
+5. type the exact reply with:
+   `selector="[data-testid=\"tweetTextarea_0\"]"`
+6. verify the reply text is actually present in the editor before submitting
+7. click the enabled submit control in this order:
+   - inline composer: `[data-testid="tweetButtonInline"]`
+   - dedicated compose: `[data-testid="tweetButton"]`
+   - visible text fallback: `button:has-text("Reply")`
+8. after the click, verify the reply was actually posted before claiming success:
+   - wait briefly
+   - search the thread or `/with_replies` for the exact reply text
+   - return only the reply's own `/status/` URL as proof
+9. if the submit click appears to work but the thread still shows no new reply, treat it as a failed post and keep debugging instead of claiming success
 
 ## Ground Rules
 
@@ -29,6 +51,8 @@ For X:
 - Require fresh proof from the current attempt
 - Log success only with real proof
 - Use runtime statuses in failure reports, not setup guesses
+- Verify the intended X handle after opening a profile URL. If the page resolves to a different handle, stop and report the mismatch.
+- For engagement targets, open the exact timestamp/status link for the post before drafting. Never treat the author profile URL as the target post proof.
 - When setup is needed, tell the user the exact next action:
   keep Google Chrome signed into X, then let you import the Chrome X session
   or complete the one-time interactive bootstrap if Chrome import fails

@@ -2994,14 +2994,14 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
     if has_browser_headless {
         instructions.push_str("### Headless Browser Rule\n\n");
         instructions.push_str(
-            "Use `browser_headless` as the primary browser tool before `browser_ext` or legacy `browser` for ordinary website work and browser automation. Reuse the same `session` value across related calls in one task so navigation state persists. Use `browser_headless` action=`status` to distinguish sidecar health from authentication state, and use `bootstrap_x_session` before authenticated X work when the saved headless session is missing or expired. Save screenshots or traces when the flow becomes flaky or proof is needed.\n\n",
+            "Use `browser_headless` as the primary browser tool before `browser_ext` or legacy `browser` for ordinary website work and browser automation. Reuse the same `session` value across related calls in one task so navigation state persists. Use `browser_headless` action=`status` to distinguish sidecar health from authentication state, and use `bootstrap_x_session` before authenticated X work when the saved headless session is missing or expired. If the user explicitly requests a headless workflow, treat that as a hard requirement and do not fall back to `browser_ext`; report the headless blocker instead. Save screenshots or traces when the flow becomes flaky or proof is needed.\n\n",
         );
     }
 
     if has_browser_ext {
         instructions.push_str("### Logged-In Browser Rule\n\n");
         instructions.push_str(
-            "For X/Twitter, LinkedIn, Instagram, or other authenticated social flows, prefer authenticated `browser_headless` first, and then `browser_ext` only when headless automation is blocked, the user explicitly wants the live session, or the task requires the user's existing logged-in browser state. Do not fall back to legacy `browser` for those social tasks.\n\n",
+            "For X/Twitter, LinkedIn, Instagram, or other authenticated social flows, prefer authenticated `browser_headless` first, and then `browser_ext` only when headless automation is blocked, the user explicitly wants the live session, or the task requires the user's existing logged-in browser state. If the user explicitly said to keep the flow headless, do not use `browser_ext`. Do not fall back to legacy `browser` for those social tasks.\n\n",
         );
     }
 

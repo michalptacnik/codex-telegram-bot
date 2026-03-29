@@ -66,6 +66,11 @@ Use `browser_ext` only when:
 - the user explicitly wants the live browser session
 - the current attempt requires the existing real logged-in browser context
 
+If the user explicitly says the automation or task should run headless:
+- treat `browser_headless` as a hard requirement
+- do not fall back to `browser_ext`
+- if headless cannot complete the task, stop and report the exact blocker
+
 ### LinkedIn
 
 1. `browser_headless`
@@ -86,6 +91,28 @@ There is no direct LinkedIn adapter blessed as primary yet. Use headless first, 
 3. `browser_ext`
 
 ## X / Twitter Execution Rules
+
+### X Replies / comments
+
+For X replies use:
+1. `browser_headless`
+2. `browser_ext` if headless is blocked and the user did not require headless-only
+
+When using `browser_headless` for replies:
+1. Call `browser_headless` with `action=status`, `platform=x`
+2. Reuse the authenticated `session` it returns for the whole flow
+3. Open the exact target status URL and verify it still belongs to the intended account/post
+4. Type the reply with:
+   `selector=[data-testid="tweetTextarea_0"]`
+5. Verify the typed reply text is present before submitting
+6. Click the enabled submit control in this order:
+   - inline composer: `[data-testid="tweetButtonInline"]`
+   - dedicated compose: `[data-testid="tweetButton"]`
+   - visible text fallback: `button:has-text("Reply")`
+7. Recover proof only from the newly posted reply itself:
+   - search the thread or `/with_replies` for the exact reply text
+   - return only the reply's own `/status/` URL
+8. If the click succeeds but the thread still shows no new reply, treat the attempt as a failure and keep debugging instead of reporting success
 
 ### X Articles
 
@@ -115,6 +142,9 @@ When using `browser_headless`:
 - call `action=status` before authenticated X work
 - if X is unauthenticated, call `action=bootstrap_x_session` once before giving up
 - do not silently attempt anonymous X posting, replying, or article publishing
+- when a task names a specific X handle, open that exact URL and verify the loaded page still shows the same `@handle` before learning voice or drafting from it
+- if the loaded page resolves to a different handle or profile than requested, stop and report the mismatch instead of proceeding
+- for reply/comment candidate selection, open the post's timestamp or status link, never the author profile link, before drafting or posting
 - if blocked after 3 meaningful attempts, stop and write a bug report instead of looping
 
 ## Proof Rule
