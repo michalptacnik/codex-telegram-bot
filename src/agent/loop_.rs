@@ -3088,6 +3088,15 @@ pub async fn run(
         &config,
         None, // CLI run() has no bridge; bridge is only available in gateway context
     );
+    if !config.agent.runtime_allowed_tools.is_empty() {
+        let allowed: HashSet<&str> = config
+            .agent
+            .runtime_allowed_tools
+            .iter()
+            .map(String::as_str)
+            .collect();
+        tools_registry.retain(|tool| allowed.contains(tool.name()));
+    }
     // Append SOP tools (built here so crate types resolve correctly in lib context).
     tools_registry.extend(tools::make_sop_tools(&config));
 
@@ -3279,6 +3288,11 @@ pub async fn run(
         native_tools,
         config.skills.prompt_injection_mode,
     );
+    if let Some(runtime_prompt) = config.agent.runtime_system_prompt.as_deref() {
+        if !runtime_prompt.trim().is_empty() {
+            system_prompt = format!("{runtime_prompt}\n\n{system_prompt}");
+        }
+    }
 
     // Append structured tool-use instructions with schemas (only for non-native providers)
     if !native_tools {
@@ -3568,6 +3582,15 @@ pub async fn process_message(
         &config,
         browser_bridge,
     );
+    if !config.agent.runtime_allowed_tools.is_empty() {
+        let allowed: HashSet<&str> = config
+            .agent
+            .runtime_allowed_tools
+            .iter()
+            .map(String::as_str)
+            .collect();
+        tools_registry.retain(|tool| allowed.contains(tool.name()));
+    }
     // Append SOP tools (built here so crate types resolve correctly in lib context).
     tools_registry.extend(tools::make_sop_tools(&config));
     let peripheral_tools: Vec<Box<dyn Tool>> =
@@ -3689,6 +3712,11 @@ pub async fn process_message(
         native_tools,
         config.skills.prompt_injection_mode,
     );
+    if let Some(runtime_prompt) = config.agent.runtime_system_prompt.as_deref() {
+        if !runtime_prompt.trim().is_empty() {
+            system_prompt = format!("{runtime_prompt}\n\n{system_prompt}");
+        }
+    }
     if !native_tools {
         system_prompt.push_str(&build_tool_instructions(&tools_registry));
     }

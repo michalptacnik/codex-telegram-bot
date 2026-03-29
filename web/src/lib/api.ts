@@ -2,6 +2,8 @@ import type {
   StatusResponse,
   ToolSpec,
   CronJob,
+  AutomationRecord,
+  AutomationRunRecord,
   Integration,
   DiagResult,
   MemoryEntry,
@@ -288,6 +290,74 @@ export function getCronJobs(): Promise<CronJob[]> {
   return apiFetch<CronJob[] | { jobs: CronJob[] }>('/api/cron').then((data) =>
     unwrapField(data, 'jobs'),
   );
+}
+
+export function getAutomations(): Promise<AutomationRecord[]> {
+  return apiFetch<AutomationRecord[] | { automations: AutomationRecord[] }>('/api/automations').then(
+    (data) => unwrapField(data, 'automations'),
+  );
+}
+
+export function createAutomation(body: Record<string, unknown>): Promise<AutomationRecord> {
+  return apiFetch<AutomationRecord | { automation: AutomationRecord }>('/api/automations', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  }).then((data) => unwrapField(data, 'automation'));
+}
+
+export function updateAutomation(
+  id: string,
+  body: Record<string, unknown>,
+): Promise<AutomationRecord> {
+  return apiFetch<AutomationRecord | { automation: AutomationRecord }>(
+    `/api/automations/${encodeURIComponent(id)}`,
+    {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    },
+  ).then((data) => unwrapField(data, 'automation'));
+}
+
+export function deleteAutomation(id: string): Promise<void> {
+  return apiFetch<void>(`/api/automations/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function pauseAutomation(id: string): Promise<AutomationRecord> {
+  return apiFetch<AutomationRecord | { automation: AutomationRecord }>(
+    `/api/automations/${encodeURIComponent(id)}/pause`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    },
+  ).then((data) => unwrapField(data, 'automation'));
+}
+
+export function resumeAutomation(id: string): Promise<AutomationRecord> {
+  return apiFetch<AutomationRecord | { automation: AutomationRecord }>(
+    `/api/automations/${encodeURIComponent(id)}/resume`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    },
+  ).then((data) => unwrapField(data, 'automation'));
+}
+
+export function runAutomationNow(id: string): Promise<{ status: string; output?: string }> {
+  return apiFetch<{ status: string; output?: string }>(
+    `/api/automations/${encodeURIComponent(id)}/run`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    },
+  );
+}
+
+export function getAutomationRuns(id: string): Promise<AutomationRunRecord[]> {
+  return apiFetch<AutomationRunRecord[] | { runs: AutomationRunRecord[] }>(
+    `/api/automations/${encodeURIComponent(id)}/runs`,
+  ).then((data) => unwrapField(data, 'runs'));
 }
 
 export function addCronJob(body: {

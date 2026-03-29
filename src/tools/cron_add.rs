@@ -242,6 +242,10 @@ impl Tool for CronAddTool {
                     },
                     None => None,
                 };
+                let owner_agent_id = args
+                    .get("owner_agent_id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
 
                 if let Some(blocked) = self.enforce_mutation_allowed("cron_add") {
                     return Ok(blocked);
@@ -251,6 +255,7 @@ impl Tool for CronAddTool {
                     &self.config,
                     name,
                     schedule,
+                    owner_agent_id,
                     prompt,
                     session_target,
                     model,

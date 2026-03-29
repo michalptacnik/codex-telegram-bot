@@ -107,6 +107,7 @@ pub struct CronJob {
     pub expression: String,
     pub schedule: Schedule,
     pub command: String,
+    pub owner_agent_id: Option<String>,
     pub prompt: Option<String>,
     pub name: Option<String>,
     pub job_type: JobType,
@@ -137,6 +138,7 @@ pub struct CronRun {
 pub struct CronJobPatch {
     pub schedule: Option<Schedule>,
     pub command: Option<String>,
+    pub owner_agent_id: Option<Option<String>>,
     pub prompt: Option<String>,
     pub name: Option<String>,
     pub enabled: Option<bool>,

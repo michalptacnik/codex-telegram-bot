@@ -683,6 +683,15 @@ pub struct AgentConfig {
     /// Social platform credentials for the primary/default agent.
     #[serde(default)]
     pub social_accounts: AgentSocialAccountsConfig,
+    /// Internal runtime override for executing as a specific studio profile.
+    #[serde(default)]
+    pub runtime_profile_id: Option<String>,
+    /// Internal runtime system-prompt override used by scheduled/owned agent runs.
+    #[serde(default)]
+    pub runtime_system_prompt: Option<String>,
+    /// Internal runtime tool allowlist override for scheduled/owned agent runs.
+    #[serde(default)]
+    pub runtime_allowed_tools: Vec<String>,
 }
 
 fn default_agent_max_tool_iterations() -> usize {
@@ -706,6 +715,9 @@ impl Default for AgentConfig {
             parallel_tools: false,
             tool_dispatcher: default_agent_tool_dispatcher(),
             social_accounts: AgentSocialAccountsConfig::default(),
+            runtime_profile_id: None,
+            runtime_system_prompt: None,
+            runtime_allowed_tools: Vec::new(),
         }
     }
 }

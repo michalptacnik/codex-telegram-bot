@@ -42,6 +42,51 @@ export interface CronJob {
   enabled: boolean;
 }
 
+export type AutomationKind =
+  | 'scheduled_agent'
+  | 'scheduled_shell'
+  | 'heartbeat_task';
+
+export type AutomationSchedule =
+  | { kind: 'cron'; expr: string; tz?: string | null }
+  | { kind: 'at'; at: string }
+  | { kind: 'every'; every_ms: number };
+
+export interface DeliveryConfig {
+  mode: string;
+  channel?: string | null;
+  to?: string | null;
+  best_effort: boolean;
+}
+
+export interface AutomationRecord {
+  id: string;
+  backend_id: string;
+  automation_kind: AutomationKind;
+  owner_agent_id?: string | null;
+  name?: string | null;
+  prompt?: string | null;
+  command?: string | null;
+  schedule?: AutomationSchedule | null;
+  enabled: boolean;
+  next_run?: string | null;
+  last_run?: string | null;
+  last_status?: string | null;
+  last_output?: string | null;
+  model?: string | null;
+  session_target?: string | null;
+  delivery?: DeliveryConfig | null;
+}
+
+export interface AutomationRunRecord {
+  id: string;
+  started_at: string;
+  finished_at: string;
+  status: string;
+  output?: string | null;
+  duration_ms?: number | null;
+}
+
 export interface Integration {
   name: string;
   description: string;

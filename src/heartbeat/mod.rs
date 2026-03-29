@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod tasks;
 
 #[cfg(test)]
 mod tests {

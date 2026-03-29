@@ -748,6 +748,33 @@ pub async fn run_gateway(host: &str, port: u16, config: Config) -> Result<()> {
         .route("/api/cron", get(api::handle_api_cron_list))
         .route("/api/cron", post(api::handle_api_cron_add))
         .route("/api/cron/{id}", delete(api::handle_api_cron_delete))
+        .route("/api/automations", get(api::handle_api_automations_list))
+        .route("/api/automations", post(api::handle_api_automation_create))
+        .route("/api/automations/{id}", get(api::handle_api_automation_get))
+        .route(
+            "/api/automations/{id}",
+            put(api::handle_api_automation_update),
+        )
+        .route(
+            "/api/automations/{id}",
+            delete(api::handle_api_automation_delete),
+        )
+        .route(
+            "/api/automations/{id}/pause",
+            post(api::handle_api_automation_pause),
+        )
+        .route(
+            "/api/automations/{id}/resume",
+            post(api::handle_api_automation_resume),
+        )
+        .route(
+            "/api/automations/{id}/run",
+            post(api::handle_api_automation_run),
+        )
+        .route(
+            "/api/automations/{id}/runs",
+            get(api::handle_api_automation_runs),
+        )
         .route("/api/integrations", get(api::handle_api_integrations))
         .route(
             "/api/integrations/settings",

@@ -341,25 +341,19 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
         interval.tick().await;
 
         let file_tasks = engine.collect_tasks().await?;
-        let tasks = heartbeat_tasks_for_tick(file_tasks, config.heartbeat.message.as_deref());
+        let managed_tasks = crate::heartbeat::tasks::list_tasks(&config.workspace_dir)?;
+        let tasks = heartbeat_tasks_for_tick(
+            file_tasks,
+            managed_tasks,
+            config.heartbeat.message.as_deref(),
+        );
         if tasks.is_empty() {
             continue;
         }
 
         for task in tasks {
-            let prompt = format!("[Heartbeat Task] {task}");
-            let temp = config.default_temperature;
-            match crate::agent::run(
-                config.clone(),
-                Some(prompt),
-                None,
-                None,
-                temp,
-                vec![],
-                false,
-            )
-            .await
-            {
+            let prompt = format!("[Heartbeat Task] {}", task.prompt);
+            match run_owned_heartbeat_task(&config, task.owner_agent_id.as_deref(), prompt).await {
                 Ok(output) => {
                     crate::health::mark_component_ok("heartbeat");
                     let announcement = if output.trim().is_empty() {
@@ -367,6 +361,14 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                     } else {
                         output
                     };
+                    if let Some(task_id) = task.managed_task_id.as_deref() {
+                        let _ = crate::heartbeat::tasks::record_task_run(
+                            &config.workspace_dir,
+                            task_id,
+                            true,
+                            &announcement,
+                        );
+                    }
                     if let Some((channel, target)) = &delivery {
                         if let Err(e) = crate::cron::scheduler::deliver_announcement(
                             &config,
@@ -386,6 +388,14 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 }
                 Err(e) => {
                     crate::health::mark_component_error("heartbeat", e.to_string());
+                    if let Some(task_id) = task.managed_task_id.as_deref() {
+                        let _ = crate::heartbeat::tasks::record_task_run(
+                            &config.workspace_dir,
+                            task_id,
+                            false,
+                            &e.to_string(),
+                        );
+                    }
                     tracing::warn!("Heartbeat task failed: {e}");
                 }
             }
@@ -393,19 +403,83 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
     }
 }
 
+#[derive(Debug, Clone)]
+struct HeartbeatTaskEntry {
+    prompt: String,
+    owner_agent_id: Option<String>,
+    managed_task_id: Option<String>,
+}
+
 fn heartbeat_tasks_for_tick(
     file_tasks: Vec<String>,
+    managed_tasks: Vec<crate::heartbeat::tasks::ManagedHeartbeatTask>,
     fallback_message: Option<&str>,
-) -> Vec<String> {
-    if !file_tasks.is_empty() {
-        return file_tasks;
+) -> Vec<HeartbeatTaskEntry> {
+    let mut tasks = managed_tasks
+        .into_iter()
+        .filter(|task| task.enabled)
+        .map(|task| HeartbeatTaskEntry {
+            prompt: task.prompt,
+            owner_agent_id: task.owner_agent_id,
+            managed_task_id: Some(task.id),
+        })
+        .collect::<Vec<_>>();
+
+    tasks.extend(file_tasks.into_iter().map(|prompt| HeartbeatTaskEntry {
+        prompt,
+        owner_agent_id: None,
+        managed_task_id: None,
+    }));
+
+    if !tasks.is_empty() {
+        return tasks;
     }
 
     fallback_message
         .map(str::trim)
         .filter(|message| !message.is_empty())
-        .map(|message| vec![message.to_string()])
+        .map(|message| {
+            vec![HeartbeatTaskEntry {
+                prompt: message.to_string(),
+                owner_agent_id: None,
+                managed_task_id: None,
+            }]
+        })
         .unwrap_or_default()
+}
+
+pub(crate) async fn run_owned_heartbeat_task(
+    config: &Config,
+    owner_agent_id: Option<&str>,
+    prompt: String,
+) -> Result<String> {
+    let mut run_config = config.clone();
+    let mut model_override = None;
+
+    if let Some(owner_agent_id) = owner_agent_id {
+        if let Some(owner) = config.agents.get(owner_agent_id) {
+            run_config.default_provider = Some(owner.provider.clone());
+            run_config.default_model = Some(owner.model.clone());
+            run_config.default_temperature =
+                owner.temperature.unwrap_or(config.default_temperature);
+            run_config.agent.social_accounts = owner.social_accounts.clone();
+            run_config.agent.runtime_profile_id = Some(owner_agent_id.to_string());
+            run_config.agent.runtime_system_prompt = owner.system_prompt.clone();
+            run_config.agent.runtime_allowed_tools = owner.allowed_tools.clone();
+            model_override = Some(owner.model.clone());
+        }
+    }
+
+    crate::agent::run(
+        run_config.clone(),
+        Some(prompt),
+        None,
+        model_override,
+        run_config.default_temperature,
+        vec![],
+        false,
+    )
+    .await
 }
 
 fn heartbeat_delivery_target(config: &Config) -> Result<Option<(String, String)>> {
@@ -609,20 +683,29 @@ mod tests {
 
     #[test]
     fn heartbeat_tasks_use_file_tasks_when_available() {
-        let tasks =
-            heartbeat_tasks_for_tick(vec!["From file".to_string()], Some("Fallback from config"));
-        assert_eq!(tasks, vec!["From file".to_string()]);
+        let tasks = heartbeat_tasks_for_tick(
+            vec!["From file".to_string()],
+            vec![],
+            Some("Fallback from config"),
+        );
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].prompt, "From file");
+        assert_eq!(tasks[0].owner_agent_id, None);
+        assert_eq!(tasks[0].managed_task_id, None);
     }
 
     #[test]
     fn heartbeat_tasks_fall_back_to_config_message() {
-        let tasks = heartbeat_tasks_for_tick(vec![], Some("  check london time  "));
-        assert_eq!(tasks, vec!["check london time".to_string()]);
+        let tasks = heartbeat_tasks_for_tick(vec![], vec![], Some("  check london time  "));
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].prompt, "check london time");
+        assert_eq!(tasks[0].owner_agent_id, None);
+        assert_eq!(tasks[0].managed_task_id, None);
     }
 
     #[test]
     fn heartbeat_tasks_ignore_empty_fallback_message() {
-        let tasks = heartbeat_tasks_for_tick(vec![], Some("   "));
+        let tasks = heartbeat_tasks_for_tick(vec![], vec![], Some("   "));
         assert!(tasks.is_empty());
     }
 

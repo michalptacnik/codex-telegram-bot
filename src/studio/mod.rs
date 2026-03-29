@@ -887,39 +887,53 @@ fn default_profile_from_workspace(workspace_dir: &Path) -> AgentProfile {
     }
 }
 
-pub fn active_skill_grants_for_config(config: &Config) -> Vec<String> {
+fn load_state_for_runtime(config: &Config) -> Result<AgentStudioState> {
     let path = state_path(&config.workspace_dir);
     if !path.exists() {
-        return resolve_profile_record(&default_profile_from_workspace(&config.workspace_dir))
-            .map(|resolved| resolved.skill_grants)
-            .unwrap_or_default();
+        return Ok(AgentStudioState {
+            version: STUDIO_STATE_VERSION,
+            onboarding_completed: false,
+            active_agent_id: DEFAULT_AGENT_ID.into(),
+            profiles: vec![default_profile_from_workspace(&config.workspace_dir)],
+        });
     }
 
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(error) => {
-            tracing::warn!("failed to read studio state for skill grants: {error}");
-            return Vec::new();
-        }
-    };
-    let mut state: AgentStudioState = match serde_json::from_str(&raw) {
+    let raw = std::fs::read_to_string(path)?;
+    let mut state: AgentStudioState = serde_json::from_str(&raw)?;
+    normalize_state(&mut state, config)?;
+    Ok(state)
+}
+
+pub fn skill_grants_for_profile_or_active(
+    config: &Config,
+    profile_id: Option<&str>,
+) -> Vec<String> {
+    let state = match load_state_for_runtime(config) {
         Ok(state) => state,
         Err(error) => {
-            tracing::warn!("failed to parse studio state for skill grants: {error}");
+            tracing::warn!("failed to load studio state for skill grants: {error}");
             return Vec::new();
         }
     };
-    if let Err(error) = normalize_state(&mut state, config) {
-        tracing::warn!("failed to normalize studio state for skill grants: {error}");
-        return Vec::new();
-    }
-
-    resolve_active_profile(&state)
-        .map(|resolved| resolved.skill_grants)
+    let resolved = match profile_id {
+        Some(profile_id) => resolve_profile(&state, profile_id),
+        None => resolve_active_profile(&state),
+    };
+    resolved
+        .map(|profile| profile.skill_grants)
         .unwrap_or_else(|error| {
-            tracing::warn!("failed to resolve active profile skill grants: {error}");
+            tracing::warn!("failed to resolve profile skill grants: {error}");
             Vec::new()
         })
+}
+
+pub fn active_skill_grants_for_config(config: &Config) -> Vec<String> {
+    skill_grants_for_profile_or_active(config, None)
+}
+
+pub fn profile_for_runtime(config: &Config, profile_id: &str) -> Result<ResolvedAgentProfile> {
+    let state = load_state_for_runtime(config)?;
+    resolve_profile(&state, profile_id)
 }
 
 fn state_path(workspace_dir: &Path) -> PathBuf {

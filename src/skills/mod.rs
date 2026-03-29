@@ -91,7 +91,10 @@ pub fn load_active_profile_skills_with_config(
     config: &crate::config::Config,
 ) -> Vec<Skill> {
     let skills = load_skills_with_config(workspace_dir, config);
-    let granted = crate::studio::active_skill_grants_for_config(config);
+    let granted = crate::studio::skill_grants_for_profile_or_active(
+        config,
+        config.agent.runtime_profile_id.as_deref(),
+    );
     filter_skills_by_name(&skills, &granted)
 }
 

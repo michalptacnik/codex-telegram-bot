@@ -301,16 +301,39 @@ async fn run_agent_job(
     let name = job.name.clone().unwrap_or_else(|| "cron-job".to_string());
     let prompt = job.prompt.clone().unwrap_or_default();
     let prefixed_prompt = format!("[cron:{} {name}] {prompt}", job.id);
-    let model_override = job.model.clone();
+    let mut run_config = config.clone();
+    let mut model_override = job.model.clone();
+
+    if let Some(owner_agent_id) = job.owner_agent_id.as_deref() {
+        if let Some(owner) = config.agents.get(owner_agent_id) {
+            run_config.default_provider = Some(owner.provider.clone());
+            run_config.default_model = Some(
+                model_override
+                    .clone()
+                    .unwrap_or_else(|| owner.model.clone()),
+            );
+            run_config.default_temperature =
+                owner.temperature.unwrap_or(config.default_temperature);
+            run_config.agent.social_accounts = owner.social_accounts.clone();
+            run_config.agent.runtime_profile_id = Some(owner_agent_id.to_string());
+            run_config.agent.runtime_system_prompt = owner.system_prompt.clone();
+            run_config.agent.runtime_allowed_tools = owner.allowed_tools.clone();
+            if model_override.is_none() {
+                model_override = Some(owner.model.clone());
+            }
+        }
+    }
+
+    let temperature = run_config.default_temperature;
 
     let run_result = match job.session_target {
         SessionTarget::Main | SessionTarget::Isolated => {
             crate::agent::run(
-                config.clone(),
+                run_config,
                 Some(prefixed_prompt),
                 None,
                 model_override,
-                config.default_temperature,
+                temperature,
                 vec![],
                 false,
             )
@@ -760,6 +783,7 @@ mod tests {
                 tz: None,
             },
             command: command.into(),
+            owner_agent_id: None,
             prompt: None,
             name: None,
             job_type: JobType::Shell,
@@ -1098,6 +1122,7 @@ mod tests {
             &config,
             Some("one-shot".into()),
             crate::cron::Schedule::At { at },
+            None,
             "Hello",
             SessionTarget::Isolated,
             None,
@@ -1123,6 +1148,7 @@ mod tests {
             &config,
             Some("one-shot".into()),
             crate::cron::Schedule::At { at },
+            None,
             "Hello",
             SessionTarget::Isolated,
             None,
@@ -1184,6 +1210,7 @@ mod tests {
                 expr: "*/5 * * * *".into(),
                 tz: None,
             },
+            None,
             "deliver this",
             SessionTarget::Isolated,
             None,
@@ -1222,6 +1249,7 @@ mod tests {
                 expr: "*/5 * * * *".into(),
                 tz: None,
             },
+            None,
             "deliver this",
             SessionTarget::Isolated,
             None,
@@ -1258,6 +1286,7 @@ mod tests {
             &config,
             Some("at-no-autodelete".into()),
             crate::cron::Schedule::At { at },
+            None,
             "Hello",
             SessionTarget::Isolated,
             None,

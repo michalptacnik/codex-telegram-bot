@@ -10,6 +10,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
+use chrono::Utc;
 use futures_util::future::join_all;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -229,6 +230,61 @@ pub struct CronAddBody {
     pub name: Option<String>,
     pub schedule: String,
     pub command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationRecord {
+    pub id: String,
+    pub backend_id: String,
+    pub automation_kind: String,
+    pub owner_agent_id: Option<String>,
+    pub name: Option<String>,
+    pub prompt: Option<String>,
+    pub command: Option<String>,
+    pub schedule: Option<crate::cron::Schedule>,
+    pub enabled: bool,
+    pub next_run: Option<String>,
+    pub last_run: Option<String>,
+    pub last_status: Option<String>,
+    pub last_output: Option<String>,
+    pub model: Option<String>,
+    pub session_target: Option<String>,
+    pub delivery: Option<crate::cron::DeliveryConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationRunRecord {
+    pub id: String,
+    pub started_at: String,
+    pub finished_at: String,
+    pub status: String,
+    pub output: Option<String>,
+    pub duration_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationUpsertRequest {
+    pub automation_kind: String,
+    #[serde(default)]
+    pub owner_agent_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub schedule: Option<crate::cron::Schedule>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub session_target: Option<String>,
+    #[serde(default)]
+    pub delivery: Option<crate::cron::DeliveryConfig>,
+    #[serde(default)]
+    pub delete_after_run: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -777,6 +833,64 @@ pub async fn handle_api_tools(
     Json(serde_json::json!({"tools": tools})).into_response()
 }
 
+fn cron_job_to_automation(job: &crate::cron::CronJob) -> AutomationRecord {
+    AutomationRecord {
+        id: format!("cron:{}", job.id),
+        backend_id: job.id.clone(),
+        automation_kind: match job.job_type {
+            crate::cron::JobType::Agent => "scheduled_agent",
+            crate::cron::JobType::Shell => "scheduled_shell",
+        }
+        .to_string(),
+        owner_agent_id: job.owner_agent_id.clone(),
+        name: job.name.clone(),
+        prompt: job.prompt.clone(),
+        command: (!job.command.trim().is_empty()).then(|| job.command.clone()),
+        schedule: Some(job.schedule.clone()),
+        enabled: job.enabled,
+        next_run: Some(job.next_run.to_rfc3339()),
+        last_run: job.last_run.map(|value| value.to_rfc3339()),
+        last_status: job.last_status.clone(),
+        last_output: job.last_output.clone(),
+        model: job.model.clone(),
+        session_target: Some(job.session_target.as_str().to_string()),
+        delivery: Some(job.delivery.clone()),
+    }
+}
+
+fn heartbeat_task_to_automation(
+    task: &crate::heartbeat::tasks::ManagedHeartbeatTask,
+) -> AutomationRecord {
+    AutomationRecord {
+        id: format!("heartbeat:{}", task.id),
+        backend_id: task.id.clone(),
+        automation_kind: "heartbeat_task".to_string(),
+        owner_agent_id: task.owner_agent_id.clone(),
+        name: task.name.clone(),
+        prompt: Some(task.prompt.clone()),
+        command: None,
+        schedule: None,
+        enabled: task.enabled,
+        next_run: None,
+        last_run: task.last_run.map(|value| value.to_rfc3339()),
+        last_status: task.last_status.clone(),
+        last_output: task.last_output.clone(),
+        model: None,
+        session_target: None,
+        delivery: None,
+    }
+}
+
+fn parse_automation_id(id: &str) -> (&str, &str) {
+    if let Some(rest) = id.strip_prefix("cron:") {
+        ("cron", rest)
+    } else if let Some(rest) = id.strip_prefix("heartbeat:") {
+        ("heartbeat", rest)
+    } else {
+        ("cron", id)
+    }
+}
+
 /// GET /api/cron — list cron jobs
 pub async fn handle_api_cron_list(
     State(state): State<AppState>,
@@ -870,6 +984,464 @@ pub async fn handle_api_cron_delete(
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to remove cron job: {e}")})),
+        )
+            .into_response(),
+    }
+}
+
+/// GET /api/automations — list scheduled and heartbeat automations
+pub async fn handle_api_automations_list(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+
+    let config = state.config.lock().clone();
+    let mut automations = Vec::new();
+    if let Ok(jobs) = crate::cron::list_jobs(&config) {
+        automations.extend(jobs.iter().map(cron_job_to_automation));
+    }
+    if let Ok(tasks) = crate::heartbeat::tasks::list_tasks(&config.workspace_dir) {
+        automations.extend(tasks.iter().map(heartbeat_task_to_automation));
+    }
+    Json(serde_json::json!({ "automations": automations })).into_response()
+}
+
+pub async fn handle_api_automation_get(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    match kind {
+        "heartbeat" => match crate::heartbeat::tasks::get_task(&config.workspace_dir, backend_id) {
+            Ok(task) => Json(heartbeat_task_to_automation(&task)).into_response(),
+            Err(error) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+        },
+        _ => match crate::cron::get_job(&config, backend_id) {
+            Ok(job) => Json(cron_job_to_automation(&job)).into_response(),
+            Err(error) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+        },
+    }
+}
+
+pub async fn handle_api_automation_create(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<AutomationUpsertRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+
+    let result = match body.automation_kind.as_str() {
+        "heartbeat_task" => crate::heartbeat::tasks::create_task(
+            &config.workspace_dir,
+            body.name,
+            body.prompt.unwrap_or_default(),
+            body.owner_agent_id,
+            body.enabled.unwrap_or(true),
+        )
+        .map(|task| heartbeat_task_to_automation(&task)),
+        "scheduled_agent" => {
+            let schedule = match body.schedule {
+                Some(schedule) => schedule,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "Missing schedule for scheduled agent automation" })),
+                    )
+                        .into_response();
+                }
+            };
+            let session_target = match body.session_target.as_deref() {
+                Some("main") => crate::cron::SessionTarget::Main,
+                _ => crate::cron::SessionTarget::Isolated,
+            };
+            crate::cron::add_agent_job(
+                &config,
+                body.name,
+                schedule,
+                body.owner_agent_id,
+                body.prompt.as_deref().unwrap_or(""),
+                session_target,
+                body.model,
+                body.delivery,
+                body.delete_after_run.unwrap_or(false),
+            )
+            .map(|job| cron_job_to_automation(&job))
+        }
+        _ => {
+            let schedule = match body.schedule {
+                Some(schedule) => schedule,
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "Missing schedule for scheduled shell automation" })),
+                    )
+                        .into_response();
+                }
+            };
+            crate::cron::add_shell_job_with_approval(
+                &config,
+                body.name,
+                schedule,
+                body.command.as_deref().unwrap_or(""),
+                false,
+            )
+            .map(|job| cron_job_to_automation(&job))
+        }
+    };
+
+    match result {
+        Ok(automation) => {
+            Json(serde_json::json!({ "status": "ok", "automation": automation })).into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_api_automation_update(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<AutomationUpsertRequest>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    match kind {
+        "heartbeat" => {
+            let patch = crate::heartbeat::tasks::ManagedHeartbeatTaskPatch {
+                name: body.name,
+                prompt: body.prompt,
+                owner_agent_id: body.owner_agent_id.map(Some),
+                enabled: body.enabled,
+            };
+            match crate::heartbeat::tasks::update_task(&config.workspace_dir, backend_id, patch) {
+                Ok(task) => Json(serde_json::json!({ "status": "ok", "automation": heartbeat_task_to_automation(&task) })).into_response(),
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response(),
+            }
+        }
+        _ => {
+            let patch = crate::cron::CronJobPatch {
+                schedule: body.schedule,
+                command: body.command,
+                owner_agent_id: body.owner_agent_id.map(Some),
+                prompt: body.prompt,
+                name: body.name,
+                enabled: body.enabled,
+                delivery: body.delivery,
+                model: body.model,
+                session_target: body.session_target.map(|value| {
+                    if value.eq_ignore_ascii_case("main") {
+                        crate::cron::SessionTarget::Main
+                    } else {
+                        crate::cron::SessionTarget::Isolated
+                    }
+                }),
+                delete_after_run: body.delete_after_run,
+            };
+            match crate::cron::update_job(&config, backend_id, patch) {
+                Ok(job) => Json(serde_json::json!({ "status": "ok", "automation": cron_job_to_automation(&job) })).into_response(),
+                Err(error) => (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response(),
+            }
+        }
+    }
+}
+
+pub async fn handle_api_automation_delete(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    let result = match kind {
+        "heartbeat" => crate::heartbeat::tasks::remove_task(&config.workspace_dir, backend_id),
+        _ => crate::cron::remove_job(&config, backend_id),
+    };
+    match result {
+        Ok(()) => Json(serde_json::json!({ "status": "ok" })).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_api_automation_pause(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    if kind == "heartbeat" {
+        return match crate::heartbeat::tasks::update_task(
+            &config.workspace_dir,
+            backend_id,
+            crate::heartbeat::tasks::ManagedHeartbeatTaskPatch {
+                enabled: Some(false),
+                ..crate::heartbeat::tasks::ManagedHeartbeatTaskPatch::default()
+            },
+        ) {
+            Ok(task) => Json(serde_json::json!({ "status": "ok", "automation": heartbeat_task_to_automation(&task) })).into_response(),
+            Err(error) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+        };
+    }
+    match crate::cron::update_job(
+        &config,
+        backend_id,
+        crate::cron::CronJobPatch {
+            enabled: Some(false),
+            ..crate::cron::CronJobPatch::default()
+        },
+    ) {
+        Ok(job) => {
+            Json(serde_json::json!({ "status": "ok", "automation": cron_job_to_automation(&job) }))
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_api_automation_resume(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    if kind == "heartbeat" {
+        return match crate::heartbeat::tasks::update_task(
+            &config.workspace_dir,
+            backend_id,
+            crate::heartbeat::tasks::ManagedHeartbeatTaskPatch {
+                enabled: Some(true),
+                ..crate::heartbeat::tasks::ManagedHeartbeatTaskPatch::default()
+            },
+        ) {
+            Ok(task) => Json(serde_json::json!({ "status": "ok", "automation": heartbeat_task_to_automation(&task) })).into_response(),
+            Err(error) => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response(),
+        };
+    }
+    match crate::cron::update_job(
+        &config,
+        backend_id,
+        crate::cron::CronJobPatch {
+            enabled: Some(true),
+            ..crate::cron::CronJobPatch::default()
+        },
+    ) {
+        Ok(job) => {
+            Json(serde_json::json!({ "status": "ok", "automation": cron_job_to_automation(&job) }))
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn handle_api_automation_run(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    if kind == "heartbeat" {
+        let task = match crate::heartbeat::tasks::get_task(&config.workspace_dir, backend_id) {
+            Ok(task) => task,
+            Err(error) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response()
+            }
+        };
+        let prompt = format!("[Heartbeat Task] {}", task.prompt);
+        let result = crate::daemon::run_owned_heartbeat_task(
+            &config,
+            task.owner_agent_id.as_deref(),
+            prompt,
+        )
+        .await;
+        return match result {
+            Ok(output) => {
+                let updated = crate::heartbeat::tasks::record_task_run(
+                    &config.workspace_dir,
+                    backend_id,
+                    true,
+                    &output,
+                )
+                .ok();
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "output": output,
+                    "automation": updated.as_ref().map(heartbeat_task_to_automation)
+                }))
+                .into_response()
+            }
+            Err(error) => {
+                let _ = crate::heartbeat::tasks::record_task_run(
+                    &config.workspace_dir,
+                    backend_id,
+                    false,
+                    &error.to_string(),
+                );
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response()
+            }
+        };
+    }
+
+    let job = match crate::cron::get_job(&config, backend_id) {
+        Ok(job) => job,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response()
+        }
+    };
+    let started_at = Utc::now();
+    let (success, output) = crate::cron::scheduler::execute_job_now(&config, &job).await;
+    let finished_at = Utc::now();
+    let duration_ms = (finished_at - started_at).num_milliseconds();
+    let status = if success { "ok" } else { "error" };
+    let _ = crate::cron::record_run(
+        &config,
+        &job.id,
+        started_at,
+        finished_at,
+        status,
+        Some(&output),
+        duration_ms,
+    );
+    let _ = crate::cron::record_last_run(&config, &job.id, finished_at, success, &output);
+    Json(serde_json::json!({
+        "status": status,
+        "output": output,
+        "duration_ms": duration_ms
+    }))
+    .into_response()
+}
+
+pub async fn handle_api_automation_runs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let config = state.config.lock().clone();
+    let (kind, backend_id) = parse_automation_id(&id);
+    if kind == "heartbeat" {
+        let task = match crate::heartbeat::tasks::get_task(&config.workspace_dir, backend_id) {
+            Ok(task) => task,
+            Err(error) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response()
+            }
+        };
+        let runs = task
+            .last_run
+            .map(|last_run| {
+                vec![AutomationRunRecord {
+                    id: format!("heartbeat-run-{}", task.id),
+                    started_at: last_run.to_rfc3339(),
+                    finished_at: last_run.to_rfc3339(),
+                    status: task.last_status.unwrap_or_else(|| "ok".to_string()),
+                    output: task.last_output,
+                    duration_ms: None,
+                }]
+            })
+            .unwrap_or_default();
+        return Json(serde_json::json!({ "runs": runs })).into_response();
+    }
+
+    match crate::cron::list_runs(&config, backend_id, 20) {
+        Ok(runs) => Json(serde_json::json!({
+            "runs": runs.into_iter().map(|run| AutomationRunRecord {
+                id: run.id.to_string(),
+                started_at: run.started_at.to_rfc3339(),
+                finished_at: run.finished_at.to_rfc3339(),
+                status: run.status,
+                output: run.output,
+                duration_ms: run.duration_ms,
+            }).collect::<Vec<_>>()
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": error.to_string() })),
         )
             .into_response(),
     }
