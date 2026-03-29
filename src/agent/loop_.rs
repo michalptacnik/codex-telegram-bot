@@ -3086,7 +3086,7 @@ pub async fn run(
         &config.agents,
         config.api_key.as_deref(),
         &config,
-        None, // CLI run() has no bridge; bridge is only available in gateway context
+        Some(crate::browser_bridge::BrowserBridge::global()),
     );
     if !config.agent.runtime_allowed_tools.is_empty() {
         let allowed: HashSet<&str> = config
@@ -3271,6 +3271,9 @@ pub async fn run(
             "hardware_capabilities",
             "Query connected hardware for reported GPIO pins and LED pin. Use when: user asks what pins are available.",
         ));
+    }
+    if let Some(msg) = message.as_deref() {
+        filter_tools_for_message(&mut tools_registry, &mut tool_descs, msg);
     }
     let bootstrap_max_chars = if config.agent.compact_context {
         Some(6000)
@@ -5212,6 +5215,9 @@ Tail"#;
         ));
         assert!(message_requires_logged_in_browser_ext(
             "Reply to this post on x.com and leave a comment"
+        ));
+        assert!(message_requires_logged_in_browser_ext(
+            "[cron:test Tanith X Reply Ghostwriter] Review the X account context, find one strong post worth responding to, and publish exactly one reply"
         ));
         assert!(!message_requires_logged_in_browser_ext(
             "Open example.com in the browser and summarize it"

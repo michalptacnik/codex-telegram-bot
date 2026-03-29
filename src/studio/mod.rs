@@ -219,6 +219,7 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
                 "web_fetch".into(),
                 "browser_open".into(),
                 "browser_headless".into(),
+                "browser_ext".into(),
                 "twitter_mcp".into(),
                 "schedule".into(),
                 "memory_recall".into(),
@@ -1060,6 +1061,7 @@ mod tests {
         assert!(resolved.tool_grants.contains(&"twitter_mcp".into()));
         assert!(resolved.tool_grants.contains(&"schedule".into()));
         assert!(resolved.tool_grants.contains(&"browser_headless".into()));
+        assert!(resolved.tool_grants.contains(&"browser_ext".into()));
         assert!(resolved.tool_grants.contains(&"file_write".into()));
         assert!(resolved
             .skill_grants
