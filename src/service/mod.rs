@@ -441,6 +441,10 @@ fn install_macos_service_binary(config_root: &Path) -> Result<PathBuf> {
             .unwrap_or("agent-hq"),
     );
 
+    if target.exists() {
+        let _ = fs::remove_file(&target);
+    }
+
     fs::copy(&source, &target).with_context(|| {
         format!(
             "Failed to copy service binary from {} to {}",
@@ -459,12 +463,31 @@ fn install_macos_service_binary(config_root: &Path) -> Result<PathBuf> {
         })?;
     }
 
-    if let Ok(status) = Command::new("codesign")
+    let _ = Command::new("xattr")
+        .args(["-d", "com.apple.provenance"])
+        .arg(&target)
+        .status();
+
+    match Command::new("codesign")
         .args(["--force", "--sign", "-"])
         .arg(&target)
         .status()
     {
-        if !status.success() {
+        Ok(status) if status.success() => {
+            if let Ok(verify) = Command::new("codesign")
+                .args(["--verify", "--verbose=2"])
+                .arg(&target)
+                .status()
+            {
+                if !verify.success() {
+                    eprintln!(
+                        "⚠️  Warning: launchd binary copy still failed codesign verification at {}",
+                        target.display()
+                    );
+                }
+            }
+        }
+        Ok(_) | Err(_) => {
             eprintln!(
                 "⚠️  Warning: failed to ad-hoc sign launchd binary copy at {}",
                 target.display()
