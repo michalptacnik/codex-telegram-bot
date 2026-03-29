@@ -519,12 +519,12 @@ bootstrap_browser_automation_support() {
   fi
 
   if [[ -z "$npm_bin" ]]; then
-    warn "npm is not available, so agent-browser was not bootstrapped."
-    warn "Browser backend remains 'auto' and can still use the extension bridge, rust-native backend, or a configured computer-use sidecar."
+    warn "npm is not available, so the optional browser automation helper was not bootstrapped."
+    warn "Agent HQ still installs with browser support enabled by default; runtime can use the bundled headless sidecar, extension bridge, rust-native backend, or a configured computer-use sidecar."
     return 0
   fi
 
-  info "Installing browser automation helper (agent-browser)"
+  info "Installing optional browser automation helper (agent-browser)"
   if "$npm_bin" install -g agent-browser; then
     if have_cmd agent-browser; then
       info "Installed browser automation helper: $(command -v agent-browser)"
@@ -542,8 +542,8 @@ bootstrap_browser_automation_support() {
     return 0
   fi
 
-  warn "Failed to install agent-browser automatically."
-  warn "Browser backend remains 'auto' and can still use the extension bridge, rust-native backend, or a configured computer-use sidecar."
+  warn "Failed to install the optional agent-browser helper automatically."
+  warn "Agent HQ still installs with browser support enabled by default; runtime can use the bundled headless sidecar, extension bridge, rust-native backend, or a configured computer-use sidecar."
   return 0
 }
 

@@ -29,6 +29,17 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
 
+fn install_ready_browser_config() -> BrowserConfig {
+    let mut browser = BrowserConfig::default();
+    browser.enabled = true;
+    browser
+}
+
+async fn bootstrap_agent_studio_state(config: &mut Config) -> Result<()> {
+    let state = crate::studio::load_or_bootstrap(config).await?;
+    crate::studio::apply_state_to_runtime(config, &state).await
+}
+
 // ── Project context collected during wizard ──────────────────────
 
 /// User-provided personalization baked into workspace MD files.
@@ -125,7 +136,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
 
     // ── Build config ──
     // Defaults: SQLite memory, supervised autonomy, workspace-scoped, native runtime
-    let config = Config {
+    let mut config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         api_key: if api_key.is_empty() {
@@ -158,7 +169,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
         gateway: crate::config::GatewayConfig::default(),
         composio: composio_config,
         secrets: secrets_config,
-        browser: BrowserConfig::default(),
+        browser: install_ready_browser_config(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
         web_fetch: crate::config::WebFetchConfig::default(),
@@ -190,6 +201,7 @@ pub async fn run_wizard(force: bool) -> Result<Config> {
     );
 
     config.save().await?;
+    bootstrap_agent_studio_state(&mut config).await?;
     persist_workspace_selection(&config.config_path).await?;
 
     // ── Final summary ────────────────────────────────────────────
@@ -480,7 +492,7 @@ async fn run_quick_setup_with_home(
     // Create memory config based on backend choice
     let memory_config = memory_config_defaults_for_backend(&memory_backend_name);
 
-    let config = Config {
+    let mut config = Config {
         workspace_dir: workspace_dir.clone(),
         config_path: config_path.clone(),
         api_key: credential_override.map(|c| {
@@ -513,7 +525,7 @@ async fn run_quick_setup_with_home(
         gateway: crate::config::GatewayConfig::default(),
         composio: ComposioConfig::default(),
         secrets: SecretsConfig::default(),
-        browser: BrowserConfig::default(),
+        browser: install_ready_browser_config(),
         http_request: crate::config::HttpRequestConfig::default(),
         multimodal: crate::config::MultimodalConfig::default(),
         web_fetch: crate::config::WebFetchConfig::default(),
@@ -532,9 +544,6 @@ async fn run_quick_setup_with_home(
         sop: crate::config::SopConfig::default(),
     };
 
-    config.save().await?;
-    persist_workspace_selection(&config.config_path).await?;
-
     // Scaffold minimal workspace files
     let default_ctx = ProjectContext {
         user_name: std::env::var("USER").unwrap_or_else(|_| "User".into()),
@@ -545,6 +554,10 @@ async fn run_quick_setup_with_home(
                 .into(),
     };
     scaffold_workspace(&workspace_dir, &default_ctx).await?;
+
+    config.save().await?;
+    bootstrap_agent_studio_state(&mut config).await?;
+    persist_workspace_selection(&config.config_path).await?;
 
     println!(
         "  {} Workspace:  {}",
@@ -5797,6 +5810,14 @@ mod tests {
         assert!(ctx.timezone.is_empty());
         assert!(ctx.agent_name.is_empty());
         assert!(ctx.communication_style.is_empty());
+    }
+
+    #[test]
+    fn install_ready_browser_config_enables_browser_support() {
+        let browser = install_ready_browser_config();
+        assert!(browser.enabled);
+        assert!(browser.headless.enabled);
+        assert_eq!(browser.backend, "auto");
     }
 
     #[test]

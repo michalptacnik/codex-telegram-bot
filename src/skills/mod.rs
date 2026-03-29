@@ -86,6 +86,15 @@ pub fn load_skills_with_config(workspace_dir: &Path, config: &crate::config::Con
     )
 }
 
+pub fn load_active_profile_skills_with_config(
+    workspace_dir: &Path,
+    config: &crate::config::Config,
+) -> Vec<Skill> {
+    let skills = load_skills_with_config(workspace_dir, config);
+    let granted = crate::studio::active_skill_grants_for_config(config);
+    filter_skills_by_name(&skills, &granted)
+}
+
 fn load_skills_with_open_skills_config(
     workspace_dir: &Path,
     config_open_skills_enabled: Option<bool>,
@@ -124,6 +133,46 @@ fn merge_skills_by_name(into: &mut Vec<Skill>, incoming: Vec<Skill>) {
             into.push(skill);
         }
     }
+}
+
+pub fn filter_skills_by_name(skills: &[Skill], allowed_names: &[String]) -> Vec<Skill> {
+    if allowed_names.is_empty() {
+        return Vec::new();
+    }
+
+    let allowed_lookup: HashSet<&str> = allowed_names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !name.trim().is_empty())
+        .collect();
+    let mut filtered = Vec::new();
+    let mut found_names = HashSet::new();
+
+    for skill in skills {
+        if allowed_lookup.contains(skill.name.as_str()) {
+            filtered.push(skill.clone());
+            found_names.insert(skill.name.as_str());
+        }
+    }
+
+    let mut missing = allowed_names
+        .iter()
+        .filter_map(|name| {
+            let trimmed = name.trim();
+            (!trimmed.is_empty() && !found_names.contains(trimmed)).then(|| trimmed.to_string())
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    missing.dedup();
+
+    if !missing.is_empty() {
+        tracing::warn!(
+            missing_skills = %missing.join(", "),
+            "granted skills were not found on disk and will be omitted from the prompt"
+        );
+    }
+
+    filtered
 }
 
 fn load_skills_from_directory(skills_dir: &Path) -> Vec<Skill> {
@@ -1501,7 +1550,9 @@ description = "Bare minimum"
             tags: vec![],
             tools: vec![],
             prompts: vec!["workspace".to_string()],
-            location: Some(PathBuf::from("/tmp/workspace/skills/social-media-manager/SKILL.md")),
+            location: Some(PathBuf::from(
+                "/tmp/workspace/skills/social-media-manager/SKILL.md",
+            )),
         }];
 
         merge_skills_by_name(
@@ -1527,6 +1578,39 @@ description = "Bare minimum"
             skills[0].location.as_deref(),
             Some(Path::new("/tmp/repo/skills/social-media-manager/SKILL.md"))
         );
+    }
+
+    #[test]
+    fn filter_skills_by_name_only_keeps_granted_skills() {
+        let skills = vec![
+            Skill {
+                name: "browser-operator".to_string(),
+                description: "browser".to_string(),
+                version: "1.0.0".to_string(),
+                author: None,
+                tags: vec![],
+                tools: vec![],
+                prompts: vec![],
+                location: None,
+            },
+            Skill {
+                name: "social-media-manager".to_string(),
+                description: "social".to_string(),
+                version: "1.0.0".to_string(),
+                author: None,
+                tags: vec![],
+                tools: vec![],
+                prompts: vec![],
+                location: None,
+            },
+        ];
+
+        let filtered = filter_skills_by_name(
+            &skills,
+            &["browser-operator".to_string(), "missing-skill".to_string()],
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "browser-operator");
     }
 }
 

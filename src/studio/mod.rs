@@ -9,6 +9,10 @@ use tokio::fs;
 
 const STUDIO_STATE_VERSION: u32 = 1;
 const STUDIO_STATE_FILE: &str = "state/agent_studio.json";
+const DEFAULT_AGENT_ID: &str = "agent";
+const DEFAULT_AGENT_NAME: &str = "Agent";
+const UNIVERSAL_BROWSER_TOOL_GRANTS: &[&str] = &["browser_headless"];
+const UNIVERSAL_SKILL_GRANTS: &[&str] = &["browser-operator"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -222,7 +226,7 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
                 "content_search".into(),
                 "file_read".into(),
             ],
-            skill_grants: vec!["content_planning".into(), "campaign_ops".into(), "brand_voice".into()],
+            skill_grants: vec!["social-media-manager".into()],
             channel_affinities: vec!["twitter_x".into(), "discord".into(), "telegram".into()],
             integration_affinities: vec!["browser_headless".into(), "browser_bridge".into()],
             guardrails: vec![
@@ -278,7 +282,7 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
                 "glob_search".into(),
                 "web_fetch".into(),
             ],
-            skill_grants: vec!["ops_coordination".into(), "task_triage".into()],
+            skill_grants: Vec::new(),
             channel_affinities: vec!["email".into(), "telegram".into()],
             integration_affinities: vec!["cron".into()],
             guardrails: vec![
@@ -478,7 +482,11 @@ pub async fn apply_state_to_runtime(config: &mut Config, state: &AgentStudioStat
                     .clone()
                     .or_else(|| config.default_model.clone())
                     .unwrap_or_else(|| "gpt-4.1-mini".into()),
-                system_prompt: Some(render_system_prompt(&resolved)),
+                system_prompt: Some(render_system_prompt(
+                    &config.workspace_dir,
+                    config.skills.prompt_injection_mode,
+                    &resolved,
+                )),
                 api_key: None,
                 temperature: resolved
                     .profile
@@ -556,6 +564,16 @@ fn resolve_profile_record(profile: &AgentProfile) -> Result<ResolvedAgentProfile
 
     apply_soul_overlay(&mut soul, &profile.overrides.soul);
     apply_identity_overlay(&mut identity, &profile.overrides.identity);
+    tool_grants.extend(
+        UNIVERSAL_BROWSER_TOOL_GRANTS
+            .iter()
+            .map(|grant| (*grant).to_string()),
+    );
+    skill_grants.extend(
+        UNIVERSAL_SKILL_GRANTS
+            .iter()
+            .map(|grant| (*grant).to_string()),
+    );
     tool_grants.extend(profile.overrides.tool_grants.iter().cloned());
     skill_grants.extend(profile.overrides.skill_grants.iter().cloned());
 
@@ -645,7 +663,11 @@ fn render_identity_markdown(
     )
 }
 
-fn render_system_prompt(resolved: &ResolvedAgentProfile) -> String {
+fn render_system_prompt(
+    workspace_dir: &Path,
+    skills_prompt_mode: crate::config::SkillsPromptInjectionMode,
+    resolved: &ResolvedAgentProfile,
+) -> String {
     let classes = resolved
         .classes
         .iter()
@@ -664,11 +686,23 @@ fn render_system_prompt(resolved: &ResolvedAgentProfile) -> String {
         .system_prompt_appendix
         .clone()
         .unwrap_or_default();
+    let skills = crate::skills::filter_skills_by_name(
+        &crate::skills::load_skills(workspace_dir),
+        &resolved.skill_grants,
+    );
+    let skills_block = if skills.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\nSkills:\n{}",
+            crate::skills::skills_to_prompt_with_mode(&skills, workspace_dir, skills_prompt_mode,)
+        )
+    };
     format!(
         "You are {name}, a {classes} specialist.\n\n\
          Mission:\n{summary}\n\n\
          Guardrails:\n{guardrails}\n\n\
-         Use only the tools granted to this class build. Treat externally visible actions as supervised unless the user made the intent explicit.\n\n\
+         Use only the tools granted to this class build. Treat externally visible actions as supervised unless the user made the intent explicit.{skills_block}\n\n\
          {appendix}",
         name = resolved.profile.name,
         summary = resolved.summary,
@@ -721,7 +755,9 @@ fn normalize_state(state: &mut AgentStudioState, config: &Config) -> Result<()> 
     state.profiles = deduped_profiles;
 
     if state.profiles.is_empty() {
-        state.profiles.push(default_tanith_profile());
+        state
+            .profiles
+            .push(default_profile_from_workspace(&config.workspace_dir));
     }
     if state.active_agent_id.trim().is_empty()
         || !state
@@ -730,10 +766,6 @@ fn normalize_state(state: &mut AgentStudioState, config: &Config) -> Result<()> 
             .any(|profile| profile.id == state.active_agent_id)
     {
         state.active_agent_id = state.profiles[0].id.clone();
-    }
-
-    if state.profiles.iter().all(|profile| profile.id != "tanith") {
-        state.profiles.insert(0, default_tanith_profile());
     }
 
     let startup_ids = state
@@ -754,12 +786,6 @@ fn normalize_state(state: &mut AgentStudioState, config: &Config) -> Result<()> 
 
     for profile in &state.profiles {
         validate_profile(profile)?;
-        if profile.id == "tanith"
-            && profile.primary_class == "social_media_manager"
-            && !profile.secondary_classes.contains(&"va".to_string())
-        {
-            // preserve user's chosen order if they already customized it
-        }
     }
 
     if !config.workspace_dir.exists() {
@@ -777,11 +803,8 @@ fn startup_agent_id(state: &AgentStudioState) -> Option<String> {
 }
 
 async fn migrate_legacy_workspace(config: &Config) -> Result<AgentStudioState> {
-    let mut profiles = vec![default_tanith_profile()];
+    let mut profiles = vec![default_profile_from_workspace(&config.workspace_dir)];
     for (id, agent) in &config.agents {
-        if id == "tanith" {
-            continue;
-        }
         profiles.push(AgentProfile {
             id: id.clone(),
             name: id.replace('_', " "),
@@ -810,9 +833,22 @@ async fn migrate_legacy_workspace(config: &Config) -> Result<AgentStudioState> {
     Ok(AgentStudioState {
         version: STUDIO_STATE_VERSION,
         onboarding_completed: config.default_provider.is_some() && config.default_model.is_some(),
-        active_agent_id: "tanith".into(),
+        active_agent_id: profiles[0].id.clone(),
         profiles,
     })
+}
+
+fn detect_identity_name_from_content(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("- **Name:**") {
+            let value = rest.trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
 }
 
 async fn detect_identity_name(workspace_dir: &Path) -> Result<Option<String>> {
@@ -821,32 +857,69 @@ async fn detect_identity_name(workspace_dir: &Path) -> Result<Option<String>> {
         return Ok(None);
     }
     let content = fs::read_to_string(path).await?;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("- **Name:**") {
-            let value = rest.trim();
-            if !value.is_empty() {
-                return Ok(Some(value.to_string()));
-            }
-        }
-    }
-    Ok(None)
+    Ok(detect_identity_name_from_content(&content))
 }
 
-fn default_tanith_profile() -> AgentProfile {
+fn detect_identity_name_sync(workspace_dir: &Path) -> Option<String> {
+    let path = workspace_dir.join("IDENTITY.md");
+    let content = std::fs::read_to_string(path).ok()?;
+    detect_identity_name_from_content(&content)
+}
+
+fn default_profile_from_workspace(workspace_dir: &Path) -> AgentProfile {
+    let name =
+        detect_identity_name_sync(workspace_dir).unwrap_or_else(|| DEFAULT_AGENT_NAME.into());
     AgentProfile {
-        id: "tanith".into(),
-        name: "Tanith".into(),
-        avatar: Some("radiant tactician".into()),
-        launch_on_startup: true,
-        primary_class: "social_media_manager".into(),
-        secondary_classes: vec!["va".into()],
+        id: DEFAULT_AGENT_ID.into(),
+        name,
+        avatar: Some("local operator".into()),
+        launch_on_startup: false,
+        primary_class: "va".into(),
+        secondary_classes: Vec::new(),
         social_accounts: AgentSocialAccountsConfig::default(),
         overrides: AgentProfileOverrides {
-            summary: Some("Lead social growth while staying deeply useful in day-to-day coordination and follow-through.".into()),
+            summary: Some(
+                "Handle practical work across the workspace with reliable follow-through and shared browser capability."
+                    .into(),
+            ),
             ..AgentProfileOverrides::default()
         },
     }
+}
+
+pub fn active_skill_grants_for_config(config: &Config) -> Vec<String> {
+    let path = state_path(&config.workspace_dir);
+    if !path.exists() {
+        return resolve_profile_record(&default_profile_from_workspace(&config.workspace_dir))
+            .map(|resolved| resolved.skill_grants)
+            .unwrap_or_default();
+    }
+
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) => {
+            tracing::warn!("failed to read studio state for skill grants: {error}");
+            return Vec::new();
+        }
+    };
+    let mut state: AgentStudioState = match serde_json::from_str(&raw) {
+        Ok(state) => state,
+        Err(error) => {
+            tracing::warn!("failed to parse studio state for skill grants: {error}");
+            return Vec::new();
+        }
+    };
+    if let Err(error) = normalize_state(&mut state, config) {
+        tracing::warn!("failed to normalize studio state for skill grants: {error}");
+        return Vec::new();
+    }
+
+    resolve_active_profile(&state)
+        .map(|resolved| resolved.skill_grants)
+        .unwrap_or_else(|error| {
+            tracing::warn!("failed to resolve active profile skill grants: {error}");
+            Vec::new()
+        })
 }
 
 fn state_path(workspace_dir: &Path) -> PathBuf {
@@ -856,6 +929,16 @@ fn state_path(workspace_dir: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
+    use tempfile::TempDir;
+
+    fn test_config(tmp: &TempDir) -> Config {
+        Config {
+            workspace_dir: tmp.path().join("workspace"),
+            config_path: tmp.path().join("config.toml"),
+            ..Config::default()
+        }
+    }
 
     #[test]
     fn built_in_classes_include_placeholders() {
@@ -897,9 +980,82 @@ mod tests {
         let resolved = resolve_profile_record(&profile).unwrap();
         assert!(resolved.tool_grants.contains(&"twitter_mcp".into()));
         assert!(resolved.tool_grants.contains(&"schedule".into()));
+        assert!(resolved.tool_grants.contains(&"browser_headless".into()));
         assert!(resolved.tool_grants.contains(&"file_write".into()));
+        assert!(resolved
+            .skill_grants
+            .contains(&"social-media-manager".into()));
+        assert!(resolved.skill_grants.contains(&"browser-operator".into()));
         assert_eq!(resolved.identity.emoji, "🧭");
         assert!(resolved.summary.contains("Lead social strategy"));
+    }
+
+    #[test]
+    fn va_profile_gets_universal_browser_skill_only() {
+        let profile = AgentProfile {
+            id: "assistant".into(),
+            name: "Assistant".into(),
+            avatar: None,
+            launch_on_startup: false,
+            primary_class: "va".into(),
+            secondary_classes: Vec::new(),
+            social_accounts: AgentSocialAccountsConfig::default(),
+            overrides: AgentProfileOverrides::default(),
+        };
+
+        let resolved = resolve_profile_record(&profile).unwrap();
+        assert!(resolved.tool_grants.contains(&"browser_headless".into()));
+        assert!(resolved.skill_grants.contains(&"browser-operator".into()));
+        assert!(!resolved.skill_grants.contains(&"ops_coordination".into()));
+        assert!(!resolved.skill_grants.contains(&"task_triage".into()));
+    }
+
+    #[test]
+    fn normalize_state_does_not_inject_tanith() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        let mut state = AgentStudioState {
+            version: STUDIO_STATE_VERSION,
+            onboarding_completed: false,
+            active_agent_id: "assistant".into(),
+            profiles: vec![AgentProfile {
+                id: "assistant".into(),
+                name: "Assistant".into(),
+                avatar: None,
+                launch_on_startup: false,
+                primary_class: "va".into(),
+                secondary_classes: Vec::new(),
+                social_accounts: AgentSocialAccountsConfig::default(),
+                overrides: AgentProfileOverrides::default(),
+            }],
+        };
+
+        normalize_state(&mut state, &config).unwrap();
+        assert!(state.profiles.iter().all(|profile| profile.id != "tanith"));
+        assert_eq!(state.profiles.len(), 1);
+        assert_eq!(state.active_agent_id, "assistant");
+    }
+
+    #[test]
+    fn normalize_state_bootstraps_neutral_default_profile() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        let mut state = AgentStudioState {
+            version: STUDIO_STATE_VERSION,
+            onboarding_completed: false,
+            active_agent_id: String::new(),
+            profiles: Vec::new(),
+        };
+
+        normalize_state(&mut state, &config).unwrap();
+        assert_eq!(state.profiles.len(), 1);
+        assert_eq!(state.profiles[0].id, "agent");
+        assert_eq!(state.profiles[0].name, "Agent");
+        assert!(!state.profiles[0].launch_on_startup);
+        assert_eq!(state.profiles[0].primary_class, "va");
+        assert_eq!(state.active_agent_id, "agent");
     }
 
     #[test]

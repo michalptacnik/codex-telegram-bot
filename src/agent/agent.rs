@@ -339,7 +339,7 @@ impl Agent {
             .available_hints(available_hints)
             .route_model_by_hint(route_model_by_hint)
             .identity_config(config.identity.clone())
-            .skills(crate::skills::load_skills_with_config(
+            .skills(crate::skills::load_active_profile_skills_with_config(
                 &config.workspace_dir,
                 config,
             ))
