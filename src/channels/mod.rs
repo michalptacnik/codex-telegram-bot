@@ -1657,7 +1657,15 @@ fn spawn_supervised_listener_with_health_interval(
                 loop {
                     tokio::select! {
                         _ = health.tick() => {
-                            crate::health::mark_component_ok(&component);
+                            if ch.health_check().await {
+                                crate::health::mark_component_ok(&component);
+                            } else {
+                                tracing::warn!(
+                                    channel = ch.name(),
+                                    "Channel health check failed — restarting listener"
+                                );
+                                break Err(anyhow::anyhow!("health check failed"));
+                            }
                         }
                         result = &mut listen_future => break result,
                         () = shutdown_token.cancelled() => {
@@ -1705,55 +1713,6 @@ fn spawn_supervised_listener_with_health_interval(
 
             // Double backoff AFTER sleeping so first error uses initial_backoff
             backoff = backoff.saturating_mul(2).min(max_backoff);
-        }
-    })
-}
-
-/// Spawn a background task that periodically calls `health_check()` on a
-/// channel.  If the check fails, the per-channel `channel_token` is cancelled
-/// so the supervised listener restarts.
-fn spawn_channel_health_watcher(
-    ch: Arc<dyn Channel>,
-    channel_token: CancellationToken,
-    shutdown_token: CancellationToken,
-    check_interval: Duration,
-) -> tokio::task::JoinHandle<()> {
-    let check_interval = if check_interval.is_zero() {
-        Duration::from_secs(60)
-    } else {
-        check_interval
-    };
-
-    tokio::spawn(async move {
-        let component = format!("channel:{}", ch.name());
-        let mut interval = tokio::time::interval(check_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    if ch.health_check().await {
-                        crate::health::mark_component_ok(&component);
-                    } else {
-                        tracing::warn!(
-                            channel = ch.name(),
-                            "Channel health check failed — triggering restart"
-                        );
-                        crate::health::mark_component_error(
-                            &component,
-                            "health check failed",
-                        );
-                        // Cancel the channel-specific token to force a restart.
-                        channel_token.cancel();
-                        // Re-arm the watcher: child tokens are not reusable, so
-                        // the supervisor creates a new one on each restart.
-                        return;
-                    }
-                }
-                () = shutdown_token.cancelled() => {
-                    return;
-                }
-            }
         }
     })
 }
@@ -3661,11 +3620,13 @@ pub async fn start_channels(config: Config) -> Result<()> {
     // Single message bus — all channels send messages here
     let (tx, rx) = tokio::sync::mpsc::channel::<traits::ChannelMessage>(100);
 
-    // Spawn a supervised listener + health watcher for each channel.
+    // Spawn a supervised listener for each channel. Health checks run inside
+    // the listener supervisor so a failed probe causes a real restart instead
+    // of leaving behind a dead watcher state.
     let mut handles = Vec::new();
     for ch in &channels {
-        // Per-channel token: the health watcher cancels this to force a
-        // listener restart without touching the global shutdown token.
+        // Per-channel token allows individual listeners to be restarted or
+        // stopped without touching the global shutdown token.
         let channel_token = shutdown_token.child_token();
         handles.push(spawn_supervised_listener(
             ch.clone(),
@@ -3673,12 +3634,6 @@ pub async fn start_channels(config: Config) -> Result<()> {
             initial_backoff_secs,
             max_backoff_secs,
             channel_token.clone(),
-        ));
-        handles.push(spawn_channel_health_watcher(
-            ch.clone(),
-            channel_token,
-            shutdown_token.clone(),
-            Duration::from_secs(CHANNEL_HEALTH_CHECK_INTERVAL_SECS),
         ));
     }
     drop(tx); // Drop our copy so rx closes when all channels stop

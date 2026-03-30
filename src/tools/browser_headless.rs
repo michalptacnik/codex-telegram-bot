@@ -170,8 +170,7 @@ impl BrowserHeadlessTool {
         if let Some(existing) = std::env::var_os("PATH") {
             dirs.extend(std::env::split_paths(&existing));
         }
-        std::env::join_paths(dirs)
-            .unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
+        std::env::join_paths(dirs).unwrap_or_else(|_| std::env::var_os("PATH").unwrap_or_default())
     }
 
     pub fn new(

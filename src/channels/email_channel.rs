@@ -803,9 +803,15 @@ impl Channel for EmailChannel {
     }
 
     async fn health_check(&self) -> bool {
-        // Fully async health check - attempt IMAP connection
+        // Verify the mailbox can be selected, not just logged into. This
+        // catches stale auth/folder issues while keeping the probe lightweight.
         match timeout(Duration::from_secs(10), self.connect_imap()).await {
             Ok(Ok(mut session)) => {
+                if let Err(e) = session.select(&self.config.imap_folder).await {
+                    debug!("Health check folder select failed: {}", e);
+                    let _ = session.logout().await;
+                    return false;
+                }
                 // Try to logout cleanly
                 let _ = session.logout().await;
                 true

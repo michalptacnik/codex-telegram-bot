@@ -58,7 +58,6 @@ function defaultProfile(): AgentProfile {
     avatar: 'local operator',
     launch_on_startup: false,
     primary_class: 'va',
-    secondary_classes: [],
     social_accounts: {},
     overrides: {
       summary:
@@ -216,25 +215,15 @@ export default function Studio() {
     }
   }, [bootstrap, stage, wizardRequested]);
 
-  const activeClasses = useMemo(
-    () => classes.filter((item) => item.status === 'active'),
-    [classes],
-  );
-
   const activeProfile =
     agents.find((item) => item.profile.id === activeAgentId) ?? bootstrap?.active_profile ?? null;
 
-  const selectedSecondaryClasses = useMemo(
-    () => draft.secondary_classes.filter((classId) => classId !== draft.primary_class),
-    [draft.primary_class, draft.secondary_classes],
-  );
-
   const wizardClassPreview = useMemo(
     () =>
-      [draft.primary_class, ...selectedSecondaryClasses]
+      [draft.primary_class]
         .map((id) => classes.find((item) => item.id === id))
         .filter(Boolean) as AgentClassManifest[],
-    [classes, draft.primary_class, selectedSecondaryClasses],
+    [classes, draft.primary_class],
   );
 
   const filteredAgents = useMemo(() => {
@@ -306,7 +295,6 @@ export default function Studio() {
       const prepared: AgentProfile = {
         ...draft,
         id: slugify(draft.id || draft.name) || 'new_agent',
-        secondary_classes: selectedSecondaryClasses,
       };
       const created = await createAgent(prepared, true);
       setActiveAgentId(created.profile.id);
@@ -426,7 +414,7 @@ export default function Studio() {
                 {
                   icon: Swords,
                   title: 'Structured classes',
-                  detail: 'Each class adds concrete tools, voice overlays, and operational guardrails.',
+                  detail: 'Each agent gets one clear class with concrete tools, voice overlays, and operational guardrails.',
                 },
                 {
                   icon: Lock,
@@ -505,7 +493,7 @@ export default function Studio() {
 
       {stage === 'wizard' ? (
         <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-          <MacPanel title="Agent identity" detail="Keep setup practical: name, role summary, primary class, then optional secondary support.">
+          <MacPanel title="Agent identity" detail="Keep setup practical: name, role summary, and one primary class that defines the full package.">
             <div className="grid gap-4 md:grid-cols-2">
               <label className="block text-sm">
                 <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
@@ -571,47 +559,10 @@ export default function Studio() {
                       setDraft((prev) => ({
                         ...prev,
                         primary_class: classItem.id,
-                        secondary_classes: prev.secondary_classes.filter((id) => id !== classItem.id),
                       }))
                     }
                   />
                 ))}
-              </div>
-            </div>
-
-            <div className="mt-6">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold">Secondary classes</h3>
-                <MacBadge tone="neutral">Optional</MacBadge>
-              </div>
-              <div className="mt-3 flex flex-wrap gap-2">
-                {activeClasses
-                  .filter((item) => item.id !== draft.primary_class)
-                  .map((classItem) => {
-                    const selected = selectedSecondaryClasses.includes(classItem.id);
-                    return (
-                      <button
-                        key={classItem.id}
-                        type="button"
-                        onClick={() =>
-                          setDraft((prev) => ({
-                            ...prev,
-                            secondary_classes: selected
-                              ? prev.secondary_classes.filter((id) => id !== classItem.id)
-                              : [...prev.secondary_classes, classItem.id],
-                          }))
-                        }
-                        className={[
-                          'rounded-full border px-3 py-2 text-sm transition',
-                          selected
-                            ? 'border-sky-400/45 bg-sky-500/10 text-[#0a84ff] dark:text-sky-200'
-                            : 'border-[var(--shell-border)] bg-[var(--shell-panel)] hover:bg-[var(--shell-selection)]',
-                        ].join(' ')}
-                      >
-                        {classItem.name}
-                      </button>
-                    );
-                  })}
               </div>
             </div>
 
@@ -645,7 +596,6 @@ export default function Studio() {
                   'Check provider and runtime readiness',
                   'Name the agent and define its role summary',
                   'Select a primary class for default behavior',
-                  'Add optional secondary support classes',
                   'Confirm startup ownership and finish',
                 ].map((step, index) => (
                   <div
@@ -669,17 +619,6 @@ export default function Studio() {
                     classes.find((item) => item.id === draft.primary_class)?.name ?? 'Unassigned'
                   }
                   detail="Default decision-making lens"
-                />
-                <MacStat
-                  label="Secondary"
-                  value={
-                    selectedSecondaryClasses.length > 0
-                      ? selectedSecondaryClasses
-                          .map((id) => classes.find((item) => item.id === id)?.name ?? id)
-                          .join(' / ')
-                      : 'None'
-                  }
-                  detail="Support capabilities"
                 />
               </div>
 
@@ -858,10 +797,10 @@ export default function Studio() {
                 </div>
               </MacPanel>
 
-              <MacPanel title="Current class loadout" detail="Primary class defines the main posture. Secondary classes extend capabilities without displacing it.">
+              <MacPanel title="Current class loadout" detail="Each agent now carries one class package, with one clear posture and one set of default grants.">
                 {activeProfile ? (
                   <div className="grid gap-3">
-                    {activeProfile.classes.map((classItem, index) => (
+                    {activeProfile.classes.map((classItem) => (
                       <div
                         key={classItem.id}
                         className="flex items-start gap-4 rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4"
@@ -876,9 +815,7 @@ export default function Studio() {
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
                             <h3 className="text-sm font-semibold">{classItem.name}</h3>
-                            <MacBadge tone={index === 0 ? 'accent' : 'neutral'}>
-                              {index === 0 ? 'Primary' : 'Secondary'}
-                            </MacBadge>
+                            <MacBadge tone="accent">Class</MacBadge>
                           </div>
                           <p className="mt-2 text-sm text-[var(--shell-muted)]">
                             {classItem.default_role_summary}

@@ -269,7 +269,6 @@ export interface AgentProfile {
   avatar?: string | null;
   launch_on_startup?: boolean;
   primary_class: string;
-  secondary_classes: string[];
   social_accounts: {
     twitter?: SocialTwitterCredentials | null;
   };

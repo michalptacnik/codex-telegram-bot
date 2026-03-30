@@ -130,7 +130,7 @@ pub struct AgentProfile {
     #[serde(default)]
     pub launch_on_startup: bool,
     pub primary_class: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub secondary_classes: Vec<String>,
     #[serde(default)]
     pub social_accounts: AgentSocialAccountsConfig,
@@ -482,9 +482,10 @@ pub async fn set_active_agent(
 pub async fn upsert_profile(
     config: &mut Config,
     state: &mut AgentStudioState,
-    profile: AgentProfile,
+    mut profile: AgentProfile,
     activate: bool,
 ) -> Result<ResolvedAgentProfile> {
+    profile.secondary_classes.clear();
     validate_profile(&profile)?;
     if let Some(existing) = state.profiles.iter_mut().find(|item| item.id == profile.id) {
         *existing = profile.clone();
@@ -574,15 +575,8 @@ pub async fn apply_state_to_runtime(config: &mut Config, state: &AgentStudioStat
 fn resolve_profile_record(profile: &AgentProfile) -> Result<ResolvedAgentProfile> {
     validate_profile(profile)?;
 
-    let mut class_manifests = Vec::new();
-    class_manifests.push(
-        class_by_id(&profile.primary_class)
-            .ok_or_else(|| anyhow!("Unknown class '{}'", profile.primary_class))?,
-    );
-    for class_id in &profile.secondary_classes {
-        class_manifests
-            .push(class_by_id(class_id).ok_or_else(|| anyhow!("Unknown class '{class_id}'"))?);
-    }
+    let class_manifests = vec![class_by_id(&profile.primary_class)
+        .ok_or_else(|| anyhow!("Unknown class '{}'", profile.primary_class))?];
 
     let mut soul = SoulProfile {
         name: profile.name.clone(),
@@ -791,15 +785,8 @@ fn validate_profile(profile: &AgentProfile) -> Result<()> {
         );
     }
 
-    let mut seen = BTreeSet::new();
-    for class_id in &profile.secondary_classes {
-        let class_ = class_by_id(class_id).ok_or_else(|| anyhow!("Unknown class '{class_id}'"))?;
-        if class_.status == AgentClassStatus::ComingSoon {
-            bail!("Class '{class_id}' is visible but not selectable yet");
-        }
-        if !seen.insert(class_id.clone()) {
-            bail!("Duplicate secondary class '{class_id}'");
-        }
+    if !profile.secondary_classes.is_empty() {
+        bail!("Secondary classes are no longer supported");
     }
     Ok(())
 }
@@ -847,6 +834,10 @@ fn normalize_state(state: &mut AgentStudioState, config: &Config) -> Result<()> 
     }
     if let Some(startup_agent_id) = startup_agent_id(state) {
         state.active_agent_id = startup_agent_id;
+    }
+
+    for profile in &mut state.profiles {
+        profile.secondary_classes.clear();
     }
 
     for profile in &state.profiles {
@@ -1038,14 +1029,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_profile_merges_tools_skills_and_identity() {
+    fn resolve_profile_uses_single_class_and_overrides() {
         let profile = AgentProfile {
             id: "tanith".into(),
             name: "Tanith".into(),
             avatar: None,
             launch_on_startup: false,
             primary_class: "social_media_manager".into(),
-            secondary_classes: vec!["va".into()],
+            secondary_classes: Vec::new(),
             social_accounts: AgentSocialAccountsConfig::default(),
             overrides: AgentProfileOverrides {
                 tool_grants: vec!["file_write".into()],
@@ -1059,7 +1050,6 @@ mod tests {
 
         let resolved = resolve_profile_record(&profile).unwrap();
         assert!(resolved.tool_grants.contains(&"twitter_mcp".into()));
-        assert!(resolved.tool_grants.contains(&"schedule".into()));
         assert!(resolved.tool_grants.contains(&"browser_headless".into()));
         assert!(resolved.tool_grants.contains(&"browser_ext".into()));
         assert!(resolved.tool_grants.contains(&"file_write".into()));
@@ -1068,6 +1058,7 @@ mod tests {
             .contains(&"social-media-manager".into()));
         assert!(resolved.skill_grants.contains(&"browser-operator".into()));
         assert_eq!(resolved.identity.emoji, "🧭");
+        assert_eq!(resolved.identity.role_title, "Social Media Manager");
         assert!(resolved.summary.contains("Lead social strategy"));
     }
 
@@ -1178,5 +1169,33 @@ mod tests {
 
         let error = validate_profile(&profile).unwrap_err().to_string();
         assert!(error.contains("visible but not selectable"));
+    }
+
+    #[test]
+    fn normalize_state_clears_legacy_secondary_classes() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(&tmp);
+        std::fs::create_dir_all(&config.workspace_dir).unwrap();
+        let mut state = AgentStudioState {
+            version: STUDIO_STATE_VERSION,
+            onboarding_completed: true,
+            active_agent_id: "tanith".into(),
+            profiles: vec![AgentProfile {
+                id: "tanith".into(),
+                name: "Tanith".into(),
+                avatar: None,
+                launch_on_startup: true,
+                primary_class: "social_media_manager".into(),
+                secondary_classes: vec!["va".into()],
+                social_accounts: AgentSocialAccountsConfig::default(),
+                overrides: AgentProfileOverrides::default(),
+            }],
+        };
+
+        normalize_state(&mut state, &config).unwrap();
+        assert!(state.profiles[0].secondary_classes.is_empty());
+        let resolved = resolve_active_profile(&state).unwrap();
+        assert_eq!(resolved.classes.len(), 1);
+        assert_eq!(resolved.identity.role_title, "Social Media Manager");
     }
 }
