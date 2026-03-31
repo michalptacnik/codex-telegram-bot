@@ -7,6 +7,19 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.0] - 2026-03-31
+
+### Added
+
+- Productized the built-in `va` class with first-party mail access for inbox support, draft-first email workflows, scheduling, reminders, and browser-based admin fallback.
+- Added the repo-shipped `va-mail-operator` skill so VA agents now receive a real on-disk mail workflow package instead of a missing example-only grant.
+- Provisioned support for a dedicated `Noa` Virtual Assistant profile in workspace studio state without changing clean-install bootstrap behavior.
+
+### Changed
+
+- VA class metadata, guardrails, channel affinities, and evaluation scenarios now explicitly cover inbox triage, supervised outbound email, and proof-oriented browser fallback.
+- Release versioning now advances from the Rust package metadata line, and the documented/manual tag-cut flow is aligned with this repository's `main` branch.
+
 ## [0.3.0] – 2026-02-26
 
 ### Added

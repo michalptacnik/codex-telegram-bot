@@ -1584,6 +1584,21 @@ description = "Bare minimum"
     }
 
     #[test]
+    fn load_repo_skills_includes_va_mail_operator() {
+        let skills = load_repo_skills();
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "va-mail-operator")
+            .expect("repo skills should include va-mail-operator");
+
+        assert!(skill.description.contains("Virtual Assistant agent"));
+        assert!(skill
+            .prompts
+            .iter()
+            .any(|prompt| prompt.contains("Use the `mail` tool first whenever it is available")));
+    }
+
+    #[test]
     fn filter_skills_by_name_only_keeps_granted_skills() {
         let skills = vec![
             Skill {

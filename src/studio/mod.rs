@@ -244,9 +244,9 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
             id: "va".into(),
             name: "VA".into(),
             status: AgentClassStatus::Active,
-            description: "Administrative operator for coordination, reminders, inbox triage, and practical follow-through.".into(),
+            description: "Administrative operator for inbox triage, scheduling, reminders, browser-based admin work, and practical follow-through.".into(),
             fantasy_theme: "Operations steward".into(),
-            default_role_summary: "Handle practical coordination, scheduling, reminders, inbox support, and lightweight research with calm reliability.".into(),
+            default_role_summary: "Handle inbox coordination, scheduling, reminders, draft-first email help, browser fallback for logged-in admin flows, and lightweight research with calm reliability.".into(),
             default_soul_overlay: SoulProfileOverlay {
                 voice: Some("calm organized dependable".into()),
                 principles: vec![
@@ -282,16 +282,21 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
                 "file_write".into(),
                 "glob_search".into(),
                 "web_fetch".into(),
+                "mail".into(),
             ],
-            skill_grants: Vec::new(),
-            channel_affinities: vec!["email".into(), "telegram".into()],
-            integration_affinities: vec!["cron".into()],
+            skill_grants: vec!["va-mail-operator".into()],
+            channel_affinities: vec!["email".into(), "telegram".into(), "cli".into()],
+            integration_affinities: vec!["cron".into(), "mail".into(), "browser_headless".into()],
             guardrails: vec![
                 "Keep externally visible communication supervised.".into(),
                 "Preserve user context accurately when scheduling or tracking work.".into(),
+                "Use first-party mail tooling before browser webmail whenever email is configured.".into(),
+                "Treat browser-based admin actions as fallback or proof-oriented workflows, not first resort automation.".into(),
             ],
             evaluation_scenarios: vec![
                 "Convert a messy task dump into a prioritized action plan.".into(),
+                "Triage an inbox into urgent replies, drafts, and follow-ups without sending anything live.".into(),
+                "Draft an email with fresh proof through the mail tool, then fall back to browser guidance only when the mail path is blocked.".into(),
                 "Set recurring reminders and summarize upcoming obligations.".into(),
             ],
         },
@@ -1063,7 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn va_profile_gets_universal_browser_skill_only() {
+    fn va_profile_gets_mail_and_va_skill_defaults() {
         let profile = AgentProfile {
             id: "assistant".into(),
             name: "Assistant".into(),
@@ -1077,9 +1082,12 @@ mod tests {
 
         let resolved = resolve_profile_record(&profile).unwrap();
         assert!(resolved.tool_grants.contains(&"browser_headless".into()));
+        assert!(resolved.tool_grants.contains(&"mail".into()));
         assert!(resolved.skill_grants.contains(&"browser-operator".into()));
-        assert!(!resolved.skill_grants.contains(&"ops_coordination".into()));
-        assert!(!resolved.skill_grants.contains(&"task_triage".into()));
+        assert!(resolved.skill_grants.contains(&"va-mail-operator".into()));
+        assert!(resolved
+            .summary
+            .contains("Handle inbox coordination, scheduling, reminders"));
     }
 
     #[test]
