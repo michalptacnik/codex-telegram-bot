@@ -1,7 +1,7 @@
 {
   "name": "agent-hq-desktop",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "scripts": {
     "tauri:dev": "tauri dev",

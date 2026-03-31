@@ -2957,6 +2957,7 @@ pub(crate) async fn run_tool_call_loop(
 pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> String {
     let mut instructions = String::new();
     let has_mail = tools_registry.iter().any(|tool| tool.name() == "mail");
+    let has_twitter_x = tools_registry.iter().any(|tool| tool.name() == "twitter_x");
     let has_browser = tools_registry.iter().any(|tool| tool.name() == "browser");
     let has_browser_headless = tools_registry
         .iter()
@@ -2995,6 +2996,13 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
         instructions.push_str("### Headless Browser Rule\n\n");
         instructions.push_str(
             "Use `browser_headless` as the primary browser tool before `browser_ext` or legacy `browser` for ordinary website work and browser automation. Reuse the same `session` value across related calls in one task so navigation state persists. Use `browser_headless` action=`status` to distinguish sidecar health from authentication state, and use `bootstrap_x_session` before authenticated X work when the saved headless session is missing or expired. If the user explicitly requests a headless workflow, treat that as a hard requirement and do not fall back to `browser_ext`; report the headless blocker instead. Save screenshots or traces when the flow becomes flaky or proof is needed.\n\n",
+        );
+    }
+
+    if has_twitter_x {
+        instructions.push_str("### X/Twitter Rule\n\n");
+        instructions.push_str(
+            "For X/Twitter tasks, use `twitter_x` first when it can complete the requested action. Prefer `browser_headless` or `browser_ext` only for flows that `twitter_x` cannot handle, for proof capture, or when the user explicitly wants browser automation.\n\n",
         );
     }
 

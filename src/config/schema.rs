@@ -8061,7 +8061,11 @@ default_model = "legacy-model"
         let _env_guard = env_override_lock().await;
         let temp_home =
             std::env::temp_dir().join(format!("zeroclaw_test_home_{}", uuid::Uuid::new_v4()));
-        let custom_config_dir = temp_home.join("profiles").join("agent-alpha");
+        let custom_root = tempfile::Builder::new()
+            .prefix("zeroclaw_persisted_profile_")
+            .tempdir_in(std::env::current_dir().unwrap())
+            .unwrap();
+        let custom_config_dir = custom_root.path().join("profiles").join("agent-alpha");
 
         fs::create_dir_all(&custom_config_dir).await.unwrap();
         fs::write(

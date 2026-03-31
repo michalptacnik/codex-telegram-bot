@@ -7,6 +7,15 @@ Versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [1.1.1] - 2026-03-31
+
+### Fixed
+
+- Restored the X/Twitter tool-priority instruction in the agent tool protocol so `twitter_x` is explicitly preferred when available.
+- Updated skill-loader coverage to test workspace fixtures separately from merged repo-packaged skills, matching the shipped runtime behavior.
+- Corrected config and browser tests that had drifted from the actual persisted-workspace-marker rules and the default `agent_browser` backend.
+- Aligned gateway timeout expectations and documentation with the shipped `120` second request timeout.
+
 ## [1.1.0] - 2026-03-31
 
 ### Added

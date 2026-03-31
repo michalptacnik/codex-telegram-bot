@@ -4,7 +4,7 @@
 //! - Proper HTTP/1.1 parsing and compliance
 //! - Content-Length validation (handled by hyper)
 //! - Request body size limits (64KB max)
-//! - Request timeouts (30s) to prevent slow-loris attacks
+//! - Request timeouts (120s) to prevent slow-loris attacks while still bounding hangs
 //! - Header sanitization (handled by axum/hyper)
 
 pub mod api;
@@ -46,7 +46,7 @@ use uuid::Uuid;
 
 /// Maximum request body size (64KB) — prevents memory exhaustion
 pub const MAX_BODY_SIZE: usize = 65_536;
-/// Request timeout (30s) — prevents slow-loris attacks
+/// Request timeout (120s) — prevents slow-loris attacks while still bounding hangs
 pub const REQUEST_TIMEOUT_SECS: u64 = 120;
 /// Sliding window used by gateway rate limiting.
 pub const RATE_LIMIT_WINDOW_SECS: u64 = 60;
@@ -1829,7 +1829,7 @@ mod tests {
     }
 
     #[test]
-    fn security_timeout_is_30_seconds() {
+    fn security_timeout_is_120_seconds() {
         assert_eq!(REQUEST_TIMEOUT_SECS, 120);
     }
 
