@@ -2925,10 +2925,13 @@ mod tests {
     }
 
     #[test]
-    fn browser_tool_default_backend_is_auto() {
+    fn browser_tool_default_backend_is_agent_browser() {
         let security = Arc::new(SecurityPolicy::default());
         let tool = BrowserTool::new(security, vec!["example.com".into()], None);
-        assert_eq!(tool.configured_backend().unwrap(), BrowserBackendKind::Auto);
+        assert_eq!(
+            tool.configured_backend().unwrap(),
+            BrowserBackendKind::AgentBrowser
+        );
     }
 
     #[test]

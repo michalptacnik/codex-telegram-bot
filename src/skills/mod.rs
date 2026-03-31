@@ -72,7 +72,8 @@ fn default_version() -> String {
     "0.1.0".to_string()
 }
 
-/// Load all skills from the workspace skills directory
+/// Load all available skills for the workspace, including optional open-skills,
+/// workspace-packaged skills, and repo-packaged product defaults.
 pub fn load_skills(workspace_dir: &Path) -> Vec<Skill> {
     load_skills_with_open_skills_config(workspace_dir, None, None)
 }
@@ -1075,7 +1076,7 @@ mod tests {
     #[test]
     fn load_empty_skills_dir() {
         let dir = tempfile::tempdir().unwrap();
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert!(skills.is_empty());
     }
 
@@ -1104,7 +1105,7 @@ command = "echo hello"
         )
         .unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "test-skill");
         assert_eq!(skills[0].tools.len(), 1);
@@ -1124,7 +1125,7 @@ command = "echo hello"
         )
         .unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "md-skill");
         assert!(skills[0].description.contains("cool things"));
@@ -1206,7 +1207,7 @@ command = "echo hello"
     fn load_nonexistent_dir() {
         let dir = tempfile::tempdir().unwrap();
         let fake = dir.path().join("nonexistent");
-        let skills = load_skills(&fake);
+        let skills = load_workspace_skills(&fake);
         assert!(skills.is_empty());
     }
 
@@ -1217,7 +1218,7 @@ command = "echo hello"
         fs::create_dir_all(&skills_dir).unwrap();
         // A file, not a directory — should be ignored
         fs::write(skills_dir.join("not-a-skill.txt"), "hello").unwrap();
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert!(skills.is_empty());
     }
 
@@ -1228,7 +1229,7 @@ command = "echo hello"
         let empty_skill = skills_dir.join("empty-skill");
         fs::create_dir_all(&empty_skill).unwrap();
         // Directory exists but no SKILL.toml or SKILL.md
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert!(skills.is_empty());
     }
 
@@ -1247,7 +1248,7 @@ command = "echo hello"
             .unwrap();
         }
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 3);
     }
 
@@ -1289,7 +1290,7 @@ command = "https://api.example.com/deploy"
         )
         .unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 1);
         let s = &skills[0];
         assert_eq!(s.name, "multi-tool");
@@ -1319,7 +1320,7 @@ description = "Bare minimum"
         )
         .unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].version, "0.1.0"); // default version
         assert!(skills[0].author.is_none());
@@ -1336,7 +1337,7 @@ description = "Bare minimum"
 
         fs::write(skill_dir.join("SKILL.toml"), "this is not valid toml {{{{").unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert!(skills.is_empty()); // broken skill is skipped
     }
 
@@ -1349,7 +1350,7 @@ description = "Bare minimum"
 
         fs::write(skill_dir.join("SKILL.md"), "# Just a Heading\n").unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].description, "No description");
     }
@@ -1460,7 +1461,7 @@ description = "Bare minimum"
         .unwrap();
         fs::write(skill_dir.join("SKILL.md"), "# From MD\nMD description\n").unwrap();
 
-        let skills = load_skills(dir.path());
+        let skills = load_workspace_skills(dir.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "from-toml"); // TOML takes priority
     }
@@ -1538,9 +1539,8 @@ description = "Bare minimum"
         config.skills.open_skills_dir = Some(open_skills_dir.to_string_lossy().to_string());
 
         let skills = load_skills_with_config(&workspace_dir, &config);
-        assert_eq!(skills.len(), 1);
-        assert_eq!(skills[0].name, "http_request");
-        assert_ne!(skills[0].name, "CONTRIBUTING");
+        assert!(skills.iter().any(|skill| skill.name == "http_request"));
+        assert!(!skills.iter().any(|skill| skill.name == "CONTRIBUTING"));
     }
 
     #[test]

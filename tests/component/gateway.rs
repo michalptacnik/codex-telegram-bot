@@ -142,8 +142,8 @@ fn gateway_body_limit_is_reasonable() {
 fn gateway_timeout_is_reasonable() {
     assert_eq!(
         zeroclaw::gateway::REQUEST_TIMEOUT_SECS,
-        30,
-        "Request timeout should be 30 seconds"
+        120,
+        "Request timeout should be 120 seconds"
     );
 }
 
