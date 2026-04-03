@@ -975,15 +975,45 @@ impl TwitterMcpTool {
         if let Some(creds) = config.agent.social_accounts.twitter.clone() {
             candidates.push(("primary".into(), creds));
         }
+        // Also check the generic accounts map for platform == "twitter"
+        for (label, account) in &config.agent.social_accounts.accounts {
+            if account.platform == "twitter" {
+                candidates.push((
+                    format!("primary:{label}"),
+                    crate::config::schema::SocialTwitterCredentials {
+                        username: account.username.clone(),
+                        password: account.password.clone(),
+                        email: account.email.clone(),
+                    },
+                ));
+            }
+        }
         let mut delegate_names: Vec<_> = config.agents.keys().cloned().collect();
         delegate_names.sort();
-        for name in delegate_names {
+        for name in &delegate_names {
             if let Some(creds) = config
                 .agents
-                .get(&name)
+                .get(name)
                 .and_then(|agent| agent.social_accounts.twitter.clone())
             {
-                candidates.push((name, creds));
+                candidates.push((name.clone(), creds));
+            }
+        }
+        // Also check delegate agents' generic accounts maps
+        for name in &delegate_names {
+            if let Some(agent) = config.agents.get(name) {
+                for (label, account) in &agent.social_accounts.accounts {
+                    if account.platform == "twitter" {
+                        candidates.push((
+                            format!("{name}:{label}"),
+                            crate::config::schema::SocialTwitterCredentials {
+                                username: account.username.clone(),
+                                password: account.password.clone(),
+                                email: account.email.clone(),
+                            },
+                        ));
+                    }
+                }
             }
         }
 

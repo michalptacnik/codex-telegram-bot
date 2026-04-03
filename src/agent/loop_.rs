@@ -2958,6 +2958,7 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
     let mut instructions = String::new();
     let has_mail = tools_registry.iter().any(|tool| tool.name() == "mail");
     let has_twitter_x = tools_registry.iter().any(|tool| tool.name() == "twitter_x");
+    let has_linkedin = tools_registry.iter().any(|tool| tool.name() == "linkedin");
     let has_browser = tools_registry.iter().any(|tool| tool.name() == "browser");
     let has_browser_headless = tools_registry
         .iter()
@@ -3003,6 +3004,13 @@ pub(crate) fn build_tool_instructions(tools_registry: &[Box<dyn Tool>]) -> Strin
         instructions.push_str("### X/Twitter Rule\n\n");
         instructions.push_str(
             "For X/Twitter tasks, use `twitter_x` first when it can complete the requested action. Prefer `browser_headless` or `browser_ext` only for flows that `twitter_x` cannot handle, for proof capture, or when the user explicitly wants browser automation.\n\n",
+        );
+    }
+
+    if has_linkedin {
+        instructions.push_str("### LinkedIn Rule\n\n");
+        instructions.push_str(
+            "For LinkedIn tasks, use the `linkedin` tool for posting, commenting, profile lookup, and feed retrieval. Use `agent_name` to select a specific LinkedIn account when multiple are configured.\n\n",
         );
     }
 

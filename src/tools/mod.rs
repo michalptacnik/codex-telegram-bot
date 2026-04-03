@@ -42,6 +42,7 @@ pub mod hardware_memory_map;
 pub mod hardware_memory_read;
 pub mod http_request;
 pub mod image_info;
+pub mod linkedin;
 pub mod mail;
 pub mod memory_forget;
 pub mod memory_recall;
@@ -93,6 +94,7 @@ pub use hardware_memory_map::HardwareMemoryMapTool;
 pub use hardware_memory_read::HardwareMemoryReadTool;
 pub use http_request::HttpRequestTool;
 pub use image_info::ImageInfoTool;
+pub use linkedin::LinkedInTool;
 pub use mail::MailTool;
 pub use memory_forget::MemoryForgetTool;
 pub use memory_recall::MemoryRecallTool;
@@ -368,6 +370,46 @@ pub fn all_tools_with_runtime(
                 composio_entity_id,
                 security.clone(),
             )));
+        }
+    }
+
+    // Register twitter_x tool when any agent has Twitter credentials
+    {
+        let has_twitter = root_config.agent.social_accounts.twitter.is_some()
+            || root_config
+                .agent
+                .social_accounts
+                .accounts
+                .values()
+                .any(|a| a.platform == "twitter")
+            || agents.values().any(|a| {
+                a.social_accounts.twitter.is_some()
+                    || a.social_accounts
+                        .accounts
+                        .values()
+                        .any(|sa| sa.platform == "twitter")
+            });
+        if has_twitter {
+            tool_arcs.push(Arc::new(TwitterMcpTool::new()));
+        }
+    }
+
+    // Register linkedin tool when any agent has LinkedIn credentials
+    {
+        let has_linkedin = root_config
+            .agent
+            .social_accounts
+            .accounts
+            .values()
+            .any(|a| a.platform == "linkedin")
+            || agents.values().any(|a| {
+                a.social_accounts
+                    .accounts
+                    .values()
+                    .any(|sa| sa.platform == "linkedin")
+            });
+        if has_linkedin {
+            tool_arcs.push(Arc::new(LinkedInTool::new()));
         }
     }
 
