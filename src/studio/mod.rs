@@ -221,6 +221,7 @@ pub fn built_in_classes() -> Vec<AgentClassManifest> {
                 "browser_headless".into(),
                 "browser_ext".into(),
                 "twitter_mcp".into(),
+                "linkedin".into(),
                 "schedule".into(),
                 "memory_recall".into(),
                 "memory_store".into(),

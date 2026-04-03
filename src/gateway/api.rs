@@ -23,6 +23,8 @@ const MASKED_SECRET: &str = "***MASKED***";
 pub struct AgentSocialAccountEntry {
     pub agent_name: String,
     pub twitter: Option<crate::config::schema::SocialTwitterCredentials>,
+    #[serde(default)]
+    pub linkedin_accounts: Vec<crate::config::schema::SocialAccountConfig>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -83,6 +85,7 @@ pub struct HeadlessIntegrationStatus {
 pub struct AgentXIntegrationStatus {
     pub agent_name: String,
     pub twitter_x: crate::tools::twitter_mcp::TwitterHealthStatus,
+    pub linkedin: crate::tools::linkedin::LinkedInHealthStatus,
     pub browser_headless: HeadlessIntegrationStatus,
     pub browser_ext: BrowserExtensionIntegrationStatus,
     pub supported_capabilities: IntegrationCapabilityStatus,
@@ -2182,11 +2185,23 @@ fn restore_masked_sensitive_fields(
     }
 }
 
+fn linkedin_accounts_for(
+    social: &crate::config::schema::AgentSocialAccountsConfig,
+) -> Vec<crate::config::schema::SocialAccountConfig> {
+    social
+        .accounts
+        .values()
+        .filter(|a| a.platform == "linkedin")
+        .cloned()
+        .collect()
+}
+
 fn agent_social_accounts_payload(config: &crate::config::Config) -> Vec<AgentSocialAccountEntry> {
     let mut accounts = Vec::new();
     accounts.push(AgentSocialAccountEntry {
         agent_name: "primary".into(),
         twitter: config.agent.social_accounts.twitter.clone(),
+        linkedin_accounts: linkedin_accounts_for(&config.agent.social_accounts),
     });
     let mut delegate_names: Vec<_> = config.agents.keys().cloned().collect();
     delegate_names.sort();
@@ -2195,6 +2210,7 @@ fn agent_social_accounts_payload(config: &crate::config::Config) -> Vec<AgentSoc
             accounts.push(AgentSocialAccountEntry {
                 agent_name: name,
                 twitter: agent.social_accounts.twitter.clone(),
+                linkedin_accounts: linkedin_accounts_for(&agent.social_accounts),
             });
         }
     }
@@ -2239,6 +2255,23 @@ async fn twitter_x_status_for_agent(
             post: false,
             comment: false,
             article: false,
+        },
+    }
+}
+
+#[allow(clippy::unused_async)]
+async fn linkedin_status_for_agent(
+    _agent_name: &str,
+) -> crate::tools::linkedin::LinkedInHealthStatus {
+    // LinkedIn status requires a live API call with credentials; return a static
+    // placeholder for the gateway status endpoint (similar to twitter_x).
+    // The actual health check runs via the `linkedin` tool's `status` action.
+    crate::tools::linkedin::LinkedInHealthStatus {
+        status: "unchecked".into(),
+        detail: Some("Use the linkedin tool with action=status for a live check.".into()),
+        supported_capabilities: crate::tools::linkedin::LinkedInCapabilityMatrix {
+            post: true,
+            comment: true,
         },
     }
 }
@@ -2372,9 +2405,11 @@ async fn x_integration_status_payload(
                         twitter_x_status_for_agent(&agent_name),
                         browser_headless_status_for_agent(config, &agent_name)
                     );
+                    let linkedin = linkedin_status_for_agent(&agent_name).await;
                     AgentXIntegrationStatus {
                         agent_name,
                         twitter_x,
+                        linkedin,
                         browser_headless,
                         browser_ext,
                         supported_capabilities: IntegrationCapabilityStatus {

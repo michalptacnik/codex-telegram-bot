@@ -354,11 +354,41 @@ pub struct SocialTwitterCredentials {
     pub email: Option<String>,
 }
 
+/// Platform-agnostic social account credentials.
+///
+/// Supports any social platform (X/Twitter, LinkedIn, etc.) via the `platform`
+/// discriminator. Stored in the `accounts` map of [`AgentSocialAccountsConfig`].
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
+pub struct SocialAccountConfig {
+    /// Platform identifier: "twitter", "linkedin", etc.
+    pub platform: String,
+    /// Display label for this account (e.g. "company-x", "personal-linkedin").
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Username or handle.
+    #[serde(default)]
+    pub username: Option<String>,
+    /// Password (for cookie-based auth like X/Twitter).
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Email (for verification flows).
+    #[serde(default)]
+    pub email: Option<String>,
+    /// OAuth access token (for API-based auth like LinkedIn).
+    #[serde(default)]
+    pub access_token: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct AgentSocialAccountsConfig {
-    /// X/Twitter credentials for headless social automation.
+    /// X/Twitter credentials for headless social automation (legacy field).
     #[serde(default)]
     pub twitter: Option<SocialTwitterCredentials>,
+    /// Named social accounts keyed by user-chosen label.
+    /// Supports multiple accounts per platform and any platform type.
+    /// Example: `{ "brand-x" = { platform = "twitter", ... }, "corp-linkedin" = { platform = "linkedin", ... } }`
+    #[serde(default)]
+    pub accounts: HashMap<String, SocialAccountConfig>,
 }
 
 /// Valid temperature range for all paths (config, CLI, env override).
