@@ -1,12 +1,20 @@
-import { Routes, Route, Navigate } from 'react-router-dom';
+import { Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { useState, useEffect, createContext, useContext } from 'react';
-import Layout from './components/layout/Layout';
 import { ShellProvider, useShell } from './components/shell/ShellProvider';
 import UpdateController from './components/shell/UpdateController';
 import badgeArt from './assets/agent-hq-badge.svg';
-import Dashboard from './pages/Dashboard';
+import { AgentProvider, useAgentContext } from './contexts/AgentContext';
+import { AuthProvider, useAuth } from './hooks/useAuth';
+import { setLocale, type Locale } from './lib/i18n';
+
+// Pages
+import AgentSelector from './pages/AgentSelector';
+import AgentCreationWizard from './pages/AgentCreationWizard';
+import AgentDashboard from './pages/AgentDashboard';
 import AgentChat from './pages/AgentChat';
-import Studio from './pages/Studio';
+import AgentAutomations from './pages/AgentAutomations';
+import AgentSettings from './pages/AgentSettings';
+import SocialAccounts from './pages/SocialAccounts';
 import Tools from './pages/Tools';
 import Cron from './pages/Cron';
 import Integrations from './pages/Integrations';
@@ -15,13 +23,14 @@ import Config from './pages/Config';
 import Cost from './pages/Cost';
 import Logs from './pages/Logs';
 import Doctor from './pages/Doctor';
-// Agent HQ pages
 import Soul from './pages/Soul';
 import Missions from './pages/Missions';
 import Plugins from './pages/Plugins';
 import Sessions from './pages/Sessions';
-import { AuthProvider, useAuth } from './hooks/useAuth';
-import { setLocale, type Locale } from './lib/i18n';
+
+// Layouts
+import AgentScopedLayout from './components/layout/AgentScopedLayout';
+import GlobalLayout from './components/layout/GlobalLayout';
 
 // Locale context
 interface LocaleContextType {
@@ -127,6 +136,24 @@ function PairingDialog({ onPair }: { onPair: (code: string) => Promise<void> }) 
   );
 }
 
+/**
+ * Redirects `/` based on agent count:
+ * - 0 agents → /setup (wizard)
+ * - 1+ agents → /agents (selector)
+ */
+function StartupRedirector() {
+  const { agents, loading } = useAgentContext();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!loading) {
+      navigate(agents.length === 0 ? '/setup' : '/agents', { replace: true });
+    }
+  }, [loading, agents.length, navigate]);
+
+  return null;
+}
+
 function AppContent() {
   const { isAuthenticated, loading, pair, logout } = useAuth();
   const [locale, setLocaleState] = useState('tr');
@@ -168,29 +195,130 @@ function AppContent() {
 
   return (
     <LocaleContext.Provider value={{ locale, setAppLocale }}>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path="/" element={<Studio />} />
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/agent" element={<AgentChat />} />
-          <Route path="/tools" element={<Tools />} />
-          <Route path="/cron" element={<Cron />} />
-          <Route path="/integrations" element={<Integrations />} />
-          <Route path="/memory" element={<Memory />} />
-          <Route path="/config" element={<Config />} />
-          <Route path="/cost" element={<Cost />} />
-          <Route path="/logs" element={<Logs />} />
-          <Route path="/doctor" element={<Doctor />} />
-          {/* Agent HQ routes */}
-          <Route path="/soul" element={<Soul />} />
-          <Route path="/missions" element={<Missions />} />
-          <Route path="/plugins" element={<Plugins />} />
-          <Route path="/sessions" element={<Sessions />} />
+      <AgentProvider>
+        <Routes>
+          {/* Root redirect based on agent count */}
+          <Route path="/" element={<StartupRedirector />} />
+
+          {/* Agent selector (fullscreen, no sidebar) */}
+          <Route path="/agents" element={<AgentSelectorWrapper />} />
+
+          {/* Agent creation wizard (fullscreen) */}
+          <Route path="/setup" element={<AgentCreationWizardWrapper />} />
+
+          {/* Agent-scoped routes */}
+          <Route path="/agents/:agentId" element={<AgentScopedLayout />}>
+            <Route index element={<AgentDashboard />} />
+            <Route path="chat" element={<AgentChat />} />
+            <Route path="missions" element={<Missions />} />
+            <Route path="sessions" element={<Sessions />} />
+            <Route path="automations" element={<AgentAutomations />} />
+            <Route path="tools" element={<Tools />} />
+            <Route path="memory" element={<Memory />} />
+            <Route path="social-accounts" element={<SocialAccounts />} />
+            <Route path="settings" element={<AgentSettings />} />
+            <Route path="soul" element={<Soul />} />
+          </Route>
+
+          {/* Global routes */}
+          <Route element={<GlobalLayout />}>
+            <Route path="/automations" element={<Cron />} />
+            <Route path="/integrations" element={<Integrations />} />
+            <Route path="/plugins" element={<Plugins />} />
+            <Route path="/settings" element={<Config />} />
+            <Route path="/cost" element={<Cost />} />
+            <Route path="/logs" element={<Logs />} />
+            <Route path="/doctor" element={<Doctor />} />
+          </Route>
+
+          {/* Legacy redirects — old flat routes to new structure */}
+          <Route path="/dashboard" element={<LegacyRedirect to="/" />} />
+          <Route path="/agent" element={<LegacyRedirect to="/chat" />} />
+          <Route path="/cron" element={<Navigate to="/automations" replace />} />
+          <Route path="/config" element={<Navigate to="/settings" replace />} />
+          <Route path="/soul" element={<LegacyRedirect to="/soul" />} />
+          <Route path="/missions" element={<LegacyRedirect to="/missions" />} />
+          <Route path="/sessions" element={<LegacyRedirect to="/sessions" />} />
+          <Route path="/tools" element={<LegacyRedirect to="/tools" />} />
+          <Route path="/memory" element={<LegacyRedirect to="/memory" />} />
+
           <Route path="*" element={<Navigate to="/" replace />} />
-        </Route>
-      </Routes>
+        </Routes>
+      </AgentProvider>
     </LocaleContext.Provider>
   );
+}
+
+/** Wraps AgentSelector in its own shell layout (fullscreen with mac chrome) */
+function AgentSelectorWrapper() {
+  const { isDesktopMac } = useShell();
+
+  if (isDesktopMac) {
+    return (
+      <div className="mac-shell">
+        <div className="mac-content" style={{ marginLeft: 0 }}>
+          <main className="mac-main">
+            <div className="mac-main-scroll">
+              <AgentSelector />
+            </div>
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-950 text-white">
+      <main className="max-w-6xl mx-auto px-6 py-8">
+        <AgentSelector />
+      </main>
+    </div>
+  );
+}
+
+/** Wraps AgentCreationWizard similarly */
+function AgentCreationWizardWrapper() {
+  const { isDesktopMac } = useShell();
+
+  if (isDesktopMac) {
+    return (
+      <div className="mac-shell">
+        <div className="mac-content" style={{ marginLeft: 0 }}>
+          <main className="mac-main">
+            <div className="mac-main-scroll">
+              <AgentCreationWizard />
+            </div>
+          </main>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-950 text-white">
+      <main className="max-w-6xl mx-auto px-6 py-8">
+        <AgentCreationWizard />
+      </main>
+    </div>
+  );
+}
+
+/**
+ * Legacy redirect: maps old flat routes (e.g. /dashboard, /agent) to agent-scoped routes.
+ * Uses the active agent ID from context.
+ */
+function LegacyRedirect({ to }: { to: string }) {
+  const { activeAgentId, loading } = useAgentContext();
+
+  if (loading) return null;
+
+  if (!activeAgentId) {
+    return <Navigate to="/agents" replace />;
+  }
+
+  // `to` is relative (e.g. "/chat" → "/agents/{id}/chat", "/" → "/agents/{id}")
+  const target = to === '/' ? `/agents/${activeAgentId}` : `/agents/${activeAgentId}${to}`;
+  return <Navigate to={target} replace />;
 }
 
 export default function App() {

@@ -304,7 +304,7 @@ function statCard(title: string, value: string, note: string, icon: ReactNode) {
   );
 }
 
-export default function Cron() {
+export default function Cron({ ownerAgentFilter }: { ownerAgentFilter?: string } = {}) {
   const [automations, setAutomations] = useState<AutomationRecord[]>([]);
   const [profiles, setProfiles] = useState<ResolvedAgentProfile[]>([]);
   const [activeAgentId, setActiveAgentId] = useState('');
@@ -315,7 +315,7 @@ export default function Cron() {
   const [form, setForm] = useState<FormState>(emptyForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [typeFilter, setTypeFilter] = useState<'all' | AutomationKind>('all');
-  const [ownerFilter, setOwnerFilter] = useState('all');
+  const [ownerFilter, setOwnerFilter] = useState(ownerAgentFilter ?? 'all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'enabled' | 'disabled' | 'failed'>(
     'all',
   );
@@ -405,7 +405,7 @@ export default function Cron() {
   const openCreate = () => {
     setForm({
       ...emptyForm,
-      owner_agent_id: activeAgentId,
+      owner_agent_id: ownerAgentFilter ?? activeAgentId,
     });
     setFormError(null);
     setShowForm(true);
