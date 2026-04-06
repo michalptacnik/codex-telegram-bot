@@ -7,6 +7,7 @@ import {
   type ReactNode,
 } from 'react';
 import { getDesktopShellInfo } from '@/lib/desktop';
+import { setRuntimeBase } from '@/lib/api';
 import type { DesktopAppearance, DesktopShellInfo } from '@/types/api';
 
 interface ShellContextValue {
@@ -70,6 +71,7 @@ export function ShellProvider({ children }: { children: ReactNode }) {
       if (!mounted) return;
       setShell(info);
       setResolvedAppearance(resolveAppearance(info.appearance));
+      setRuntimeBase(info.runtime_host);
     });
 
     return () => {

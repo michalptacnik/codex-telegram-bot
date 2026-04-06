@@ -812,18 +812,18 @@ fn normalize_state(state: &mut AgentStudioState, config: &Config) -> Result<()> 
     }
     state.profiles = deduped_profiles;
 
-    if state.profiles.is_empty() {
-        state
-            .profiles
-            .push(default_profile_from_workspace(&config.workspace_dir));
-    }
+    // Do not auto-create a default agent — let the user create one via the UI.
     if state.active_agent_id.trim().is_empty()
         || !state
             .profiles
             .iter()
             .any(|profile| profile.id == state.active_agent_id)
     {
-        state.active_agent_id = state.profiles[0].id.clone();
+        state.active_agent_id = state
+            .profiles
+            .first()
+            .map(|p| p.id.clone())
+            .unwrap_or_default();
     }
 
     let startup_ids = state
@@ -865,7 +865,8 @@ fn startup_agent_id(state: &AgentStudioState) -> Option<String> {
 }
 
 async fn migrate_legacy_workspace(config: &Config) -> Result<AgentStudioState> {
-    let mut profiles = vec![default_profile_from_workspace(&config.workspace_dir)];
+    // Only migrate explicit legacy agents from config — do not seed a default agent.
+    let mut profiles: Vec<AgentProfile> = Vec::new();
     for (id, agent) in &config.agents {
         profiles.push(AgentProfile {
             id: id.clone(),
@@ -888,14 +889,12 @@ async fn migrate_legacy_workspace(config: &Config) -> Result<AgentStudioState> {
         });
     }
 
-    if let Some(name) = detect_identity_name(&config.workspace_dir).await? {
-        profiles[0].name = name;
-    }
+    let active_agent_id = profiles.first().map(|p| p.id.clone()).unwrap_or_default();
 
     Ok(AgentStudioState {
         version: STUDIO_STATE_VERSION,
         onboarding_completed: config.default_provider.is_some() && config.default_model.is_some(),
-        active_agent_id: profiles[0].id.clone(),
+        active_agent_id,
         profiles,
     })
 }

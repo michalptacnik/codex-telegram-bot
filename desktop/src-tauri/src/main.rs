@@ -13,7 +13,7 @@ use tauri_plugin_updater::{Builder as UpdaterPluginBuilder, Update, UpdaterExt};
 struct DesktopShellInfo {
     name: &'static str,
     mode: &'static str,
-    runtime_host: &'static str,
+    runtime_host: String,
     platform: &'static str,
     appearance: &'static str,
     #[serde(rename = "menuDriven")]
@@ -24,6 +24,53 @@ struct DesktopShellInfo {
     window_style: Option<&'static str>,
     #[serde(rename = "updateConfigured")]
     update_configured: bool,
+}
+
+/// Read the gateway port from ~/.zeroclaw/config.toml, defaulting to 42617.
+fn read_gateway_port() -> u16 {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let config_path = std::path::Path::new(&home).join(".zeroclaw/config.toml");
+    let Ok(content) = std::fs::read_to_string(&config_path) else {
+        return 42617;
+    };
+    let mut in_gateway = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[gateway]" {
+            in_gateway = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_gateway = false;
+        }
+        if in_gateway && trimmed.starts_with("port") {
+            if let Some(val) = trimmed.split('=').nth(1) {
+                if let Ok(port) = val.trim().parse::<u16>() {
+                    return port;
+                }
+            }
+        }
+    }
+    42617
+}
+
+/// Spawn the agent-hq gateway as a background process if it is not already running.
+/// Looks for the binary in ~/.cargo/bin first, then falls back to PATH.
+fn start_gateway() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let cargo_bin = std::path::Path::new(&home).join(".cargo/bin/agent-hq");
+    let binary = if cargo_bin.exists() {
+        cargo_bin
+    } else {
+        std::path::PathBuf::from("agent-hq")
+    };
+    let _ = std::process::Command::new(&binary)
+        .arg("gateway")
+        .arg("start")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdin(std::process::Stdio::null())
+        .spawn();
 }
 
 const UPDATER_ENDPOINTS: Option<&str> = option_env!("AGENT_HQ_UPDATER_ENDPOINTS");
@@ -140,7 +187,7 @@ fn desktop_shell_info(app: AppHandle) -> DesktopShellInfo {
     DesktopShellInfo {
         name: "Agent HQ Desktop",
         mode: "local_control_center",
-        runtime_host: "http://127.0.0.1:8765",
+        runtime_host: format!("http://127.0.0.1:{}", read_gateway_port()),
         platform: if cfg!(target_os = "macos") {
             "macos"
         } else if cfg!(target_os = "windows") {
@@ -271,6 +318,10 @@ fn main() {
                     let _ = window.set_title_bar_style(TitleBarStyle::Transparent);
                 }
             }
+
+            // Start the gateway in the background so the desktop app can connect
+            // immediately without the user needing to run it manually.
+            start_gateway();
 
             Ok(())
         })

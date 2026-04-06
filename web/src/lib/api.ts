@@ -19,12 +19,20 @@ import type {
 } from '../types/api';
 import { clearToken, getToken, setToken } from './auth';
 
+let _runtimeBase: string | null = null;
+
+/** Called by ShellProvider once the real gateway URL is known. */
+export function setRuntimeBase(url: string): void {
+  _runtimeBase = url.replace(/\/$/, '');
+}
+
 function runtimeBaseUrl(): string {
+  if (_runtimeBase !== null) return _runtimeBase;
   const { protocol } = window.location;
   if (protocol === 'http:' || protocol === 'https:') {
     return '';
   }
-  return 'http://127.0.0.1:8765';
+  return 'http://127.0.0.1:42617';
 }
 
 function runtimeUrl(path: string): string {
@@ -123,6 +131,22 @@ export async function getPublicHealth(): Promise<{ require_pairing: boolean; pai
     throw new Error(`Health check failed (${response.status})`);
   }
   return response.json() as Promise<{ require_pairing: boolean; paired: boolean }>;
+}
+
+// ---------------------------------------------------------------------------
+// Localhost-only admin pairing helpers (desktop auto-pair)
+// ---------------------------------------------------------------------------
+
+export async function getAdminPairCode(): Promise<{ pairing_code: string | null; pairing_required: boolean }> {
+  const response = await fetch(runtimeUrl('/admin/paircode'));
+  if (!response.ok) throw new Error(`Admin paircode failed (${response.status})`);
+  return response.json() as Promise<{ pairing_code: string | null; pairing_required: boolean }>;
+}
+
+export async function generateAdminPairCode(): Promise<{ pairing_code: string | null; pairing_required: boolean }> {
+  const response = await fetch(runtimeUrl('/admin/paircode/new'), { method: 'POST' });
+  if (!response.ok) throw new Error(`Admin paircode/new failed (${response.status})`);
+  return response.json() as Promise<{ pairing_code: string | null; pairing_required: boolean }>;
 }
 
 // ---------------------------------------------------------------------------

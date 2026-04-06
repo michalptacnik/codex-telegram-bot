@@ -155,7 +155,7 @@ function StartupRedirector() {
 }
 
 function AppContent() {
-  const { isAuthenticated, loading, pair, logout } = useAuth();
+  const { isAuthenticated, loading, pair } = useAuth();
   const [locale, setLocaleState] = useState('tr');
   const { isDesktopMac } = useShell();
 
@@ -163,15 +163,6 @@ function AppContent() {
     setLocaleState(newLocale);
     setLocale(newLocale as Locale);
   };
-
-  // Listen for 401 events to force logout
-  useEffect(() => {
-    const handler = () => {
-      logout();
-    };
-    window.addEventListener('zeroclaw-unauthorized', handler);
-    return () => window.removeEventListener('zeroclaw-unauthorized', handler);
-  }, [logout]);
 
   if (loading) {
     return (
@@ -255,13 +246,9 @@ function AgentSelectorWrapper() {
 
   if (isDesktopMac) {
     return (
-      <div className="mac-shell">
-        <div className="mac-content" style={{ marginLeft: 0 }}>
-          <main className="mac-main">
-            <div className="mac-main-scroll">
-              <AgentSelector />
-            </div>
-          </main>
+      <div style={{ minHeight: '100vh', paddingTop: '52px' }}>
+        <div className="mac-main-scroll" style={{ maxWidth: '1200px', margin: '0 auto' }}>
+          <AgentSelector />
         </div>
       </div>
     );
@@ -282,13 +269,9 @@ function AgentCreationWizardWrapper() {
 
   if (isDesktopMac) {
     return (
-      <div className="mac-shell">
-        <div className="mac-content" style={{ marginLeft: 0 }}>
-          <main className="mac-main">
-            <div className="mac-main-scroll">
-              <AgentCreationWizard />
-            </div>
-          </main>
+      <div style={{ minHeight: '100vh', paddingTop: '52px' }}>
+        <div className="mac-main-scroll" style={{ maxWidth: '1200px', margin: '0 auto' }}>
+          <AgentCreationWizard />
         </div>
       </div>
     );
