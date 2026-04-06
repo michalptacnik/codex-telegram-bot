@@ -538,10 +538,9 @@ async function bootstrapXSession(session, request, timeoutMs) {
   await page.waitForTimeout(4000);
   const auth = await xAuthState(page, stepTimeout);
   if (!auth.authenticated) {
-    const imported = await importXSessionFromChrome(session, stepTimeout).catch(() => null);
-    if (imported?.authenticated) {
-      return imported;
-    }
+    // Do NOT fall back to importXSessionFromChrome here. bootstrapXSession is called with
+    // explicit credentials (username, password, email are required above). Silently loading
+    // system Chrome cookies when headless login fails would authenticate as the wrong account.
     if (auth.status === 'suspicious_login_prevented') {
       throw new Error(
         `X blocked true headless login as suspicious activity. Final URL: ${auth.url}. Body: ${JSON.stringify(auth.bodySnippet)}`
