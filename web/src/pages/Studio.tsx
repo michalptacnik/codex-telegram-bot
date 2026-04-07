@@ -1,16 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import {
-  ArrowRight,
-  CheckCircle2,
-  Lock,
-  PlayCircle,
-  Rocket,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  Swords,
-} from 'lucide-react';
+import { ArrowRight, CheckCircle2, Lock, PlayCircle, Rocket, Search, ShieldCheck, Sparkles, Swords } from 'lucide-react';
 import {
   activateAgent,
   bootstrapOnboarding,
@@ -29,6 +19,7 @@ import {
   MacSearchField,
   MacStat,
 } from '@/components/macos/MacPrimitives';
+import AgentSetupWizard from '@/components/onboarding/AgentSetupWizard';
 import { useShell } from '@/components/shell/ShellProvider';
 import socialMediaManagerArt from '@/assets/class-social-media-manager.png';
 import salesArt from '@/assets/class-sales.png';
@@ -95,12 +86,6 @@ function classArtwork(classId: string): string | null {
   }
 }
 
-function panelFieldClass(isDesktopMac: boolean): string {
-  return isDesktopMac
-    ? 'mt-2 w-full rounded-[1rem] border border-[rgba(15,23,42,0.08)] bg-white/80 px-4 py-3 text-[0.97rem] text-slate-900 outline-none shadow-[inset_0_1px_0_rgba(255,255,255,0.55)] focus:border-sky-400 dark:border-white/10 dark:bg-black/20 dark:text-white'
-    : 'mt-2 w-full rounded-[1rem] border border-white/10 bg-[#0b1120] px-4 py-3 text-[0.97rem] text-white outline-none focus:border-sky-400';
-}
-
 function actionButtonClass(primary: boolean, isDesktopMac: boolean): string {
   if (primary) {
     return isDesktopMac
@@ -117,55 +102,6 @@ function artworkClass(size: 'card' | 'hero'): string {
   return size === 'hero'
     ? 'h-40 w-full rounded-[1rem] object-contain p-3 studio-art-frame'
     : 'rounded-[1rem] object-contain p-2 studio-art-frame';
-}
-
-function ClassChoiceCard({
-  classItem,
-  selected,
-  disabled,
-  onClick,
-}: {
-  classItem: AgentClassManifest;
-  selected: boolean;
-  disabled?: boolean;
-  onClick?: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      disabled={disabled}
-      onClick={onClick}
-      className={[
-        'flex items-start gap-4 rounded-[1.25rem] border px-4 py-4 text-left transition',
-        selected
-          ? 'border-sky-400/50 bg-sky-500/10'
-          : 'border-[var(--shell-border)] bg-[var(--shell-panel)] hover:bg-[var(--shell-selection)]',
-        disabled ? 'cursor-not-allowed opacity-55' : '',
-      ].join(' ')}
-    >
-      {classArtwork(classItem.id) ? (
-        <img
-          src={classArtwork(classItem.id) ?? undefined}
-          alt={classItem.name}
-          className={`h-16 w-16 shrink-0 ${artworkClass('card')}`}
-        />
-      ) : (
-        <div className="h-16 w-16 shrink-0 rounded-[1rem] bg-[var(--shell-selection)]" />
-      )}
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold">{classItem.name}</h3>
-          <MacBadge tone={classItem.status === 'coming_soon' ? 'neutral' : 'accent'}>
-            {classItem.status === 'coming_soon' ? 'Soon' : 'Ready'}
-          </MacBadge>
-        </div>
-        <p className="mt-2 text-sm text-[var(--shell-muted)]">{classItem.description}</p>
-        <p className="mt-2 text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-          {classItem.fantasy_theme}
-        </p>
-      </div>
-    </button>
-  );
 }
 
 export default function Studio() {
@@ -217,14 +153,6 @@ export default function Studio() {
 
   const activeProfile =
     agents.find((item) => item.profile.id === activeAgentId) ?? bootstrap?.active_profile ?? null;
-
-  const wizardClassPreview = useMemo(
-    () =>
-      [draft.primary_class]
-        .map((id) => classes.find((item) => item.id === id))
-        .filter(Boolean) as AgentClassManifest[],
-    [classes, draft.primary_class],
-  );
 
   const filteredAgents = useMemo(() => {
     const normalized = rosterQuery.trim().toLowerCase();
@@ -492,165 +420,19 @@ export default function Studio() {
       ) : null}
 
       {stage === 'wizard' ? (
-        <div className="grid gap-4 xl:grid-cols-[1.15fr_0.85fr]">
-          <MacPanel title="Agent identity" detail="Keep setup practical: name, role summary, and one primary class that defines the full package.">
-            <div className="grid gap-4 md:grid-cols-2">
-              <label className="block text-sm">
-                <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Agent name
-                </span>
-                <input
-                  value={draft.name}
-                  onChange={(event) =>
-                    setDraft((prev) => ({
-                      ...prev,
-                      name: event.target.value,
-                      id: slugify(event.target.value) || prev.id,
-                    }))
-                  }
-                  className={panelFieldClass(isDesktopMac)}
-                />
-              </label>
-
-              <label className="block text-sm">
-                <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Agent id
-                </span>
-                <input
-                  value={draft.id}
-                  onChange={(event) =>
-                    setDraft((prev) => ({ ...prev, id: slugify(event.target.value) }))
-                  }
-                  className={panelFieldClass(isDesktopMac)}
-                />
-              </label>
-            </div>
-
-            <label className="mt-4 block text-sm">
-              <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                Role summary
-              </span>
-              <textarea
-                rows={4}
-                value={draft.overrides.summary ?? ''}
-                onChange={(event) =>
-                  setDraft((prev) => ({
-                    ...prev,
-                    overrides: { ...prev.overrides, summary: event.target.value },
-                  }))
-                }
-                className={panelFieldClass(isDesktopMac)}
-              />
-            </label>
-
-            <div className="mt-6">
-              <div className="flex items-center gap-2">
-                <h3 className="text-sm font-semibold">Primary class</h3>
-                <MacBadge tone="accent">Required</MacBadge>
-              </div>
-              <div className="mt-3 grid gap-3">
-                {classes.map((classItem) => (
-                  <ClassChoiceCard
-                    key={classItem.id}
-                    classItem={classItem}
-                    selected={draft.primary_class === classItem.id}
-                    disabled={classItem.status === 'coming_soon'}
-                    onClick={() =>
-                      setDraft((prev) => ({
-                        ...prev,
-                        primary_class: classItem.id,
-                      }))
-                    }
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-6 flex flex-wrap gap-3">
-              <button
-                type="button"
-                disabled={busy}
-                onClick={handleCreateAgent}
-                className={[actionButtonClass(true, isDesktopMac), busy ? 'opacity-60' : ''].join(' ')}
-              >
-                {busy ? 'Creating agent...' : 'Finish Setup'}
-                <ArrowRight className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  clearWizardMode();
-                  setStage('intro');
-                }}
-                className={actionButtonClass(false, isDesktopMac)}
-              >
-                Cancel
-              </button>
-            </div>
-          </MacPanel>
-
-          <div className="grid gap-4">
-            <MacPanel title="Setup flow" detail="Short, sequential, and explicit.">
-              <div className="grid gap-3">
-                {[
-                  'Check provider and runtime readiness',
-                  'Name the agent and define its role summary',
-                  'Select a primary class for default behavior',
-                  'Confirm startup ownership and finish',
-                ].map((step, index) => (
-                  <div
-                    key={step}
-                    className="flex items-start gap-3 rounded-[1.2rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] px-4 py-3"
-                  >
-                    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--shell-selection)] text-xs font-semibold">
-                      {index + 1}
-                    </div>
-                    <p className="text-sm">{step}</p>
-                  </div>
-                ))}
-              </div>
-            </MacPanel>
-
-            <MacPanel title="Live preview" detail="This summary feeds the agent roster, startup target, and detail view.">
-              <div className="grid gap-3">
-                <MacStat
-                  label="Primary"
-                  value={
-                    classes.find((item) => item.id === draft.primary_class)?.name ?? 'Unassigned'
-                  }
-                  detail="Default decision-making lens"
-                />
-              </div>
-
-              <div className="mt-4 rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
-                <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Soul voice blend
-                </p>
-                <p className="mt-2 text-sm text-[var(--shell-muted)]">
-                  {wizardClassPreview
-                    .map((item) => item.default_soul_overlay.voice)
-                    .filter(Boolean)
-                    .join(' / ') || 'Base voice'}
-                </p>
-              </div>
-
-              <div className="mt-4 rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
-                <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Tool grants
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {Array.from(new Set(wizardClassPreview.flatMap((item) => item.tool_grants)))
-                    .slice(0, 8)
-                    .map((tool) => (
-                      <MacBadge key={tool} tone="neutral">
-                        {tool}
-                      </MacBadge>
-                    ))}
-                </div>
-              </div>
-            </MacPanel>
-          </div>
-        </div>
+        <AgentSetupWizard
+          classes={classes}
+          draft={draft}
+          setDraft={setDraft}
+          busy={busy}
+          onSubmit={handleCreateAgent}
+          onCancel={() => {
+            clearWizardMode();
+            setStage('intro');
+          }}
+          bootstrap={bootstrap}
+          mode="studio"
+        />
       ) : null}
 
       {stage === 'studio' ? (
