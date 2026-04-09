@@ -1,19 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { Dispatch, SetStateAction } from 'react';
 import { ArrowLeft, ArrowRight, CheckCircle2, Rocket, ShieldCheck, Sparkles } from 'lucide-react';
-import {
-  MacBadge,
-  MacEmptyState,
-  MacPanel,
-  MacStat,
-} from '@/components/macos/MacPrimitives';
+import { MacBadge, MacEmptyState, MacPanel, MacStat } from '@/components/macos/MacPrimitives';
 import { useShell } from '@/components/shell/ShellProvider';
+import { applySetupConfig, parseSetupConfig, type SetupConfigDraft } from '@/lib/setupConfig';
 import socialMediaManagerArt from '@/assets/class-social-media-manager.png';
 import salesArt from '@/assets/class-sales.png';
 import vaArt from '@/assets/class-va.png';
 import type { AgentClassManifest, AgentProfile, OnboardingBootstrapResponse } from '@/types/api';
 
-type WizardStepId = 'role' | 'identity' | 'startup' | 'review';
+type WizardStepId = 'focus' | 'access' | 'channels' | 'name' | 'launch' | 'confirm';
 
 interface AgentSetupWizardProps {
   classes: AgentClassManifest[];
@@ -24,34 +20,63 @@ interface AgentSetupWizardProps {
   onCancel: () => void;
   bootstrap?: OnboardingBootstrapResponse | null;
   mode?: 'setup' | 'studio';
+  configText?: string | null;
+  onSaveConfig?: (nextConfig: string) => Promise<void>;
 }
 
 const WIZARD_STEPS: Array<{ id: WizardStepId; label: string; title: string; detail: string }> = [
   {
-    id: 'role',
-    label: 'Role',
-    title: 'What should this agent focus on?',
-    detail: 'Pick the kind of work this agent should own first. You can add more agents later.',
+    id: 'focus',
+    label: 'Focus',
+    title: 'What should this assistant help with first?',
+    detail: 'Pick the kind of work you want covered from day one. You can always add more agents later.',
   },
   {
-    id: 'identity',
-    label: 'Identity',
-    title: 'Name the agent and shape the brief.',
-    detail: 'Keep it simple. This should read like the setup screen of a personal computer, not a configuration file.',
+    id: 'access',
+    label: 'Access',
+    title: 'How should this assistant access a model?',
+    detail: 'Choose whether to use your existing setup, a DeepSeek API key, or an official Codex session.',
   },
   {
-    id: 'startup',
-    label: 'Startup',
-    title: 'Decide how this agent should start.',
-    detail: 'Choose whether this agent should become the default profile when Agent HQ opens.',
+    id: 'channels',
+    label: 'Channels',
+    title: 'Where should this assistant be reachable?',
+    detail: 'Turn on the channels you actually plan to use. Telegram belongs here, not buried in raw config.',
   },
   {
-    id: 'review',
-    label: 'Review',
-    title: 'Review the setup before creating the agent.',
-    detail: 'Confirm the role, startup behavior, and operating style, then finish in one click.',
+    id: 'name',
+    label: 'Name',
+    title: 'Give the assistant a name and a short brief.',
+    detail: 'This is the part that should feel personal: what to call the assistant and how to describe her job.',
+  },
+  {
+    id: 'launch',
+    label: 'Launch',
+    title: 'Should she open as your default assistant?',
+    detail: 'Choose whether this should be your everyday default or a specialist you open only when needed.',
+  },
+  {
+    id: 'confirm',
+    label: 'Confirm',
+    title: 'Review the setup and create the assistant.',
+    detail: 'One last pass so you can confirm the starter setup before Agent HQ creates the profile.',
   },
 ];
+
+const FOCUS_COPY: Record<string, { headline: string; prompt: string }> = {
+  va: {
+    headline: 'Stay on top of admin and follow-through',
+    prompt: 'Best for inboxes, scheduling, reminders, practical research, and daily organization.',
+  },
+  social_media_manager: {
+    headline: 'Run content and social momentum',
+    prompt: 'Best for planning posts, writing drafts, managing campaigns, and keeping channels active.',
+  },
+  sales: {
+    headline: 'Build and qualify pipeline',
+    prompt: 'Best for prospecting, target research, outreach prep, and keeping handoffs organized.',
+  },
+};
 
 function classArtwork(classId: string): string | null {
   switch (classId) {
@@ -87,18 +112,19 @@ function actionButtonClass(primary: boolean, isDesktopMac: boolean): string {
       ? 'inline-flex items-center gap-2 rounded-full bg-[#0a84ff] px-5 py-2.5 text-sm font-semibold text-white shadow-[0_12px_24px_rgba(10,132,255,0.22)] transition hover:brightness-105 disabled:opacity-50'
       : 'inline-flex items-center gap-2 rounded-full bg-sky-500 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-400 disabled:opacity-50';
   }
+
   return isDesktopMac
     ? 'inline-flex items-center gap-2 rounded-full border border-[rgba(15,23,42,0.08)] bg-white/70 px-5 py-2.5 text-sm font-semibold text-slate-800 transition hover:bg-white dark:border-white/10 dark:bg-white/6 dark:text-white disabled:opacity-50'
     : 'inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/5 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-white/10 disabled:opacity-50';
 }
 
-function choiceCardClass(selected: boolean, disabled = false): string {
+function choiceCardClass(selected: boolean): string {
   return [
     'w-full rounded-[1.25rem] border px-4 py-4 text-left transition',
     selected
       ? 'border-sky-400/50 bg-sky-500/10 shadow-[0_12px_26px_rgba(56,189,248,0.12)]'
       : 'border-[var(--shell-border)] bg-[var(--shell-panel)] hover:bg-[var(--shell-selection)]',
-    disabled ? 'cursor-not-allowed opacity-55' : 'cursor-pointer',
+    'cursor-pointer',
   ].join(' ');
 }
 
@@ -115,22 +141,31 @@ export default function AgentSetupWizard({
   onCancel,
   bootstrap,
   mode = 'setup',
+  configText,
+  onSaveConfig,
 }: AgentSetupWizardProps) {
   const { isDesktopMac } = useShell();
   const [stepIndex, setStepIndex] = useState(0);
+  const [setupError, setSetupError] = useState<string | null>(null);
   const activeStep = WIZARD_STEPS[stepIndex]!;
-
-  const activeClass = useMemo(
-    () => classes.find((item) => item.id === draft.primary_class),
-    [classes, draft.primary_class],
-  );
+  const [configDraft, setConfigDraft] = useState<SetupConfigDraft | null>(null);
 
   const readyClasses = useMemo(
     () => classes.filter((item) => item.status === 'active'),
     [classes],
   );
 
-  const startupChoice = draft.launch_on_startup ? 'startup' : 'manual';
+  const activeClass = useMemo(() => {
+    const preferred = readyClasses.find((item) => item.id === draft.primary_class);
+    return preferred ?? readyClasses[0] ?? null;
+  }, [draft.primary_class, readyClasses]);
+
+  const startupChoice = draft.launch_on_startup ? 'default' : 'manual';
+
+  useEffect(() => {
+    if (!configText) return;
+    setConfigDraft(parseSetupConfig(configText));
+  }, [configText]);
 
   useEffect(() => {
     if (!draft.id?.trim() || draft.id === 'agent') {
@@ -142,6 +177,15 @@ export default function AgentSetupWizard({
   }, [draft.id, draft.name, setDraft]);
 
   useEffect(() => {
+    if (activeClass && draft.primary_class !== activeClass.id) {
+      setDraft((prev) => ({
+        ...prev,
+        primary_class: activeClass.id,
+      }));
+    }
+  }, [activeClass, draft.primary_class, setDraft]);
+
+  useEffect(() => {
     if ((!draft.overrides.summary || draft.overrides.summary.trim() === '') && activeClass) {
       setDraft((prev) => ({
         ...prev,
@@ -150,30 +194,52 @@ export default function AgentSetupWizard({
     }
   }, [activeClass, draft.overrides.summary, setDraft]);
 
+  const stepCanContinue = useMemo(() => {
+    switch (activeStep.id) {
+      case 'focus':
+        return readyClasses.length > 0 && Boolean(activeClass);
+      case 'access':
+        if (!configDraft) return false;
+        if (configDraft.accessMode === 'existing') {
+          return Boolean(configDraft.provider && configDraft.model);
+        }
+        if (configDraft.accessMode === 'deepseek') {
+          return Boolean(
+            configDraft.model.trim() &&
+            (configDraft.apiKey.trim() || configDraft.hasExistingApiKey),
+          );
+        }
+        if (configDraft.accessMode === 'codex') {
+          return Boolean(configDraft.model.trim());
+        }
+        return false;
+      case 'channels':
+        if (!configDraft) return false;
+        return !configDraft.telegramEnabled || Boolean(
+          (configDraft.telegramBotToken.trim() || configDraft.hasExistingTelegramToken) &&
+          configDraft.telegramAllowedUsers.trim(),
+        );
+      case 'name':
+        return draft.name.trim().length > 0 && draft.id.trim().length > 0;
+      case 'launch':
+      case 'confirm':
+        return true;
+      default:
+        return false;
+    }
+  }, [activeClass, activeStep.id, configDraft, draft.id, draft.name, readyClasses.length]);
+
   const classSignals = useMemo(() => {
     if (!activeClass) {
       return { tools: [], guardrails: [], channels: [] as string[] };
     }
+
     return {
       tools: activeClass.tool_grants.slice(0, 8),
       guardrails: activeClass.guardrails.slice(0, 3),
       channels: activeClass.channel_affinities.slice(0, 3),
     };
   }, [activeClass]);
-
-  const stepCanContinue = useMemo(() => {
-    switch (activeStep.id) {
-      case 'role':
-        return Boolean(activeClass);
-      case 'identity':
-        return draft.name.trim().length > 0 && draft.id.trim().length > 0;
-      case 'startup':
-      case 'review':
-        return true;
-      default:
-        return false;
-    }
-  }, [activeClass, activeStep.id, draft.id, draft.name]);
 
   const handleNext = () => {
     if (!stepCanContinue) return;
@@ -185,18 +251,18 @@ export default function AgentSetupWizard({
       onCancel();
       return;
     }
+
     setStepIndex((prev) => Math.max(prev - 1, 0));
   };
 
   const handleClassSelect = (classItem: AgentClassManifest) => {
-    if (classItem.status !== 'active') return;
     setDraft((prev) => ({
       ...prev,
       primary_class: classItem.id,
       overrides: {
         ...prev.overrides,
         summary:
-          !prev.overrides.summary || prev.overrides.summary === inferSummaryForClass(activeClass)
+          !prev.overrides.summary || prev.overrides.summary === inferSummaryForClass(activeClass ?? undefined)
             ? classItem.default_role_summary
             : prev.overrides.summary,
       },
@@ -204,20 +270,29 @@ export default function AgentSetupWizard({
   };
 
   const handleSubmit = async () => {
+    setSetupError(null);
+    if (configDraft && configText && onSaveConfig) {
+      const nextConfig = applySetupConfig(configText, configDraft);
+      await onSaveConfig(nextConfig);
+    }
     await onSubmit();
   };
 
+  const selectedFocus = activeClass ? FOCUS_COPY[activeClass.id] : null;
+
   return (
     <div className="grid gap-4 xl:grid-cols-[1.12fr_0.88fr]">
-      <MacPanel
-        title={activeStep.title}
-        detail={activeStep.detail}
-        className="min-h-[34rem]"
-      >
-        <div className="mb-6 grid gap-3 md:grid-cols-4">
+      <MacPanel title={activeStep.title} detail={activeStep.detail} className="min-h-[34rem]">
+        {setupError ? (
+          <div className="mb-4 rounded-[1.4rem] border border-rose-300/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-700 dark:text-rose-200">
+            {setupError}
+          </div>
+        ) : null}
+        <div className="mb-6 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
           {WIZARD_STEPS.map((step, index) => {
             const state =
               index < stepIndex ? 'done' : index === stepIndex ? 'current' : 'upcoming';
+
             return (
               <div
                 key={step.id}
@@ -245,63 +320,229 @@ export default function AgentSetupWizard({
           })}
         </div>
 
-        {activeStep.id === 'role' ? (
-          <div className="space-y-4">
+        {activeStep.id === 'focus' ? (
+          readyClasses.length > 0 ? (
             <div className="grid gap-3">
-              {readyClasses.map((classItem, index) => (
-                <button
-                  key={classItem.id}
-                  type="button"
-                  onClick={() => handleClassSelect(classItem)}
-                  className={choiceCardClass(draft.primary_class === classItem.id)}
-                >
-                  <div className="flex items-start gap-4">
-                    {classArtwork(classItem.id) ? (
-                      <img
-                        src={classArtwork(classItem.id) ?? undefined}
-                        alt={classItem.name}
-                        className="h-16 w-16 shrink-0 rounded-[1rem] object-contain p-2 studio-art-frame"
-                      />
-                    ) : (
-                      <div className="h-16 w-16 shrink-0 rounded-[1rem] bg-[var(--shell-selection)]" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <h3 className="text-sm font-semibold">{classItem.name}</h3>
-                        <MacBadge tone="accent">{index === 0 ? 'Recommended' : 'Available now'}</MacBadge>
-                        <MacBadge tone="neutral">{classItem.fantasy_theme}</MacBadge>
+              {readyClasses.map((classItem) => {
+                const copy = FOCUS_COPY[classItem.id];
+                return (
+                  <button
+                    key={classItem.id}
+                    type="button"
+                    onClick={() => handleClassSelect(classItem)}
+                    className={choiceCardClass(draft.primary_class === classItem.id)}
+                  >
+                    <div className="flex items-start gap-4">
+                      {classArtwork(classItem.id) ? (
+                        <img
+                          src={classArtwork(classItem.id) ?? undefined}
+                          alt={classItem.name}
+                          className="h-16 w-16 shrink-0 rounded-[1rem] object-contain p-2 studio-art-frame"
+                        />
+                      ) : (
+                        <div className="h-16 w-16 shrink-0 rounded-[1rem] bg-[var(--shell-selection)]" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <h3 className="text-base font-semibold">
+                            {copy?.headline ?? classItem.name}
+                          </h3>
+                          <MacBadge tone="accent">
+                            {classItem.id === 'va' ? 'Best first assistant' : 'Starter option'}
+                          </MacBadge>
+                        </div>
+                        <p className="mt-2 text-sm text-[var(--shell-muted)]">
+                          {copy?.prompt ?? classItem.description}
+                        </p>
+                        <p className="mt-3 text-sm font-medium">{classItem.default_role_summary}</p>
                       </div>
-                      <p className="mt-2 text-sm text-[var(--shell-muted)]">{classItem.description}</p>
-                      <p className="mt-3 text-sm font-medium">{classItem.default_role_summary}</p>
                     </div>
-                  </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
             </div>
+          ) : (
+            <MacEmptyState
+              icon={<Sparkles className="h-7 w-7" />}
+              title="No starter options available"
+              description="Agent HQ could not load any starter assistant templates, so setup cannot continue yet."
+            />
+          )
+        ) : null}
 
-            {classes.some((item) => item.status === 'coming_soon') ? (
+        {activeStep.id === 'access' && configDraft ? (
+          <div className="space-y-4">
+            {[
+              {
+                id: 'existing',
+                title: 'Use current setup',
+                detail: 'Keep the model access that Agent HQ already has configured.',
+              },
+              {
+                id: 'deepseek',
+                title: 'Use a DeepSeek API key',
+                detail: 'Good when you want to paste a key directly and run this assistant on DeepSeek.',
+              },
+              {
+                id: 'codex',
+                title: 'Use my Codex session',
+                detail: 'Uses the official Codex session on this Mac. Agent HQ does not do direct ChatGPT OAuth itself.',
+              },
+            ].map((option) => (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() =>
+                  setConfigDraft((prev) =>
+                    prev
+                      ? {
+                          ...prev,
+                          accessMode: option.id as SetupConfigDraft['accessMode'],
+                          provider:
+                            option.id === 'codex'
+                              ? 'openai-codex'
+                              : option.id === 'deepseek'
+                                ? 'deepseek'
+                                : prev.provider,
+                          model:
+                            option.id === 'codex'
+                              ? prev.model || 'gpt-5-codex'
+                              : option.id === 'deepseek'
+                                ? prev.model || 'deepseek-chat'
+                                : prev.model,
+                        }
+                      : prev,
+                  )
+                }
+                className={choiceCardClass(configDraft.accessMode === option.id)}
+              >
+                <h3 className="text-sm font-semibold">{option.title}</h3>
+                <p className="mt-2 text-sm text-[var(--shell-muted)]">{option.detail}</p>
+              </button>
+            ))}
+
+            {configDraft.accessMode !== 'existing' ? (
+              <div className="grid gap-4 md:grid-cols-2">
+                <label className="block text-sm">
+                  <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                    Provider
+                  </span>
+                  <input
+                    value={configDraft.provider}
+                    onChange={(event) =>
+                      setConfigDraft((prev) => (prev ? { ...prev, provider: event.target.value } : prev))
+                    }
+                    className={panelFieldClass(isDesktopMac)}
+                    placeholder="deepseek or openai-codex"
+                  />
+                </label>
+
+                <label className="block text-sm">
+                  <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                    Model
+                  </span>
+                  <input
+                    value={configDraft.model}
+                    onChange={(event) =>
+                      setConfigDraft((prev) => (prev ? { ...prev, model: event.target.value } : prev))
+                    }
+                    className={panelFieldClass(isDesktopMac)}
+                    placeholder={configDraft.accessMode === 'codex' ? 'gpt-5-codex' : 'deepseek-chat'}
+                  />
+                </label>
+              </div>
+            ) : null}
+
+            {configDraft.accessMode === 'deepseek' ? (
+              <label className="block text-sm">
+                <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                  DeepSeek API key
+                </span>
+                <input
+                  value={configDraft.apiKey}
+                  onChange={(event) =>
+                    setConfigDraft((prev) => (prev ? { ...prev, apiKey: event.target.value } : prev))
+                  }
+                  className={panelFieldClass(isDesktopMac)}
+                  placeholder={configDraft.hasExistingApiKey ? 'Already configured' : 'sk-...'}
+                />
+              </label>
+            ) : null}
+
+            {configDraft.accessMode === 'codex' ? (
               <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
                 <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  More classes later
+                  Codex session
                 </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {classes
-                    .filter((item) => item.status === 'coming_soon')
-                    .map((item) => (
-                      <MacBadge key={item.id} tone="neutral">{item.name}</MacBadge>
-                    ))}
-                </div>
+                <p className="mt-2 text-sm text-[var(--shell-muted)]">
+                  This path expects the official `codex` client to be installed and already logged in on this Mac.
+                </p>
               </div>
             ) : null}
           </div>
         ) : null}
 
-        {activeStep.id === 'identity' ? (
+        {activeStep.id === 'channels' && configDraft ? (
+          <div className="space-y-4">
+            <button
+              type="button"
+              onClick={() =>
+                setConfigDraft((prev) =>
+                  prev ? { ...prev, telegramEnabled: !prev.telegramEnabled } : prev,
+                )
+              }
+              className={choiceCardClass(configDraft.telegramEnabled)}
+            >
+              <h3 className="text-sm font-semibold">Telegram</h3>
+              <p className="mt-2 text-sm text-[var(--shell-muted)]">
+                Connect this assistant to a Telegram bot and whitelist who can talk to her.
+              </p>
+            </button>
+
+            {configDraft.telegramEnabled ? (
+              <div className="grid gap-4">
+                <label className="block text-sm">
+                  <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                    Bot token
+                  </span>
+                  <input
+                    value={configDraft.telegramBotToken}
+                    onChange={(event) =>
+                      setConfigDraft((prev) =>
+                        prev ? { ...prev, telegramBotToken: event.target.value } : prev,
+                      )
+                    }
+                    className={panelFieldClass(isDesktopMac)}
+                    placeholder={configDraft.hasExistingTelegramToken ? 'Already configured' : '123456:ABC...'}
+                  />
+                </label>
+
+                <label className="block text-sm">
+                  <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                    Allowed users
+                  </span>
+                  <input
+                    value={configDraft.telegramAllowedUsers}
+                    onChange={(event) =>
+                      setConfigDraft((prev) =>
+                        prev ? { ...prev, telegramAllowedUsers: event.target.value } : prev,
+                      )
+                    }
+                    className={panelFieldClass(isDesktopMac)}
+                    placeholder="1703898290, 123456789"
+                  />
+                </label>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {activeStep.id === 'name' ? (
           <div className="space-y-5">
             <div className="grid gap-4 md:grid-cols-2">
               <label className="block text-sm">
                 <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Agent name
+                  Assistant name
                 </span>
                 <input
                   value={draft.name}
@@ -319,7 +560,7 @@ export default function AgentSetupWizard({
 
               <label className="block text-sm">
                 <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Agent id
+                  Internal id
                 </span>
                 <input
                   value={draft.id}
@@ -334,7 +575,7 @@ export default function AgentSetupWizard({
 
             <label className="block text-sm">
               <span className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                Role summary
+                What should she help with?
               </span>
               <textarea
                 rows={5}
@@ -346,34 +587,34 @@ export default function AgentSetupWizard({
                   }))
                 }
                 className={panelFieldClass(isDesktopMac)}
-                placeholder="Describe the type of work this agent should own."
+                placeholder="Describe the work this assistant should own."
               />
             </label>
 
             <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
               <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                What this controls
+                Setup note
               </p>
               <p className="mt-2 text-sm text-[var(--shell-muted)]">
-                The name becomes the roster label, and the summary becomes the short brief used across setup, dashboards, and startup ownership.
+                Keep the brief practical. It should read like something you would say out loud to a new assistant.
               </p>
             </div>
           </div>
         ) : null}
 
-        {activeStep.id === 'startup' ? (
+        {activeStep.id === 'launch' ? (
           <div className="space-y-4">
             {[
               {
-                id: 'startup',
-                title: 'Launch this agent by default',
-                detail: 'Best for a flagship everyday agent. Agent HQ will treat this profile as the startup owner.',
+                id: 'default',
+                title: 'Yes, make her my default assistant',
+                detail: 'Agent HQ will open this profile first and treat it as the main everyday assistant.',
                 icon: Rocket,
               },
               {
                 id: 'manual',
-                title: 'Keep startup manual',
-                detail: 'Best if this is a specialist agent you only want to use sometimes.',
+                title: 'No, keep her as a specialist',
+                detail: 'Good when this assistant is focused on one area and should not replace the main default profile.',
                 icon: ShieldCheck,
               },
             ].map(({ id, title, detail, icon: Icon }) => (
@@ -381,7 +622,7 @@ export default function AgentSetupWizard({
                 key={id}
                 type="button"
                 onClick={() =>
-                  setDraft((prev) => ({ ...prev, launch_on_startup: id === 'startup' }))
+                  setDraft((prev) => ({ ...prev, launch_on_startup: id === 'default' }))
                 }
                 className={choiceCardClass(startupChoice === id)}
               >
@@ -400,51 +641,37 @@ export default function AgentSetupWizard({
             {bootstrap?.active_profile ? (
               <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
                 <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Current lead profile
+                  Current default
                 </p>
                 <p className="mt-2 text-sm text-[var(--shell-muted)]">
-                  {bootstrap.active_profile.profile.name} is currently the default workspace owner.
+                  {bootstrap.active_profile.profile.name} is currently the assistant that opens first.
                 </p>
               </div>
             ) : null}
           </div>
         ) : null}
 
-        {activeStep.id === 'review' ? (
+        {activeStep.id === 'confirm' ? (
           <div className="space-y-4">
             <div className="grid gap-3 md:grid-cols-2">
-              <MacStat label="Agent" value={draft.name || 'Unnamed'} detail={draft.id || 'No id yet'} />
+              <MacStat label="Assistant" value={draft.name || 'Unnamed'} detail={draft.id || 'No id yet'} />
               <MacStat
-                label="Startup"
-                value={draft.launch_on_startup ? 'Default launch' : 'Manual only'}
-                detail="Desktop startup behavior"
+                label="Launch behavior"
+                value={draft.launch_on_startup ? 'Default assistant' : 'Specialist only'}
+                detail="How Agent HQ should open"
               />
             </div>
 
             <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
               <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                Role summary
+                Focus
               </p>
-              <p className="mt-2 text-sm">{draft.overrides.summary ?? ''}</p>
-            </div>
-
-            <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
-              <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                Selected class
+              <p className="mt-2 text-sm font-semibold">
+                {selectedFocus?.headline ?? activeClass?.name ?? 'Not selected'}
               </p>
-              <div className="mt-3 flex items-start gap-4">
-                {activeClass && classArtwork(activeClass.id) ? (
-                  <img
-                    src={classArtwork(activeClass.id) ?? undefined}
-                    alt={activeClass.name}
-                    className="h-16 w-16 rounded-[1rem] object-contain p-2 studio-art-frame"
-                  />
-                ) : null}
-                <div>
-                  <h3 className="text-sm font-semibold">{activeClass?.name ?? 'Unassigned'}</h3>
-                  <p className="mt-2 text-sm text-[var(--shell-muted)]">{activeClass?.description}</p>
-                </div>
-              </div>
+              <p className="mt-2 text-sm text-[var(--shell-muted)]">
+                {draft.overrides.summary ?? ''}
+              </p>
             </div>
           </div>
         ) : null}
@@ -460,14 +687,18 @@ export default function AgentSetupWizard({
             {stepIndex === 0 ? 'Cancel' : 'Back'}
           </button>
 
-          {activeStep.id === 'review' ? (
+          {activeStep.id === 'confirm' ? (
             <button
               type="button"
-              onClick={() => void handleSubmit()}
+              onClick={() => {
+                void handleSubmit().catch((error) => {
+                  setSetupError(error instanceof Error ? error.message : 'Failed to finish setup');
+                });
+              }}
               className={actionButtonClass(true, isDesktopMac)}
-              disabled={busy}
+              disabled={busy || readyClasses.length === 0}
             >
-              {busy ? 'Creating agent...' : mode === 'studio' ? 'Create Agent' : 'Finish Setup'}
+              {busy ? 'Creating assistant...' : mode === 'studio' ? 'Create Assistant' : 'Finish Setup'}
               <ArrowRight className="h-4 w-4" />
             </button>
           ) : (
@@ -485,21 +716,50 @@ export default function AgentSetupWizard({
       </MacPanel>
 
       <div className="grid gap-4">
-        <MacPanel title="Live preview" detail="A setup assistant should explain what each choice changes before you commit.">
+        <MacPanel
+          title="Preview"
+          detail="This panel should tell you what will change before you move forward."
+        >
           {activeClass ? (
             <div className="space-y-4">
               <MacStat
-                label="Primary class"
-                value={activeClass.name}
-                detail={activeClass.fantasy_theme}
+                label="Starter"
+                value={selectedFocus?.headline ?? activeClass.name}
+                detail={activeClass.default_identity_overlay.role_title ?? activeClass.fantasy_theme}
               />
+
+              {configDraft ? (
+                <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
+                  <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                    Model access
+                  </p>
+                  <p className="mt-2 text-sm text-[var(--shell-muted)]">
+                    {configDraft.accessMode === 'deepseek'
+                      ? `DeepSeek ${configDraft.model || 'deepseek-chat'}`
+                      : configDraft.accessMode === 'codex'
+                        ? `Codex session ${configDraft.model || 'gpt-5-codex'}`
+                        : `${configDraft.provider || 'Existing provider'} ${configDraft.model || ''}`.trim()}
+                  </p>
+                </div>
+              ) : null}
+
+              {configDraft?.telegramEnabled ? (
+                <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
+                  <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
+                    Channels
+                  </p>
+                  <p className="mt-2 text-sm text-[var(--shell-muted)]">
+                    Telegram for {configDraft.telegramAllowedUsers || 'configured users'}
+                  </p>
+                </div>
+              ) : null}
 
               <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
                 <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Soul voice
+                  What you are setting up
                 </p>
                 <p className="mt-2 text-sm text-[var(--shell-muted)]">
-                  {activeClass.default_soul_overlay.voice ?? 'Base voice'}
+                  {selectedFocus?.prompt ?? activeClass.description}
                 </p>
               </div>
 
@@ -520,7 +780,7 @@ export default function AgentSetupWizard({
 
               <div className="rounded-[1.25rem] border border-[var(--shell-border)] bg-[var(--shell-panel)] p-4">
                 <p className="text-[0.72rem] uppercase tracking-[0.18em] text-[var(--shell-muted)]">
-                  Tool grants
+                  Enabled tools
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   {classSignals.tools.map((tool) => (
@@ -543,16 +803,19 @@ export default function AgentSetupWizard({
           ) : (
             <MacEmptyState
               icon={<Sparkles className="h-7 w-7" />}
-              title="Pick a role to continue"
-              description="Each step will show what changes before you move forward."
+              title="Choose a starter to continue"
+              description="The first screen should always give you at least one real starter option to choose from."
             />
           )}
         </MacPanel>
 
-        <MacPanel title="Why this flow" detail="This setup now behaves like a device setup assistant: one decision per screen, with a clear next action.">
+        <MacPanel
+          title="What changed"
+          detail="This setup should now include access and channel setup, not just agent labeling."
+        >
           <div className="space-y-3 text-sm text-[var(--shell-muted)]">
-            <p>Choose the kind of work first, then give the agent a name, then decide startup ownership.</p>
-            <p>The last screen is just a confirmation pass, not another place to discover hidden settings.</p>
+            <p>You choose the type of help, then how the assistant gets model access, then which channels should be connected, then her identity and default behavior.</p>
+            <p>The setup no longer pretends the assistant is ready before provider access and Telegram are configured.</p>
           </div>
         </MacPanel>
       </div>

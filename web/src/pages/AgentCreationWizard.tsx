@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Sparkles } from 'lucide-react';
-import { completeOnboarding, createAgent, getClasses } from '@/lib/api';
+import { completeOnboarding, createAgent, getClasses, getConfig, putConfig } from '@/lib/api';
+import { getStarterClassesFallback } from '@/lib/starterClasses';
 import { useAgentContext } from '@/contexts/AgentContext';
 import { MacEmptyState, MacPage, MacPanel } from '@/components/macos/MacPrimitives';
 import AgentSetupWizard from '@/components/onboarding/AgentSetupWizard';
@@ -48,13 +49,30 @@ export default function AgentCreationWizard() {
   const [draft, setDraft] = useState<AgentProfile>(defaultProfile());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [loadingClasses, setLoadingClasses] = useState(true);
+  const [configText, setConfigText] = useState<string | null>(null);
 
   useEffect(() => {
     getClasses()
-      .then(setClasses)
-      .catch(() => {})
+      .then((items) => {
+        const resolved = items.length > 0 ? items : getStarterClassesFallback();
+        setClasses(resolved);
+        if (items.length === 0) {
+          setNotice('Setup is using local starter templates because the live template list came back empty.');
+        }
+      })
+      .catch(() => {
+        setClasses(getStarterClassesFallback());
+        setNotice('Setup is using local starter templates because the live template list could not be loaded.');
+      })
       .finally(() => setLoadingClasses(false));
+  }, []);
+
+  useEffect(() => {
+    getConfig()
+      .then((value) => setConfigText(typeof value === 'string' ? value : JSON.stringify(value, null, 2)))
+      .catch(() => setConfigText(null));
   }, []);
 
   const handleCreate = async () => {
@@ -101,6 +119,11 @@ export default function AgentCreationWizard() {
           {error}
         </div>
       ) : null}
+      {notice ? (
+        <div className="mb-4 rounded-[1.4rem] border border-amber-300/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-800 dark:text-amber-100">
+          {notice}
+        </div>
+      ) : null}
 
       <AgentSetupWizard
         classes={classes}
@@ -110,6 +133,11 @@ export default function AgentCreationWizard() {
         onSubmit={handleCreate}
         onCancel={() => navigate('/agents')}
         mode="setup"
+        configText={configText}
+        onSaveConfig={async (nextConfig) => {
+          await putConfig(nextConfig);
+          setConfigText(nextConfig);
+        }}
       />
     </MacPage>
   );

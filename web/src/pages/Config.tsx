@@ -15,6 +15,7 @@ import {
   putAgentSocialAccounts,
   putConfig,
 } from '@/lib/api';
+import { applySetupConfig, parseSetupConfig, type SetupConfigDraft } from '@/lib/setupConfig';
 import type { AgentSocialAccount, AgentXIntegrationStatus } from '@/types/api';
 
 function normalizeAccounts(accounts: AgentSocialAccount[]): AgentSocialAccount[] {
@@ -38,11 +39,14 @@ export default function Config() {
   const [bootstrappingAgent, setBootstrappingAgent] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [setupDraft, setSetupDraft] = useState<SetupConfigDraft | null>(null);
 
   useEffect(() => {
     Promise.all([getConfig(), getAgentSocialAccounts()])
       .then(([configData, accountData]) => {
-        setConfig(typeof configData === 'string' ? configData : JSON.stringify(configData, null, 2));
+        const configText = typeof configData === 'string' ? configData : JSON.stringify(configData, null, 2);
+        setConfig(configText);
+        setSetupDraft(parseSetupConfig(configText));
         setAccounts(normalizeAccounts(accountData.accounts));
         setXStatuses(
           Object.fromEntries(accountData.x_status.map((status) => [status.agent_name, status])),
@@ -61,6 +65,24 @@ export default function Config() {
       setSuccess('Configuration saved successfully.');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to save configuration');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleSaveSetup = async () => {
+    if (!setupDraft) return;
+    setSaving(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      const nextConfig = applySetupConfig(config, setupDraft);
+      await putConfig(nextConfig);
+      setConfig(nextConfig);
+      setSetupDraft(parseSetupConfig(nextConfig));
+      setSuccess('Runtime and channel setup saved successfully.');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Failed to save setup');
     } finally {
       setSaving(false);
     }
@@ -194,6 +216,145 @@ export default function Config() {
           <span className="text-sm text-red-300">{error}</span>
         </div>
       )}
+
+      {setupDraft ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Model Access</h3>
+              <p className="text-sm text-gray-400 mt-1">
+                Choose API-key setup or the official Codex session without editing raw TOML.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              {[
+                ['existing', 'Use current setup'],
+                ['deepseek', 'DeepSeek API key'],
+                ['codex', 'Codex session'],
+              ].map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() =>
+                    setSetupDraft((prev) =>
+                      prev ? { ...prev, accessMode: value as SetupConfigDraft['accessMode'] } : prev,
+                    )
+                  }
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition-colors ${
+                    setupDraft.accessMode === value
+                      ? 'border-blue-500 bg-blue-600/15 text-white'
+                      : 'border-gray-700 bg-gray-950 text-gray-300 hover:bg-gray-800'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="space-y-1">
+                <span className="text-xs uppercase tracking-wide text-gray-500">Provider</span>
+                <input
+                  value={setupDraft.provider}
+                  onChange={(e) =>
+                    setSetupDraft((prev) => (prev ? { ...prev, provider: e.target.value } : prev))
+                  }
+                  className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                />
+              </label>
+              <label className="space-y-1">
+                <span className="text-xs uppercase tracking-wide text-gray-500">Model</span>
+                <input
+                  value={setupDraft.model}
+                  onChange={(e) =>
+                    setSetupDraft((prev) => (prev ? { ...prev, model: e.target.value } : prev))
+                  }
+                  className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                />
+              </label>
+            </div>
+
+            {setupDraft.accessMode === 'deepseek' ? (
+              <label className="space-y-1">
+                <span className="text-xs uppercase tracking-wide text-gray-500">API key</span>
+                <input
+                  value={setupDraft.apiKey}
+                  onChange={(e) =>
+                    setSetupDraft((prev) => (prev ? { ...prev, apiKey: e.target.value } : prev))
+                  }
+                  placeholder={setupDraft.hasExistingApiKey ? 'Already configured' : 'sk-...'}
+                  className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                />
+              </label>
+            ) : null}
+          </div>
+
+          <div className="bg-gray-900 rounded-xl border border-gray-800 p-5 space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-white">Channels</h3>
+              <p className="text-sm text-gray-400 mt-1">
+                Telegram should be configurable here, not only through raw config.
+              </p>
+            </div>
+
+            <label className="flex items-center gap-2 text-sm text-white">
+              <input
+                type="checkbox"
+                checked={setupDraft.telegramEnabled}
+                onChange={(e) =>
+                  setSetupDraft((prev) =>
+                    prev ? { ...prev, telegramEnabled: e.target.checked } : prev,
+                  )
+                }
+                className="rounded"
+              />
+              Enable Telegram
+            </label>
+
+            {setupDraft.telegramEnabled ? (
+              <div className="grid gap-4">
+                <label className="space-y-1">
+                  <span className="text-xs uppercase tracking-wide text-gray-500">Bot token</span>
+                  <input
+                    value={setupDraft.telegramBotToken}
+                    onChange={(e) =>
+                      setSetupDraft((prev) =>
+                        prev ? { ...prev, telegramBotToken: e.target.value } : prev,
+                      )
+                    }
+                    placeholder={setupDraft.hasExistingTelegramToken ? 'Already configured' : '123456:ABC...'}
+                    className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </label>
+
+                <label className="space-y-1">
+                  <span className="text-xs uppercase tracking-wide text-gray-500">Allowed users</span>
+                  <input
+                    value={setupDraft.telegramAllowedUsers}
+                    onChange={(e) =>
+                      setSetupDraft((prev) =>
+                        prev ? { ...prev, telegramAllowedUsers: e.target.value } : prev,
+                      )
+                    }
+                    placeholder="1703898290, 123456789"
+                    className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
+                  />
+                </label>
+              </div>
+            ) : null}
+
+            <button
+              onClick={handleSaveSetup}
+              disabled={saving}
+              className="flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-50"
+            >
+              <Save className="h-4 w-4" />
+              {saving ? 'Saving...' : 'Save Runtime Setup'}
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-800 bg-gray-800/50">

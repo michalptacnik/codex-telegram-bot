@@ -6,11 +6,14 @@ import {
   bootstrapOnboarding,
   completeOnboarding,
   createAgent,
+  getConfig,
   getAgents,
   getClasses,
   getOnboardingState,
+  putConfig,
   updateAgent,
 } from '@/lib/api';
+import { getStarterClassesFallback } from '@/lib/starterClasses';
 import {
   MacBadge,
   MacEmptyState,
@@ -114,6 +117,7 @@ export default function Studio() {
   const [activeAgentId, setActiveAgentId] = useState('');
   const [bootstrap, setBootstrap] = useState<OnboardingBootstrapResponse | null>(null);
   const [draft, setDraft] = useState<AgentProfile>(defaultProfile());
+  const [configText, setConfigText] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [rosterQuery, setRosterQuery] = useState('');
@@ -121,12 +125,18 @@ export default function Studio() {
   const wizardRequested = searchParams.get('new') === '1';
 
   useEffect(() => {
-    Promise.all([bootstrapOnboarding(), getClasses(), getAgents()])
-      .then(([state, classList, agentList]) => {
+    Promise.all([
+      bootstrapOnboarding(),
+      getClasses().catch(() => getStarterClassesFallback()),
+      getAgents(),
+      getConfig().catch(() => null),
+    ])
+      .then(([state, classList, agentList, configValue]) => {
         setBootstrap(state);
         setClasses(classList);
         setAgents(agentList.profiles);
         setActiveAgentId(agentList.active_agent_id);
+        setConfigText(typeof configValue === 'string' ? configValue : null);
         setDraft(defaultProfile());
         setStage(wizardRequested ? 'wizard' : state.onboarding.completed ? 'studio' : 'intro');
       })
@@ -432,6 +442,11 @@ export default function Studio() {
           }}
           bootstrap={bootstrap}
           mode="studio"
+          configText={configText}
+          onSaveConfig={async (nextConfig) => {
+            await putConfig(nextConfig);
+            setConfigText(nextConfig);
+          }}
         />
       ) : null}
 
